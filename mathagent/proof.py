@@ -15,6 +15,7 @@ import time
 from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import ProofStore, LedgerError
+from .proof_artifacts import is_artifact_basename, read_artifact_page
 from .prompts import SYSTEM
 from .tools import schema
 
@@ -101,7 +102,7 @@ class ProofRunner:
         settings = {'max_rounds': max_rounds, 'max_tokens': max_tokens,
                     'max_seconds': max_seconds, 'model': self.agent.model,
                     'ctx': self.agent.ctx, 'predict': self.agent.predict,
-                    'max_predict': max_predict, 'policy_version': 2,
+                    'max_predict': max_predict, 'policy_version': 3,
                     'harness_version': '0.4.0',
                     'allow_literature': bool(allow_literature),
                     'policy_sha256': hashlib.sha256(Path(__file__).with_name('proof_policy.py').read_bytes()).hexdigest(),
@@ -238,7 +239,22 @@ class ProofRunner:
                         if 'critique' not in p:
                             p['critique'] = self._critic(draft)
                             self._save()
-                        review = self._review(draft, p['critique'])
+                        review = self._review_with_repair(draft, p['critique'], p)
+                        if review is None:
+                            self.state['status'] = 'stalled'
+                            self.state['protocol_error'] = {
+                                'stage': 'recorder', 'round': p['index'],
+                                'attempts': p['recorder_attempts'],
+                                'errors': p['recorder_protocol_errors'],
+                                'candidate': p['draft'],
+                            }
+                            self.state['stop_reason'] = (
+                                'Recorder protocol failed after one bounded correction attempt. '
+                                'This is a bookkeeping failure, not a mathematical verdict. '
+                                'The original candidate and independent critique are retained; '
+                                'no further solver work was started. ' + '; '.join(p['recorder_protocol_errors']))
+                            self._save()
+                            break
                         snapshot = copy.deepcopy(self.state)
                         try:
                             claims = self._record_batch(review, p, draft)
@@ -334,6 +350,11 @@ class ProofRunner:
                       if k not in {'next_task', 'review_artifact', 'candidate_artifact'}}
                      for c in selected] if recording else selected
             prompt += '\n'.join(json.dumps(c, ensure_ascii=False) for c in views)
+            if retrieval and any(c.get('candidate_artifact') or c.get('review_artifact') for c in selected):
+                prompt += ('\nARTIFACT ACCESS: candidate_artifact and review_artifact are saved proof artifact filenames, '
+                           'not workspace paths. Their mathematical arguments are already in these records. '
+                           'If additional evidence is needed, call read_proof_artifact(filename=...) for normalized content '
+                           'and follow next_offset when present. Do not search for them with list_files or read_file.')
             if omitted:
                 prompt += '\nRecords omitted from working context: ' + ', '.join(omitted)
                 prompt += ('. Use read_proof_claim to inspect them before relying on them or claiming an objection is resolved.' if retrieval
@@ -385,8 +406,14 @@ class ProofRunner:
             tools = [s for s in tools if s['function']['name'] not in research_names]
         tools.append(schema('read_proof_claim', 'Read an exact saved claim with argument, status, dependencies and objections.',
                             {'claim_id': {'type': 'string'}, 'offset': {'type': 'integer'}}, ['claim_id']))
-        tools.append(schema('read_proof_artifact', 'Read up to 6000 characters of a prior artifact. Use next_offset for more.',
-                            {'filename': {'type': 'string'}, 'offset': {'type': 'integer'}}, ['filename']))
+        tools.append(schema('read_proof_artifact',
+                            'Read a saved proof artifact by exact basename. Returns written candidate text or decoded review JSON, not transport events. '
+                            'Use next_offset for more (6000 characters per page). Set raw=true only for transport diagnostics; offsets then refer to stored text.',
+                            {'filename': {'type': 'string'}, 'offset': {'type': 'integer'},
+                             'raw': {'type': 'boolean'}}, ['filename']))
+        for tool in tools:
+            if tool['function']['name'] == 'read_file':
+                tool['function']['description'] += ' Saved proof artifacts use read_proof_artifact(filename), not workspace paths.'
         return tools
 
     @staticmethod
@@ -407,7 +434,7 @@ class ProofRunner:
             claim = next((c for c in self.state['claims'] if c['id'] == args.get('claim_id')), None)
             return self._excerpt(json.dumps(claim, ensure_ascii=False), args.get('offset', 0)) if claim else 'Unknown proof claim'
         if name == 'read_proof_artifact':
-            return self._excerpt(self.store.read_artifact(args.get('filename', '')), args.get('offset', 0))
+            return read_artifact_page(self.store, args.get('filename', ''), args.get('offset', 0), raw=args.get('raw', False))
         if name not in {s['function']['name'] for s in self._tools()}:
             return 'Unknown or disabled proof tool'
         if name == 'read_file' and 'path' in args:
@@ -419,6 +446,17 @@ class ProofRunner:
             # This also keeps a pinned source readable after deletion.
             src = next((s for s in self.state['sources'] if s['path'] == logical), None)
             if src is None:
+                # Correct the observed basename/tool mix-up without exposing
+                # hidden directories or replacing actual workspace files.
+                filename = args['path']
+                if (is_artifact_basename(filename)
+                        and not (self.agent.workspace.root / filename).exists()
+                        and not (self.agent.workspace.root / filename).is_symlink()
+                        and (self.store.directory / 'artifacts' / filename).exists()):
+                    page = json.loads(read_artifact_page(self.store, filename))
+                    page['routed_from'] = 'read_file'
+                    page['notice'] += ' This is a saved proof artifact. Continue with read_proof_artifact(filename, offset=next_offset).'
+                    return json.dumps(page, ensure_ascii=False)
                 resolved = str(self.agent.workspace.path(str(requested)).relative_to(self.agent.workspace.root))
                 src = next((s for s in self.state['sources'] if s.get('resolved_path', s['path']) == resolved), None)
             if src:
@@ -538,7 +576,9 @@ class ProofRunner:
         request_file = self.store.write_artifact(role + '-request', json.dumps(payload, ensure_ascii=False))
         stream_file = self.store.start_stream(role)
         call = {'role': role, 'round': self.state['rounds_started'], 'status': 'running',
-                'reserved_tokens': cap, 'stream': stream_file, 'request': request_file}
+                'reserved_tokens': cap, 'stream': stream_file, 'request': request_file,
+                'policy_version': 3,
+                'policy_sha256': hashlib.sha256(Path(__file__).with_name('proof_policy.py').read_bytes()).hexdigest()}
         self.state['calls'].append(call)
         self.state['tokens_charged'] += cap  # reserve BEFORE dispatch, survives crashes
         self._save()
@@ -663,24 +703,129 @@ class ProofRunner:
             result['complete_candidate'] = False
         return result
 
-    def _review(self, draft, critique):
+    def _review(self, draft, critique, *, repair=None):
         cap = min(3072, self.agent.ctx // 3)
         prefix = 'FRESH INDEPENDENT CRITIQUE:\n' + json.dumps(critique, ensure_ascii=False)
+        if repair is not None:
+            prefix += ('\nRECORDER PROTOCOL CORRECTION (same candidate and critique; no new proof search):\n'
+                + json.dumps(repair, ensure_ascii=False)
+                + '\nCorrect only the recording errors. Preserve the actual argument and all mathematical '
+                'objections. Never invent reference IDs, silently remove a needed dependency, or assert '
+                'that an old objection is resolved merely to pass validation. A supported repeated claim '
+                'must explicitly explain how the CURRENT candidate answers each cited old objection; '
+                'otherwise retain it as gap or uncertain. Claims in this batch have no IDs yet: use '
+                'self-contained arguments, or retain an unresolved obligation. Return the complete corrected batch.')
         material, clipped = self._excerpt_for_call(draft['text'] or draft['thinking'], REVIEW_POLICY, prefix, cap, REVIEW_BATCH_SCHEMA)
         label = 'WRITTEN CANDIDATE' if draft['complete'] and draft['text'] else 'INCOMPLETE ATTEMPT'
         try:
             review = self._json_call('recorder', REVIEW_POLICY,
                 label + '\n' + material + '\n' + prefix, REVIEW_BATCH_SCHEMA, cap=cap)
+        except LedgerError:
+            raise  # Storage failures are not malformed model responses.
         except (json.JSONDecodeError, ValueError) as exc:
             review = {'claims': [], 'complete_candidate': False,
-                      'next_task': 'Write one short, precise intermediate claim with a self-contained argument; the ledger response was invalid.',
+                      'next_task': 'Correct the invalid recorder response while retaining the current candidate.',
                       'strategy_summary': 'No valid ledger checkpoint: ' + str(exc),
+                      '_protocol_error': str(exc),
                       '_visible_claims': []}
         if clipped or not draft['complete'] or not draft['text'] or not critique['complete_candidate']:
             review['complete_candidate'] = False
         return review
 
+    def _review_protocol_errors(self, review, critique):
+        """Find malformed recording references without deciding mathematical truth.
+
+        Check against the pre-batch ledger and the context this recorder saw.
+        Known but unproved dependencies remain mathematical gaps handled by
+        _record; a fresh critic's objections also retain their existing path.
+        """
+        if review.get('_protocol_error'):
+            return ['Invalid recorder JSON: ' + review['_protocol_error']]
+        if review['complete_candidate'] and not review['claims']:
+            return ['A complete-candidate batch must record its self-contained supporting argument; claims is empty.']
+        existing = {c['id']: c for c in self.state['claims']}
+        visible = set(review.get('_visible_claims', []))
+        errors = []
+        for index, item in enumerate(review['claims']):
+            label = f'claims[{index}]'
+            for field in ('dependencies', 'resolves'):
+                for reference in item[field]:
+                    if reference not in existing:
+                        errors.append(f'{label}.{field}: {reference} is not an existing record ID; '
+                                      'new claims in this batch have no IDs yet.')
+                    elif reference not in visible:
+                        errors.append(f'{label}.{field}: {reference} was not available in this recorder context; '
+                                      'its argument or objection cannot be approved unseen.')
+            if item['resolves'] and not item['resolution'].strip():
+                errors.append(f'{label}.resolution: explicitly explain the repair of the cited old objections, '
+                              'or retain the claim as unresolved without asserting their resolution.')
+            # Do not reinterpret a real current objection as a protocol error.
+            supported = (item['disposition'] == 'supported' and not item['objection'].strip()
+                         and item['argument'].strip() and item['critical_claim'].strip())
+            critic_rejected = (critique['first_invalid_step'].strip()
+                and _normal(item['critical_claim']) == _normal(critique['first_invalid_step']))
+            if supported and not critic_rejected:
+                blocked = [c['id'] for c in self.state['claims']
+                    if c['status'] in {'gap', 'refuted'}
+                    and _normal(c['statement']) == _normal(item['critical_claim'])
+                    and c['id'] not in item['resolves']]
+                if blocked:
+                    errors.append(f'{label}.resolves: the same claim has unresolved recorded objections '
+                        f'({", ".join(blocked)}). Cite and explicitly answer them from the current candidate '
+                        'only if they were inspected; otherwise record a gap or uncertainty.')
+        return errors
+
+    def _review_with_repair(self, draft, critique, pending):
+        """At most two recorder dispatches, durably bounded across resume.
+
+        Never commit a malformed batch, restart the solver to repair metadata,
+        or manufacture a resolution. Uncommitted/interrupted recorder output
+        consumes its attempt; the original solver and critic are kept intact.
+        """
+        pending.setdefault('recorder_attempts', sum(
+            call['role'] == 'recorder' and call['round'] == pending['index']
+            for call in self.state['calls']))
+        while True:
+            review = pending.get('recorder_review')
+            if review is not None:
+                errors = self._review_protocol_errors(review, critique)
+                if not errors:
+                    return review
+            elif pending['recorder_attempts']:
+                errors = ['The previous recorder request did not leave a committed valid response.']
+            else:
+                errors = []
+            pending['recorder_protocol_errors'] = errors
+            if pending['recorder_attempts'] >= 2:
+                return None
+            repair = None
+            if pending['recorder_attempts']:
+                repair = {'errors': errors, 'previous_claims': [
+                    {key: item[key] for key in ('critical_claim', 'dependencies', 'resolves', 'resolution', 'disposition')}
+                    for item in (review or {}).get('claims', [])]}
+                pending.setdefault('recorder_rejections', []).append({
+                    'attempt': pending['recorder_attempts'],
+                    'artifact': (review or {}).get('_artifact'), 'errors': errors,
+                })
+            pending.pop('recorder_review', None)
+            pending['recorder_attempts'] += 1
+            self._save()  # Persist the bound before any model dispatch.
+            calls_before = len(self.state['calls'])
+            try:
+                pending['recorder_review'] = self._review(draft, critique, repair=repair)
+            except BaseException:
+                if len(self.state['calls']) == calls_before:
+                    # Context construction may fail before a request is even
+                    # reserved. It should not consume a recorder attempt.
+                    pending['recorder_attempts'] -= 1
+                    self._save()
+                raise
+            self._save()
+
     def _record_batch(self, review, pending, draft):
+        errors = self._review_protocol_errors(review, pending['critique'])
+        if errors:
+            raise ValueError('Cannot commit malformed recorder batch: ' + '; '.join(errors))
         before_stagnant = self.state['stagnant_rounds']
         previous_task = self.state['next_task']
         items = list(review['claims'])
@@ -877,8 +1022,23 @@ class ProofRunner:
         report = self._report()
         self.store.write_report(report)
         self.store.write_ledger(self._report(detailed=True))
+        proof = self._completed_proof()
+        if proof is not None:
+            self.store.write_proof(proof)
+
+    def _completed_proof(self):
+        audit = self.state.get('final_audit')
+        if self.state['status'] != 'candidate_complete' or not audit or not audit.get('candidate'):
+            return None
+        draft = json.loads(self.store.read_artifact(audit['candidate']))
+        # Export exactly the audited candidate. Editing after its audit, even
+        # to remove apparent chatter, could change a mathematical qualification.
+        return draft['text']
 
     def _result(self):
         self._write_reports()
+        proof = self._completed_proof()
         return {'id': self.state['id'], 'status': self.state['status'],
-                'report': self._report(), 'directory': str(self.store.directory)}
+                'report': self._report(), 'directory': str(self.store.directory),
+                'proof': proof,
+                'proof_path': str(self.store.directory / 'proof.md') if proof is not None else None}

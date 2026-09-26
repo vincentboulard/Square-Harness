@@ -372,6 +372,11 @@ def _branch_result(job):
         if state.get('recovery_notice'):
             raise ValueError('Recovered backup cannot establish the latest budget reservation')
         result.update(proof_id=state['id'], proof_status=state['status'], calls=state['calls'])
+        if state.get('protocol_error'):
+            # Retain any written candidate for inspection, but never hide a
+            # bookkeeping failure behind a selector's mathematical verdict.
+            result.update(status='failed', protocol_error=state['protocol_error'],
+                          error=state.get('stop_reason') or 'Recorder protocol repair failed')
         result.update(_usage(state['calls']))
         result['tokens_charged'] = state['tokens_charged']
         if (state['tokens_charged'] > job['token_budget'] or state['status'] == 'budget_violation'
@@ -520,6 +525,15 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
                 state['answer_path'] = str(answer)
         else:
             state['status'] = 'time_exhausted'
+        workflow_errors = [f'{branch["id"]}: ' + (branch.get('error') or 'Recorder protocol repair failed')
+                           for branch in state['branches'] if branch.get('protocol_error')]
+        if workflow_errors:
+            state['workflow_errors'] = workflow_errors
+            if state['status'] != 'budget_violation':
+                # Selection can still inspect a retained written candidate,
+                # but its verdict must not erase a failed branch workflow.
+                state.update(workflow_status=state['status'], status='error',
+                             error='; '.join(workflow_errors))
         return state
     except BaseException:
         interrupted = True

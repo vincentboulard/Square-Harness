@@ -343,7 +343,9 @@ def _sequential(agent, goal, path, args):
                'proof_directory': result['directory']}
     if states:
         outcome['stop_reason'] = state.get('stop_reason')
-        if state['status'] in {'paused', 'interrupted', 'error', 'needs_recovery', 'budget_violation'}:
+        if state.get('protocol_error'):
+            outcome['protocol_error'] = state['protocol_error']
+        if state.get('protocol_error') or state['status'] in {'paused', 'interrupted', 'error', 'needs_recovery', 'budget_violation'}:
             outcome.update(status='error', error=state.get('stop_reason') or 'Proof execution did not complete')
     return outcome
 
@@ -428,7 +430,7 @@ def run_job(job, output, args, gate):
         if record['status'] == 'budget_violation':
             execution_errors.append(record.get('error') or 'Server exceeded the reserved output allowance')
         if execution_errors:
-            record.update(workflow_status=record['status'], status='error', execution_errors=execution_errors,
+            record.update(workflow_status=record.get('workflow_status', record['status']), status='error', execution_errors=execution_errors,
                           error='; '.join(execution_errors))
         answer = Path(record['answer_path']) if record.get('answer_path') else None
         if answer and answer.is_file():

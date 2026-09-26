@@ -88,8 +88,20 @@ python -m mathagent.benchmark \
   --manifest /srv/square/smoke-statements/manifest.json \
   --output /srv/square/runs/smoke-001 \
   --backend llamacpp --host http://127.0.0.1:8000 --model square-qwen \
+  --arms sequential --ctx 32768 --tokens 6000 --selection-tokens 1536 \
+  --predict 2048 --max-predict 2048 --rounds 2 --seconds 600 \
+  --workers 1 --max-in-flight 1 \
   --dry-run
 ```
+
+After the serving acceptance checks pass, remove `--dry-run` to run this bounded
+development check: two sequential jobs, at most 12,000 generated tokens in total.
+It exercises the proof workflow, not the three-method scientific comparison.
+A tight cap may legitimately leave a toy unfinished; inspect its diagnostics
+before choosing a separately recorded budget for another run. Do not use the
+60,000-token scored profile as the default installation test. Test portfolios
+separately after this check passes, using an explicit budget and a new output
+directory. No smoke run automatically launches the scored benchmark.
 
 The context preflight uses a conservative byte estimate, not the checkpoint's
 exact tokenizer. The GPU smoke run must verify actual server context handling,
@@ -157,6 +169,9 @@ predeclared last written candidate; full partial text is retained when no
 complete draft exists. All original artifacts remain available for inspection.
 
 Caps are maxima, not targets: the runner never burns unused tokens artificially.
+Recorder-only protocol corrections are charged to those same caps. Exhausted
+protocol recovery is an execution error, not a mathematical failure or success;
+the candidate, raw responses and correction diagnostics remain available.
 Measured completion tokens include thinking. Missing or interrupted usage is
 charged conservatively at the request's reserved output allowance, reported
 separately from measured tokens. Input tokens, request counts and wall times are

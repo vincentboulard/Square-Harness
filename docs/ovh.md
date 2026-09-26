@@ -130,18 +130,27 @@ serving profile and acceptance test, while preserving three logical branches.
 
 ## Rehearse, then run the same pilot
 
-Create a tiny synthetic statement dataset and rehearse all three arms:
+Create a tiny synthetic dataset and first check one harness search per problem:
 
 ```bash
 python -m mathagent.benchmark --init-smoke "$HOME/square-data/smoke-statements"
-python scripts/run-v100-benchmark.py \
+python -m mathagent.benchmark \
   --manifest "$HOME/square-data/smoke-statements/manifest.json" \
-  --output "$HOME/square-runs/rehearsal-q8-001" \
-  --acceptance "$HOME/square-runs/server/acceptance.json"
+  --output "$HOME/square-runs/development-q8-001" \
+  --backend llamacpp --host http://127.0.0.1:8000 --model square-qwen \
+  --arms sequential --ctx 32768 --tokens 6000 --selection-tokens 1536 \
+  --predict 2048 --max-predict 2048 --rounds 2 --seconds 600 \
+  --workers 1 --max-in-flight 1
 ```
 
-Inspect the outputs for transport/context errors. Use this rehearsal to check
-elapsed times. The wrapper uses generous guards: 14,400 seconds per job, 7,200
+This reduced development check is capped at 12,000 generated tokens across two
+jobs; it does not measure the full three-method comparison. Inspect transport,
+context, recorder diagnostics and `proof.md` before testing a bounded portfolio
+separately. An unfinished toy is a diagnostic to inspect, not a reason to launch
+the scored benchmark automatically. Keep the serving acceptance report for the
+scored wrapper below.
+
+The scored wrapper uses generous guards: 14,400 seconds per job, 7,200
 per request, and up to 1,800 reserved for selection. These are upper bounds, not
 runtime estimates. Fix any changed guards on synthetic inputs and use them
 consistently for every arm. No unused token allowance is consumed artificially.

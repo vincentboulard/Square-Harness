@@ -85,9 +85,16 @@ proposed ideas separate from established steps. Do not force a complete proof.
 If successful, provide a concise self-contained proof of the complete original
 statement, including required endpoint or limiting cases. Do not replace steps
 by ledger references or append unrelated extensions and repeated summaries.
+Keep the final written answer mathematical: the statement, proof, and any real
+unresolved obligations. Omit internal ledger administration, artifact inventories,
+tool transcripts, and requests to trigger the next workflow stage. The controller
+saves that audit trail separately. Do not omit mathematical caveats for brevity.
 Use files and computations when useful; numerical agreement is not proof.
 Original source snapshots below have already been read in full. Avoid redundant
 file reads or unrelated listings when the supplied material suffices.
+Proof records below include their arguments. Read a proof artifact only when
+specific missing evidence is needed; use read_proof_artifact for saved artifact
+filenames, never read_file or list_files to locate internal proof storage.
 """
 
 CRITIC_POLICY = """Independently check the supplied written mathematical attempt
@@ -119,6 +126,8 @@ over a prose summary. For a partial attempt, do not record the entire original
 theorem as the sole claim: preserve useful justified steps separately from the
 specific step still missing. If no useful step is established, record the
 precise obstruction as gap or uncertain. Do not invent intermediate results.
+For a short complete proof, prefer one self-contained record over splitting
+elementary transformations into separate claims requiring cross-references.
 Record what the CURRENT attempt adds or changes. Historical records provide
 reference IDs and evidence; they are not a template to copy. Omit unchanged old
 claims. Compare the current derivation and fresh critic's valid steps with the
@@ -142,6 +151,12 @@ Do not invent IDs for other new records in this batch; include their needed
 reasoning explicitly. resolves lists only existing objection IDs explicitly
 answered, with resolution explaining how each is answered. Preserve unanswered
 objections and the limitations of numerical evidence.
+Use only IDs visible in the supplied historical records. When a new argument
+supports a previously disputed statement, name each objection it answers in
+resolves and explain the repair in resolution; otherwise retain gap or uncertain.
+If the controller requests a recorder correction, correct these records against
+the same written candidate and critique. Do not invent a new mathematical proof
+or silently remove a needed dependency to obtain approval.
 new_progress means useful newly supported work or a newly evidenced obstruction,
 not more prose, renamed approaches or repetition. Set every per-claim
 complete_candidate to false; the batch field alone describes completeness.
@@ -151,7 +166,9 @@ Truncated scratch thinking alone is never a complete candidate.
 strategy_summary briefly names what the attempt actually tried and where it
 reached. next_task specifies one concrete next obligation or different task
 toward the ORIGINAL goal, not a generalization or a request to repeat a failed
-derivation unchanged. If complete, request the full audit. Keep records concise.
+derivation unchanged. If complete, leave next_task empty; the controller schedules
+the full audit itself. Never assign ledger maintenance or audit triggering as a
+new mathematical solver task. Keep records concise.
 """
 
 AUDIT_POLICY = """Audit the WHOLE candidate against the ORIGINAL theorem.

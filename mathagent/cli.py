@@ -287,7 +287,12 @@ def main():
         nonlocal last_proof_id
         last_proof_id = result['id']
         ui.say(f'\nProof {result["id"]} · {result["status"]}')
-        ui.say(result['report'])
+        if result.get('proof') is not None and result['status'] == 'candidate_complete':
+            ui.say(result['proof'])
+            ui.say('Model-audited candidate; independent mathematical checking is still needed.')
+            ui.say(f'Proof text: {result["proof_path"]}')
+        else:
+            ui.say(result['report'])
         ui.say(f'Debrief: {Path(result["directory"]) / "report.md"}')
         if result['status'] in {'ready', 'active', 'running', 'paused', 'interrupted', 'error', 'pending'}:
             ui.say(f'Saved job: /resume {result["id"]} (uses the remaining original budget)')
@@ -340,6 +345,8 @@ def main():
                 ui.say(f'Parallel proof portfolio: {result["status"]}\nSaved work: {directory}\n'
                        f'{answer_notice}\n'
                        'Selection is a model judgment, not formal verification. Parent portfolios are not automatically resumed.')
+                if result.get('error'):
+                    ui.say('Workflow error: ' + result['error'])
                 return
             proof_running = True
             options = {}

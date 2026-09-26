@@ -302,14 +302,15 @@ class ProofRecoveryTests(unittest.TestCase):
         self.assertEqual(paused.state['pending']['phase'], 'review')
         self.assertEqual(paused.state['claims'], [])
         self.assertEqual(paused.state['stagnant_rounds'], 0)
-        resumed = ScriptedClient([[done(json.dumps(review(complete=True, two_claims=True)))],
-                                  [done(json.dumps(AUDIT))]])
+        # The valid recorder response was committed before ledger mutation;
+        # retry only the atomic local batch, without paying for another call.
+        resumed = ScriptedClient([[done(json.dumps(AUDIT))]])
         result = self.runner(resumed).resume(paused.state['id'])
         final = ProofStore.load(self.root, paused.state['id'])
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual([claim['id'] for claim in final.state['claims']], ['C1', 'C2'])
         self.assertEqual([call['role'] for call in final.state['calls']],
-                         ['solver', 'critic', 'recorder', 'recorder', 'auditor'])
+                         ['solver', 'critic', 'recorder', 'auditor'])
         self.assertEqual(final.state['rounds_started'], 1)
 
     def seeded_phase(self, phase, role, *, done_before_commit=False):

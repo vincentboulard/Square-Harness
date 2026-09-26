@@ -295,6 +295,24 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result['reserved_unmeasured_tokens'], self.args.predict)
         self.assertEqual(Path(result['answer_path']).read_text(), '')
 
+    def test_recorder_failure_keeps_candidate_and_error_in_benchmark(self):
+        from test_proof import FakeClient as ProofClient, response, critic, batch, review
+        data, _ = benchmark.preflight(self.args)
+        output = self.root / 'runs'
+        output.mkdir()
+        invalid = batch(review(dependencies=['C1']))
+        client = ProofClient([response('For every real x, reflexivity gives x=x.'),
+                              response(critic()), response(invalid), response(invalid)])
+        client.backend = 'ollama'
+        with patch.object(benchmark, 'create_client', return_value=client):
+            result = benchmark.run_job((data['problems'][0], 'sequential', 0, 8), output, self.args, None)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(result['proof_status'], 'stalled')
+        self.assertEqual(result['protocol_error']['stage'], 'recorder')
+        self.assertEqual(result['request_count'], 4)
+        self.assertEqual(result['tokens_charged'], 40)
+        self.assertEqual(Path(result['answer_path']).read_text(), 'For every real x, reflexivity gives x=x.')
+
     def test_failed_parallel_branches_preserve_error_denominator_and_export(self):
         data, _ = benchmark.preflight(self.args)
         output = self.root / 'runs'

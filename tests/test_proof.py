@@ -127,11 +127,14 @@ class ProofControllerTests(unittest.TestCase):
         bad = review(disposition='refuted', objection='This derivation uses an extra assumption.',
                      evidence='It assumes x>0 although x=0 is allowed.', complete_candidate=False)
         runner = self.runner([response('An attempted proof.'), response(critic()), response(batch(bad)),
-                              response('I now assert the same conclusion.'), response(critic()), response(batch())])
+                              response('I now assert the same conclusion.'), response(critic()),
+                              response(batch()), response(batch())])
         runner.start('Prove x=x.', max_rounds=2)
-        self.assertEqual([c['status'] for c in runner.state['claims']], ['refuted', 'gap'])
-        self.assertIn('did not explicitly answer', runner.state['claims'][1]['objection'])
-        self.assertEqual(len(self.client.requests), 6)
+        self.assertEqual([c['status'] for c in runner.state['claims']], ['refuted'])
+        self.assertEqual(runner.state['status'], 'stalled')
+        self.assertIn('unresolved recorded objections', runner.state['stop_reason'])
+        self.assertIsNone(runner.state['final_audit'])
+        self.assertEqual(len(self.client.requests), 7)
 
     def test_explicit_repair_is_new_record_old_objection_is_preserved(self):
         bad = review(disposition='gap', objection='The argument assumes positivity.',
@@ -168,10 +171,11 @@ class ProofControllerTests(unittest.TestCase):
         for verdict in (response('{incomplete'), response(batch(), complete=False),
                         response(batch(complete_candidate='true'))):
             with self.subTest(verdict=verdict):
-                runner = self.runner([response('Some proof.'), response(critic()), verdict])
+                runner = self.runner([response('Some proof.'), response(critic()), verdict, verdict])
                 result = runner.start('Prove x=x.', max_rounds=1)
-                self.assertEqual(result['status'], 'budget_exhausted')
-                self.assertEqual(runner.state['claims'][0]['status'], 'uncertain')
+                self.assertEqual(result['status'], 'stalled')
+                self.assertEqual(runner.state['claims'], [])
+                self.assertIn('Invalid recorder JSON', runner.state['stop_reason'])
                 self.assertIsNone(runner.state['final_audit'])
 
     def test_empty_or_contradictory_audit_cannot_complete(self):
@@ -188,9 +192,17 @@ class ProofControllerTests(unittest.TestCase):
                    review(disposition='refuted', objection='Maybe false.', evidence='')]
         for value in invalid:
             with self.subTest(value=value):
-                runner = self.runner([response('Attempt.'), response(critic()), response(batch(value))])
+                invalid_references = bool(value['dependencies'] or value['resolves'])
+                replies = [response('Attempt.'), response(critic()), response(batch(value))]
+                if invalid_references:
+                    replies.append(response(batch(value)))
+                runner = self.runner(replies)
                 runner.start('Prove x=x.', max_rounds=1)
-                self.assertEqual(runner.state['claims'][0]['status'], 'gap')
+                if invalid_references:
+                    self.assertEqual(runner.state['status'], 'stalled')
+                    self.assertEqual(runner.state['claims'], [])
+                else:
+                    self.assertEqual(runner.state['claims'][0]['status'], 'gap')
                 self.assertIsNone(runner.state['final_audit'])
 
     def test_separate_atomic_results_survive_with_the_remaining_obligation(self):

@@ -221,6 +221,19 @@ class BranchInspectionTests(unittest.TestCase):
         self.store(complete=False)
         self.assertIsNone(_branch_result(self.job)['candidate'])
 
+    def test_recorder_protocol_failure_keeps_candidate_but_marks_branch_failed(self):
+        store = self.store()
+        store.state.update(status='stalled', stop_reason='Recorder repair failed.',
+                           protocol_error={'stage': 'recorder', 'round': 1, 'attempts': 2})
+        store.save()
+        result = _branch_result(self.job)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['proof_status'], 'stalled')
+        self.assertEqual(result['error'], 'Recorder repair failed.')
+        self.assertEqual(result['protocol_error']['attempts'], 2)
+        self.assertEqual(result['candidate']['text'], PROOF)
+        self.assertEqual(result['tokens_charged'], 100)
+
     def test_overspend_is_not_selected_even_with_complete_draft(self):
         self.store(tokens=1001)
         result = _branch_result(self.job)
@@ -267,6 +280,55 @@ class BranchInspectionTests(unittest.TestCase):
 
 
 class PortfolioCancellationTests(unittest.TestCase):
+    def test_selector_approval_cannot_hide_recorder_failure_or_override_budget_violation(self):
+        for selection_status in ('selected_model_approved', 'budget_violation'):
+            with self.subTest(selection_status=selection_status), tempfile.TemporaryDirectory() as root:
+                agent = Agent(Ollama(), Workspace(root), predict=256)
+                result_dir = Path(root) / 'portfolio'
+                process = mock.Mock()
+                process.is_alive.return_value = False
+                context = mock.Mock()
+                context.Process.return_value = process
+                branch = {'id': 'branch-000', 'status': 'failed',
+                          'protocol_error': {'stage': 'recorder', 'attempts': 2},
+                          'error': 'Recorder repair failed.',
+                          'candidate': {'id': 'branch-000', 'text': PROOF, 'complete': True},
+                          'tokens_charged': 10, 'measured_completion_tokens': 10,
+                          'prompt_tokens': 5, 'reserved_unmeasured_tokens': 0}
+
+                def selector(*args, output_dir, candidates, **kwargs):
+                    self.assertEqual(candidates, [branch['candidate']])
+                    Path(output_dir).mkdir()
+                    answer = Path(output_dir) / 'answer.md'
+                    approved = selection_status == 'selected_model_approved'
+                    if approved:
+                        answer.write_text(PROOF)
+                    return {'status': selection_status, 'selected_id': 'branch-000' if approved else None,
+                            'selected_status': 'complete' if approved else None,
+                            'answer_path': str(answer) if approved else None,
+                            'tokens_charged': 13, 'measured_completion_tokens': 13,
+                            'prompt_tokens': 7, 'reserved_unmeasured_tokens': 0}
+
+                with mock.patch('mathagent.portfolio.multiprocessing.get_context', return_value=context), \
+                        mock.patch('mathagent.portfolio._branch_result', return_value=branch), \
+                        mock.patch('mathagent.portfolio.select_candidates', side_effect=selector):
+                    result = run_proof_portfolio(agent, 'Prove x=x.', output_dir=result_dir,
+                        workers=1, max_tokens=2000, selection_tokens=512, max_predict=512)
+                self.assertEqual(result['workflow_errors'], ['branch-000: Recorder repair failed.'])
+                self.assertEqual(result['status'], 'error' if selection_status == 'selected_model_approved'
+                                 else 'budget_violation')
+                if selection_status == 'selected_model_approved':
+                    self.assertEqual(result['workflow_status'], selection_status)
+                    self.assertIn('Recorder repair failed.', result['error'])
+                    self.assertEqual(Path(result['answer_path']).read_text(), PROOF)
+                else:
+                    self.assertIsNone(result['answer_path'])
+                self.assertEqual(result['selection']['status'], selection_status)
+                self.assertEqual(result['tokens_charged'], 23)
+                saved = json.loads((result_dir / 'state.json').read_text())
+                self.assertEqual(saved['workflow_errors'], result['workflow_errors'])
+                self.assertEqual(saved['status'], result['status'])
+
     def test_exhausted_request_gate_times_out_before_dispatch(self):
         client = Client([])
         gate = mock.Mock()

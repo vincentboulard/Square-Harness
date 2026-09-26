@@ -59,6 +59,16 @@ class ProofCliTests(unittest.TestCase):
                     self.run_cli(['--proof-workers', '3', '--proof-branch-concurrency', concurrency])
         self.client.models.assert_not_called()
 
+    def test_portfolio_protocol_failure_is_explained_even_with_selected_answer(self):
+        result = {'status': 'error', 'workflow_status': 'selected_model_approved',
+                  'answer_path': str(self.root / 'answer.md'),
+                  'error': 'branch-000: Recorder repair failed.'}
+        with patch('mathagent.portfolio.run_proof_portfolio', return_value=result):
+            self.assertEqual(self.run_cli(['--proof-workers', '3', '--prompt', 'Prove it.']), 0)
+        self.assertIn('Parallel proof portfolio: error', self.output())
+        self.assertIn(result['error'], self.output())
+        self.assertIn(result['answer_path'], self.output())
+
     def test_default_prove_dispatches_bounded_job_and_prints_debrief(self):
         code = self.run_cli(['--proof-rounds', '3', '--proof-tokens', '8000',
                              '--proof-seconds', '90', '--proof-file', 'statement.tex',

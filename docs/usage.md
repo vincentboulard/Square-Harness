@@ -83,6 +83,14 @@ The persistent proof cycle is:
    preserves the critic's concrete objection even if the recorder omits it,
    and deduplicates identical records. These are consistency checks, not a
    mathematical verifier.
+   A malformed recorder batch gets at most one recorder-only correction using
+   the same candidate and critique, before any claims from that batch are saved.
+   Invented or unseen reference IDs and omitted resolutions of a repeated
+   disputed claim cannot silently become approvals. The correction consumes the
+   existing token/time budget, including across interruption and resume. If it
+   still fails, the job stops as `stalled` with a `protocol_error` diagnostic;
+   this is a bookkeeping failure, not a mathematical objection. Benchmarks
+   report it as an execution error and retain the written candidate.
 5. **Choose the next task.** After two rounds without recognized progress, a
    planning call proposes a different task or approach. Repeated truncation can
    also trigger an attempt with thinking disabled so the model writes usable
@@ -125,9 +133,21 @@ saved automatically under `<workspace>/.mathagent/proofs/<proof-id>/`:
 - `state.json`: versioned ledger, model settings, policy-file hash and persistent budget counters.
 - `ledger.md`: readable mathematical progress and open obligations.
 - `report.md`: debrief, useful partial results, remaining gaps and suggested next work.
+- `proof.md`: only for a completed, model-audited candidate; its exact written
+  text, without the controller's ledger and timing report. No extra model call
+  or post-audit rewriting is performed. Mathematical caveats remain intact.
 - `artifacts/`: exact inference request payloads, saved arguments, reviews and
   streamed incomplete attempts. Each dispatched call records its request path
   in `state.json`, so you can inspect which context and settings it received.
+
+The solver is instructed to keep its final answer mathematical. Internal saved
+artifact filenames belong to `read_proof_artifact`, not the workspace file
+reader. This tool returns candidate text or a reconstructed structured review,
+with `next_offset` pagination, instead of token-by-token transport events.
+Incomplete or malformed streams are explicitly labelled. `raw=true` retrieves
+the original artifact for diagnostics; the saved bytes are never rewritten.
+Each new inference call also records the active policy version and hash, so
+calls made after upgrading a resumed job can be distinguished from old calls.
 
 Save the ID or use `/proofs` to find it. Ctrl+C pauses the current proof; completed
 checkpoints survive process exit. Resume with the remaining original budget:
