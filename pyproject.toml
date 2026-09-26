@@ -42,4 +42,4 @@ mathagent = "mathagent.cli:main"
 include = ["mathagent*"]
 
 [tool.setuptools.package-data]
-mathagent = ["skills/*/SKILL.md"]
+mathagent = ["skills/*/SKILL.md", "gui/static/**/*"]

@@ -15,7 +15,12 @@ python -m unittest discover -s tests -v
 ```
 
 The automated tests use mocks and temporary workspaces; they do not require a
-running model. For model-dependent changes, describe the model tag, Ollama
+running model.
+
+The visual interface's source lives in `frontend/` and is built into
+`mathagent/gui/static`, which is committed so that installing needs no Node.js.
+After changing it, run `npm ci`, `npm test` and `npm run build` in `frontend/`
+(Node.js 22) and commit the rebuilt files with your source change. For model-dependent changes, describe the model tag, Ollama
 version, settings, and manual check in your pull request.
 
 ## Issues and pull requests

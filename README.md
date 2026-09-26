@@ -17,6 +17,8 @@ checking: a model's critique or agreement is not a proof certificate.
   across bounded, resumable solver/reviewer rounds.
 - **Investigate literature:** read cached or retrieved sources and draft reports
   with source locations and explicit limitations.
+- **Write up notes:** turn rough notes, drafts or PDFs into LaTeX in your own macros
+  and style, with every paragraph traced to the notes and the result compiled.
 - **Stay local by default:** external retrieval is opt-in; manuscript edits require approval.
 
 ## Quick start
@@ -56,6 +58,22 @@ For a manuscript, point `--workspace` at its directory, then ask:
 /critic Read manuscript.tex and identify the first unsupported implication.
 ```
 
+### Visual interface
+
+The same harness also runs as a local web app:
+
+```bash
+square-harness --gui --workspace ~/research/square-workspace
+```
+
+Your browser opens on `http://127.0.0.1:8765`. Each mode is a notebook in the left
+rail, and the Free notebook suggests the right one for each request. Proofs,
+critiques, reports and write-ups appear as the model writes them, with typeset
+LaTeX, the claim ledger, budgets, citation checks and approval dialogs for file
+writes. Drop files onto the window and switch folders from the sidebar. It uses the same engine and saved jobs as the terminal, including jobs
+started there, and works in phone browsers too: see the
+[usage guide](docs/usage.md#visual-interface) before exposing it to your network.
+
 The `mathagent` command remains an alias. You can also run `python -m mathagent`
 from the checkout without installing the optional terminal UI dependencies.
 
@@ -68,7 +86,9 @@ from the checkout without installing the optional terminal UI dependencies.
 | `/review` | Review the last answer in a fresh model context |
 | `/proofs` / `/ledger <id>` / `/resume <id>` | Inspect and resume saved proof work |
 | `/literature <topic>` / `/referee <request>` | Start a saved research/report workflow |
+| `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
 | `/help` | List all commands |
+| `square-harness --gui` | Open the visual interface instead of the terminal prompt |
 
 Proof and research jobs are saved under `.mathagent/` in your workspace.
 Ctrl+C pauses a job; resuming preserves its remaining budget.

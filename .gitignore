@@ -14,3 +14,6 @@ mathagent-transcript.json
 *.pem
 *.key
 .DS_Store
+
+# Interface build tooling; the built assets in mathagent/gui/static are committed.
+frontend/node_modules/

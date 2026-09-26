@@ -3,3 +3,9 @@ recursive-include docs *.md
 prune examples
 prune .mathagent
 global-exclude .env .env.* *.pem *.key
+recursive-include mathagent/gui/static *
+include frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/vite.config.ts frontend/index.html
+recursive-include frontend/src *
+recursive-include frontend/public *
+recursive-include frontend/scripts *.mjs
+prune frontend/node_modules

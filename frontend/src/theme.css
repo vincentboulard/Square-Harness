@@ -1,0 +1,165 @@
+/* Square Harness: a mathematician's notebook. Cool paper with a 5 mm grid
+   (petits carreaux), fountain-pen ink, a red margin rule and red-pen objections. */
+
+@font-face { font-family: 'Square Concrete'; src: url('./fonts/square-concrete-regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Square Concrete'; src: url('./fonts/square-concrete-italic.woff2') format('woff2'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Square Concrete'; src: url('./fonts/square-concrete-bold.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Square Concrete'; src: url('./fonts/square-concrete-bolditalic.woff2') format('woff2'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Square Typewriter'; src: url('./fonts/square-typewriter-regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Square Typewriter'; src: url('./fonts/square-typewriter-bold.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+
+:root {
+  color-scheme: light;
+  --paper: #f6f7fb;
+  --paper-2: #eceef6;
+  --paper-3: #e1e4ef;
+  --sheet: #ffffff;
+  --grid: rgba(47, 62, 181, 0.07);
+  --line: #d6dae9;
+  --line-strong: #bfc5da;
+  --text: #1e2233;
+  --text-2: #484f69;
+  --text-3: #6f7690;
+  --ink: #2f3eb5;
+  --ink-strong: #232f93;
+  --ink-soft: rgba(47, 62, 181, 0.08);
+  --ink-soft-strong: rgba(47, 62, 181, 0.22);
+  --on-ink: #ffffff;
+  --red: #c62c3a;
+  --red-soft: rgba(198, 44, 58, 0.07);
+  --margin: rgba(214, 64, 78, 0.5);
+  --green: #1b7f5a;
+  --green-text: #13603f;
+  --green-soft: rgba(27, 127, 90, 0.09);
+  --ochre: #96600f;
+  --ochre-soft: rgba(168, 107, 18, 0.1);
+  --focus: #2f3eb5;
+  --hover: rgba(47, 62, 181, 0.06);
+  --track: rgba(30, 34, 51, 0.09);
+  --track-strong: #b9bfd3;
+  --code-bg: rgba(47, 62, 181, 0.07);
+  --shadow-sm: 0 1px 2px rgba(30, 34, 51, 0.06);
+  --shadow-lg: 0 2px 6px rgba(30, 34, 51, 0.08), 0 18px 48px rgba(30, 34, 51, 0.16);
+
+  --font-ui: 'Atkinson Hyperlegible Next Variable', 'Atkinson Hyperlegible Next', 'Atkinson Hyperlegible', system-ui, sans-serif;
+  --font-text: 'Square Concrete', 'CMU Concrete', 'Latin Modern Roman', Georgia, serif;
+  --font-mono: 'Square Typewriter', 'Latin Modern Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --font-math: KaTeX_Main, 'Square Concrete', serif;
+
+  --grid-size: 20px;
+  --margin-x: 64px;
+  --gap-x: 26px;
+  --content-x: calc(var(--margin-x) + var(--gap-x));
+  --measure: 780px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --paper: #1a2033;
+    --paper-2: #151a2a;
+    --paper-3: #111624;
+    --sheet: #20273d;
+    --grid: rgba(143, 160, 255, 0.055);
+    --line: #2d3552;
+    --line-strong: #3d4768;
+    --text: #e6e8f2;
+    --text-2: #b3b9d0;
+    --text-3: #8a91ab;
+    --ink: #97a4ff;
+    --ink-strong: #b7c0ff;
+    --ink-soft: rgba(151, 164, 255, 0.1);
+    --ink-soft-strong: rgba(151, 164, 255, 0.28);
+    --on-ink: #121729;
+    --red: #ff7b84;
+    --red-soft: rgba(255, 123, 132, 0.09);
+    --margin: rgba(255, 123, 132, 0.4);
+    --green: #5ad3a3;
+    --green-text: #7ee0b8;
+    --green-soft: rgba(90, 211, 163, 0.1);
+    --ochre: #e3aa55;
+    --ochre-soft: rgba(227, 170, 85, 0.11);
+    --focus: #97a4ff;
+    --hover: rgba(151, 164, 255, 0.08);
+    --track: rgba(230, 232, 242, 0.1);
+    --track-strong: #4a5476;
+    --code-bg: rgba(151, 164, 255, 0.12);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.3), 0 18px 48px rgba(0, 0, 0, 0.45);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --paper: #1a2033;
+  --paper-2: #151a2a;
+  --paper-3: #111624;
+  --sheet: #20273d;
+  --grid: rgba(143, 160, 255, 0.055);
+  --line: #2d3552;
+  --line-strong: #3d4768;
+  --text: #e6e8f2;
+  --text-2: #b3b9d0;
+  --text-3: #8a91ab;
+  --ink: #97a4ff;
+  --ink-strong: #b7c0ff;
+  --ink-soft: rgba(151, 164, 255, 0.1);
+  --ink-soft-strong: rgba(151, 164, 255, 0.28);
+  --on-ink: #121729;
+  --red: #ff7b84;
+  --red-soft: rgba(255, 123, 132, 0.09);
+  --margin: rgba(255, 123, 132, 0.4);
+  --green: #5ad3a3;
+  --green-text: #7ee0b8;
+  --green-soft: rgba(90, 211, 163, 0.1);
+  --ochre: #e3aa55;
+  --ochre-soft: rgba(227, 170, 85, 0.11);
+  --focus: #97a4ff;
+  --hover: rgba(151, 164, 255, 0.08);
+  --track: rgba(230, 232, 242, 0.1);
+  --track-strong: #4a5476;
+  --code-bg: rgba(151, 164, 255, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.3), 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font: 15px/1.45 var(--font-ui);
+  color: var(--text);
+  background: var(--paper-2);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+button, input, textarea, select { font: inherit; color: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+a { color: var(--ink); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
+::selection { background: var(--ink-soft-strong); }
+code { font-family: var(--font-mono); }
+.muted { color: var(--text-3); }
+.small { font-size: 13px; }
+
+/* Petits carreaux: the grid scrolls with the page, like paper. */
+.paper {
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: var(--grid-size) var(--grid-size);
+  background-position: -1px -1px;
+  background-attachment: local;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

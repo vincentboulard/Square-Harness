@@ -17,6 +17,7 @@ from .ledger import ProofStore
 from .tools import Workspace
 from .literature import LiteratureTools
 from .research import ResearchRunner
+from .writeup import WriteupRunner
 
 # Never let model/file content inject terminal escape sequences.
 def clean(text):
@@ -97,6 +98,7 @@ HELP = '''Commands
   /critic, /explore [query]            Ordinary conversational modes
   /literature [topic]                 Saved bibliographical research and Markdown report
   /referee [task or manuscript]       Saved manuscript review with literature checks
+  /writeup [instructions]             LaTeX write-up of --research-file notes in the --template-file style
   /researches                        List saved research/report jobs
   /research-report <id>               Read a saved Markdown report without inference
   /research-resume <id>               Resume a research job with its saved budgets
@@ -144,6 +146,8 @@ def parser():
     network.add_argument('--offline', action='store_true', help='Use local Ollama and local/cached sources only (default)')
     p.add_argument('--proof-literature', action='store_true', help='Opt a NEW proof into literature tools; separate from --online')
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
+    p.add_argument('--template-file', action='append', default=[], metavar='PATH',
+                   help='Write-up template (.sty, .cls, .tex or .bib) whose macros and style must be used; repeatable')
     p.add_argument('--research-rounds', type=int, default=6, help='Maximum investigation rounds per new report')
     p.add_argument('--research-tokens', type=int, default=24000, help='Total generated-token budget per new report')
     p.add_argument('--research-input-tokens', type=int, default=100000, help='Cumulative input-token budget per new report')
@@ -155,6 +159,13 @@ def parser():
     p.add_argument('--no-think', action='store_true')
     p.add_argument('--show-thinking', action='store_true')
     p.add_argument('--allow-python', action='store_true', help='Offer unsandboxed Python with per-call approval (Linux)')
+    p.add_argument('--gui', action='store_true', help='Serve the visual interface in your browser instead of the terminal prompt')
+    p.add_argument('--gui-host', default='127.0.0.1',
+                   help='Interface address (default: %(default)s); 0.0.0.0 lets phones on your network connect with the access token')
+    p.add_argument('--gui-root', type=Path, metavar='PATH',
+                   help='With --gui, folders at or below this one can be opened in the interface (default: the workspace)')
+    p.add_argument('--gui-port', type=int, default=8765, help='Interface port; the next free port is used if taken (default: %(default)s)')
+    p.add_argument('--no-browser', action='store_true', help='With --gui, do not open a browser automatically')
     one_shot = p.add_mutually_exclusive_group()
     one_shot.add_argument('--prompt', help='Run one query or command and exit')
     one_shot.add_argument('--resume', nargs='?', const='', metavar='PROOF_ID',
@@ -210,6 +221,17 @@ def main():
             p.error('Offline mode requires a localhost/loopback Ollama --host; use --online explicitly for a remote server')
         if args.allow_python:
             p.error('--allow-python requires --online: unrestricted Python can access the network')
+    if args.gui:
+        if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
+            p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')
+        if not 0 <= args.gui_port <= 65535:
+            p.error('--gui-port must be between 0 and 65535')
+        from .gui import serve
+        try:
+            return serve(args)
+        except (OSError, ValueError) as e:
+            print(f'Error: {e}', file=sys.stderr)
+            return 2
     ui = UI(args.show_thinking)
     try:
         literature = LiteratureTools(args.workspace, online=args.online,
@@ -262,7 +284,7 @@ def main():
         else:
             ui.say(f'Inspect: /ledger {result["id"]}. A new /prove starts a separate job.')
 
-    def research_result(result):
+    def research_result(result, export=True):
         nonlocal last_research_id
         last_research_id = result['id']
         ui.say(f'\nResearch {result["id"]} · {result["status"]}')
@@ -270,7 +292,7 @@ def main():
         ui.say(f'Markdown report: {Path(result["directory"]) / "report.md"}')
         if result['status'] in {'paused', 'error', 'running'}:
             ui.say(f'Resume: /research-resume {result["id"]}')
-        if args.output:
+        if args.output and export:
             dest = workspace.path(args.output)
             if dest.suffix.lower() != '.md':
                 raise ValueError('--output must be a workspace-relative .md file')
@@ -320,6 +342,19 @@ def main():
             research_running = False
             research_result(result)
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result['report']}])
+        elif agent.mode == 'writeup':
+            if args.output and workspace.path(args.output).suffix.lower() != '.tex':
+                raise ValueError('For a write-up, --output names the new .tex file')
+            ensure_model()
+            research_running = True
+            last_research_id = ''
+            result = WriteupRunner(agent, ui.emit).start(query, source_files=args.research_file,
+                template_files=args.template_file, output=args.output or '',
+                max_rounds=args.research_rounds, max_tokens=args.research_tokens,
+                max_input_tokens=args.research_input_tokens, max_seconds=args.research_seconds,
+                max_requests=args.research_requests, max_chars=args.research_chars)
+            research_running = False
+            research_result(result, export=False)
         else:
             if args.output:
                 raise ValueError('--output is for literature/referee reports')
@@ -346,7 +381,7 @@ def main():
                     agent.history = []
                     ui.say('Conversation cleared.')
                 elif command == '/skills':
-                    for name in ('literature', 'referee'):
+                    for name in ('literature', 'referee', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                 elif command == '/researches':
                     jobs = ResearchRunner.list(workspace.root)
@@ -358,16 +393,18 @@ def main():
                     if not rest and not last_research_id:
                         raise ValueError('Supply a research job ID; use /researches to list jobs')
                     result = ResearchRunner.inspect(workspace.root, rest or last_research_id)
-                    research_result(result)
+                    research_result(result, export=result.get('kind') != 'writeup')
                 elif command == '/research-resume':
                     if not rest and not last_research_id:
                         raise ValueError('Supply a research job ID; use /researches to list jobs')
                     research_running = True
                     fresh_library()
-                    result = ResearchRunner(agent, ui.emit).resume(rest or last_research_id)
+                    job_id = rest or last_research_id
+                    writeup = ResearchRunner.inspect(workspace.root, job_id).get('kind') == 'writeup'
+                    result = (WriteupRunner if writeup else ResearchRunner)(agent, ui.emit).resume(job_id)
                     research_running = False
                     model_checked = False
-                    research_result(result)
+                    research_result(result, export=not writeup)
                 elif command in {'/' + m for m in MODES}:
                     agent.mode = command[1:]
                     ui.say('Mode: ' + agent.mode)
