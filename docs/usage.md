@@ -30,6 +30,12 @@ allocate 17,952 per branch and 6,144 for selection. Unused allocations stay unus
 Solver seeds differ between branches; critics and selection reviews use
 temperature zero. Separate contexts cannot guarantee independent mathematical mistakes.
 
+For the A10, use `--model square-qwen-a10 --proof-workers 3
+--proof-branch-concurrency 1 --proof-seconds 43200 --proof-selection-seconds 3600`.
+This retains three independent attempts with one active branch at a time. Their
+individual execution windows start on dispatch, rather than while waiting.
+Use the [A10 setup](a10.md) for the separate Q4 server and benchmark launcher.
+
 The final selector audits whole candidates separately and returns an existing
 answer, without combining proofs. No clipped, truncated or malformed review
 can approve a candidate. The status is a model judgment, never a proof certificate.

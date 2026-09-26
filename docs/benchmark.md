@@ -25,6 +25,15 @@ process, workspace, seed and fixed token allowance. Independent reviews select
 an **existing full candidate**, retaining the exact text. A model's approval is
 never a mathematical score or proof certificate.
 
+## Hardware profiles
+
+The [two-V100S Q8 profile](ovh.md) runs three branches concurrently. The separate
+[A10 Q4 pilot](a10.md) retains all three logical branches but executes one at a
+time. Both keep the same problem statements, token allocation, selection and
+human grading. Q4 and Q8 are distinct numerical conditions and must be reported
+separately. The saved `parallel` arm names the portfolio algorithm; inspect
+`branch_concurrency` and the saved schedule before making any speedup claim.
+
 ## Private dataset
 
 Keep statements and results outside the source checkout. Keep reference answers,
@@ -113,10 +122,17 @@ plan. See the [OVH runbook](ovh.md) for server configuration.
 
 `--workers` controls independent problem/arm jobs. `--branches` controls direct
 samples and same-problem proof branches. Preflight requires
-`workers × branch width <= max-in-flight`, before any model traffic. Thus two
+`workers × active branch width <= max-in-flight`, before any model traffic.
+Active width defaults to `--branches`; `--branch-concurrency 1` executes the
+same logical attempts in separate waves of one. Waiting attempts have not yet
+started and do not spend their branch time window. The available portfolio time
+is divided equally between waves, with selection time reserved separately.
+Seeds and token partitions depend on logical branch number, not scheduling. Thus two
 jobs with two branches require `--workers 2 --branches 2 --max-in-flight 4`.
 Fixed partitions bound requests without cross-process semaphore ownership.
-Start with the defaults and increase concurrency only after measuring GPU memory
+The dedicated A10 wrapper uses `--branches 3 --branch-concurrency 1
+--max-in-flight 1`; the V100 wrapper retains width three.
+Start with the hardware profile defaults and increase concurrency only after measuring GPU memory
 and aggregate throughput on the actual server.
 
 ## Budgets, selection and failures

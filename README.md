@@ -79,8 +79,8 @@ Launch with `--online` for external research. Proof search additionally requires
 
 See the [usage guide](docs/usage.md) for manuscript inputs, reports, budgets,
 optional PDF/Python tools, and all command-line settings.
-For GPU experiments, see the [two-V100S OVH setup](docs/ovh.md) and
-[benchmark protocol](docs/benchmark.md). GPU performance must be measured on the target server.
+For GPU experiments, see the [single-A10 first pilot](docs/a10.md),
+[two-V100S Q8 setup](docs/ovh.md), and [benchmark protocol](docs/benchmark.md). GPU performance must be measured on the target server.
 
 ## Limits and privacy
 

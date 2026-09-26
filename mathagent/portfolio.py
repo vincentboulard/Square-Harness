@@ -50,6 +50,19 @@ def branch_seed(seed, index):
     return (int(seed) + int(index) * 1000003) % (2 ** 31)
 
 
+def branch_schedule(branches, concurrency, max_seconds, selection_seconds):
+    """Fixed, matching wave/time allocations for raw and proof portfolios."""
+    if concurrency is not None and (type(concurrency) is not int or not 1 <= concurrency <= 16):
+        raise ValueError('Branch concurrency must be between 1 and 16')
+    width = min(branches, branches if concurrency is None else concurrency)
+    waves = math.ceil(branches / width)
+    selection = min(selection_seconds, max_seconds / 4)
+    return {'logical_branches': branches, 'branch_concurrency': width, 'waves': waves,
+            'branch_seconds': (max_seconds - selection) / waves,
+            'branch_window_seconds': max_seconds - selection, 'selection_seconds': selection,
+            'time_policy': 'Equal time allowance per wave, starting only at dispatch; unused wave time is not redistributed. The selector receives remaining job time.'}
+
+
 def _atomic_json(path, value):
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
@@ -334,6 +347,9 @@ def _stop_processes(processes):
 def _branch_result(job):
     result = {'id': job['id'], 'directory': job['directory'], 'seed': job['seed'],
               'token_budget': job['token_budget'], 'status': 'failed', 'candidate': None}
+    if job.get('dispatched') is False:
+        return {**result, **_usage([]), 'status': 'not_dispatched',
+                'error': 'Parent stopped before dispatch; no inference was run'}
     result_file = Path(job['directory']) / 'worker-result.json'
     if result_file.exists():
         try:
@@ -358,9 +374,10 @@ def _branch_result(job):
         result.update(proof_id=state['id'], proof_status=state['status'], calls=state['calls'])
         result.update(_usage(state['calls']))
         result['tokens_charged'] = state['tokens_charged']
-        if state['tokens_charged'] > job['token_budget']:
+        if (state['tokens_charged'] > job['token_budget'] or state['status'] == 'budget_violation'
+                or any(call.get('status') == 'budget_violation' for call in state['calls'])):
             result.update(status='failed', budget_violation=True,
-                          error='Child exceeded its immutable token allocation')
+                          error='Child exceeded a request output cap or its immutable token allocation')
             return result
         artifacts = []
         if state['status'] == 'candidate_complete' and state.get('final_audit'):
@@ -389,7 +406,8 @@ def _branch_result(job):
 def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
                         max_seconds=1800, max_rounds=10, max_predict=8192,
                         source_files=(), seed=0, selection_tokens=6144,
-                        request_gate=None, selector_goal=None, selection_seconds=300):
+                        request_gate=None, selector_goal=None, selection_seconds=300,
+                        branch_concurrency=None):
     """Run isolated sequential harness branches under fixed shared allocations."""
     if type(workers) is not int or not 1 <= workers <= 16:
         raise ValueError('Proof workers must be between 1 and 16')
@@ -401,6 +419,7 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
         raise ValueError('Portfolio time budget must be finite and positive')
     if not math.isfinite(selection_seconds) or selection_seconds <= 0:
         raise ValueError('Selection seconds must be finite and positive')
+    schedule = branch_schedule(workers, branch_concurrency, max_seconds, selection_seconds)
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError('Provide a nonempty proof goal')
     if selector_goal is not None and (not isinstance(selector_goal, str) or not selector_goal.strip()):
@@ -420,8 +439,8 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
     directory = _new_directory(output_dir)
     started = time.monotonic()
     # Reserve a wall-time tail as well as tokens for the independent reviews.
-    selection_seconds = min(selection_seconds, max_seconds / 4)
-    branch_seconds = max_seconds - selection_seconds
+    selection_seconds = schedule['selection_seconds']
+    branch_seconds = schedule['branch_seconds']
     base, remainder = divmod(max_tokens - selection_tokens, workers)
     jobs = []
     for index in range(workers):
@@ -439,12 +458,14 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
                      'seed': branch_seed(seed, index), 'temperature': getattr(agent, 'temperature', 0.6),
                      'top_p': getattr(agent, 'top_p', 0.95), 'token_budget': base + (index < remainder),
                      'request_timeout': getattr(agent.client, 'timeout', branch_seconds),
-                     'max_seconds': branch_seconds, 'max_rounds': max_rounds, 'max_predict': max_predict})
+                     'max_seconds': branch_seconds, 'max_rounds': max_rounds, 'max_predict': max_predict,
+                     'wave': index // schedule['branch_concurrency'], 'dispatched': False})
     state = {'version': 1, 'status': 'running', 'goal': goal, 'source_snapshots': snapshots,
              'directory': str(directory),
              'selector_goal': selector_goal,
              'token_budget': max_tokens, 'selection_tokens': selection_tokens,
              'max_seconds': max_seconds, 'selection_seconds': selection_seconds, 'jobs': jobs, 'branches': [],
+             'branch_schedule': schedule,
              'resume_policy': 'Parent is one-shot. Inspect or explicitly resume child proof ledgers individually; never rerun this directory.',
              'answer_path': None, 'selected_id': None, 'selected_status': None}
     state.update(_usage([]))
@@ -453,24 +474,37 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
     processes = []
     interrupted = False
     try:
-        for job in jobs:
-            process = context.Process(target=_proof_worker, args=(job, request_gate), name=job['id'])
-            process.start()
-            processes.append(process)
-        deadline = started + branch_seconds
-        while any(p.is_alive() for p in processes):
-            if time.monotonic() >= deadline:
-                state['branch_stop_reason'] = 'Shared branch wall-time deadline reached'
-                _stop_processes(processes)
+        global_deadline = started + schedule['branch_window_seconds']
+        for offset in range(0, workers, schedule['branch_concurrency']):
+            if time.monotonic() >= global_deadline:
+                state['branch_stop_reason'] = 'Shared branch wall-time deadline reached before dispatch'
                 break
-            for process in processes:
-                process.join(min(0.05, max(0, deadline - time.monotonic())))
+            wave = []
+            deadline = min(global_deadline, time.monotonic() + branch_seconds)
+            for job in jobs[offset:offset + schedule['branch_concurrency']]:
+                job.update(dispatched=True, dispatch_seconds=time.monotonic() - started)
+                _atomic_json(directory / 'state.json', state)
+                process = context.Process(target=_proof_worker, args=(job, request_gate), name=job['id'])
+                process.start()
+                wave.append(process)
+                processes.append(process)
+            while any(p.is_alive() for p in wave):
+                if time.monotonic() >= deadline:
+                    state['branch_stop_reason'] = 'Branch wave wall-time deadline reached'
+                    _stop_processes(wave)
+                    break
+                for process in wave:
+                    process.join(min(0.05, max(0, deadline - time.monotonic())))
+            state['branches'] = [_branch_result(job) for job in jobs]
+            _atomic_json(directory / 'state.json', state)
+            if any(b.get('budget_violation') for b in state['branches']):
+                break
         state['branches'] = [_branch_result(job) for job in jobs]
         _atomic_json(directory / 'state.json', state)
         candidates = [b['candidate'] for b in state['branches'] if b.get('candidate')]
         remaining = max_seconds - (time.monotonic() - started)
         if any(b.get('budget_violation') for b in state['branches']):
-            state.update(status='budget_violation', error='Child exceeded its allocation; no selection dispatched')
+            state.update(status='budget_violation', error='Child reported an output budget violation; no selection dispatched')
         elif remaining > 0:
             selection = select_candidates(agent.client, model=agent.model, candidates=candidates,
                 goal=selector_goal if selector_goal is not None else goal + ('\n\nPINNED SOURCES:\n' + '\n\n'.join(s['path'] + '\n' + s['content'] for s in snapshots) if snapshots else ''),

@@ -1,5 +1,8 @@
 # OVH experiment: two V100S GPUs
 
+This Q8 profile remains available unchanged. For the current single-A10 Q4 pilot,
+use the separate [A10 guide](a10.md) and its A10-specific launchers.
+
 Target: **OVH t2-90, 2 × Tesla V100S 32 GB**, 90 GB system RAM, 30 vcores,
 800 GB NVMe, x86-64 Ubuntu 22.04 or 24.04, Python 3.10+.
 The scripts do not rent a server. No V100S GPU inference has yet been measured

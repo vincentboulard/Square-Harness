@@ -1,5 +1,5 @@
 """Protocol/capacity acceptance tests with simulated inference, never GPU claims."""
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,7 +21,7 @@ TEMPLATE = '{{ messages }}'
 
 @contextmanager
 def serving_fixture(*, serial=False, zero_decoded=False, context=4096, parallel=3,
-                    wrong_json=False, change_identity=False, ready=True):
+                    wrong_json=False, change_identity=False, ready=True, model='square-qwen'):
     active, requests = {}, []
     lock = threading.Lock()
     slots_gate = threading.Semaphore(1 if serial else parallel)
@@ -53,7 +53,7 @@ def serving_fixture(*, serial=False, zero_decoded=False, context=4096, parallel=
                     'params': {'seed': item.get('seed')}, 'next_token': {'n_decoded': 0 if zero_decoded else item.get('decoded', 0)}}
                     for i, item in enumerate(values)])
             elif self.path == '/v1/models':
-                self.json_response({'data': [{'id': 'square-qwen'}]})
+                self.json_response({'data': [{'id': model}]})
             else:
                 self.json_response({'error': 'unexpected endpoint'}, 404)
 
@@ -150,13 +150,13 @@ class ServingSmokeTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path
 
-    def run_smoke(self, host, **kwargs):
+    def run_smoke(self, host, model='square-qwen', **kwargs):
         options = dict(context=4096, parallel=3, representative_input_tokens=1024,
                        plain_tokens=128, thinking_tokens=512, capacity_output_tokens=32,
                        ready_timeout=.02, poll_interval=.005)
         options.update(kwargs)
         return SMOKE['run_acceptance'](lambda: create_client('llamacpp', host, timeout=2),
-            SMOKE['Probe'](host, timeout=2), 'square-qwen', host=host, **options)
+            SMOKE['Probe'](host, timeout=2), model, host=host, **options)
 
     def test_real_sse_protocol_context_capacity_overlap_and_launch_binding(self):
         with serving_fixture() as (host, requests):
@@ -164,17 +164,68 @@ class ServingSmokeTests(unittest.TestCase):
             report = self.run_smoke(host, launch_record=launch)
         self.assertTrue(report['ok'], report)
         self.assertTrue(report['accepted_for_benchmark'])
+        self.assertEqual(report['capacity_mode'], 'parallel')
         self.assertEqual(report['launch_record']['sha256'], hashlib.sha256(launch.read_bytes()).hexdigest())
         self.assertEqual(report['server']['slot_contexts'], [4096] * 3)
         self.assertEqual(len(requests), 12)  # six protocol generations, two batches of three
         for name in ('short_capacity', 'representative_capacity'):
             result = report['checks'][name]
             self.assertEqual(result['max_observed_decoding_slots'], 3)
+            self.assertTrue(result['parallel_overlap_observed'])
+            self.assertEqual(result['capacity_mode'], 'parallel')
             self.assertGreater(result['token_span_overlap_seconds'], 0)
             self.assertTrue(all(x >= result['target_input_tokens'] for x in result['observed_input_tokens']))
             self.assertTrue(all(r['generated_tokens'] <= 32 for r in result['requests_stats']))
         self.assertTrue(all('reasoning_effort' not in request for request in requests))
         self.assertTrue(report['checks']['protocol']['checks']['tool_round_trip'])
+
+    def test_one_slot_q4_a10_cli_accepts_sequential_capacity_without_parallel_claim(self):
+        alias = 'square-qwen-a10'
+        output = self.root / 'a10-acceptance.json'
+        with serving_fixture(context=32768, parallel=1, model=alias) as (host, requests):
+            launch = self.launch(host, context_per_slot=32768, parallel=1,
+                                 model_alias=alias, quantization='Q4_K_M')
+            with redirect_stdout(io.StringIO()) as stdout:
+                code = SMOKE['main'](['--host', host, '--model', alias, '--parallel', '1',
+                    '--launch-record', str(launch), '--output', str(output), '--timeout', '2',
+                    '--ready-timeout', '.02', '--poll-interval', '.005', '--capacity-output-tokens', '32'])
+        self.assertEqual(code, 0, stdout.getvalue())
+        report = json.loads(output.read_text())
+        self.assertTrue(report['accepted_for_benchmark'], report)
+        self.assertEqual(report['capacity_mode'], 'sequential')
+        self.assertEqual(report['acceptance_condition'], 'one_slot_streamed_decoding')
+        self.assertEqual(report['settings']['parallel'], 1)
+        self.assertEqual(report['settings']['representative_input_tokens'], 30000)
+        self.assertEqual(report['launch_record']['quantization'], 'Q4_K_M')
+        self.assertEqual(len(requests), 8)
+        self.assertTrue(all(request['model'] == alias for request in requests))
+        for name in ('short_capacity', 'representative_capacity'):
+            result = report['checks'][name]
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['capacity_mode'], 'sequential')
+            self.assertEqual(result['max_observed_decoding_slots'], 1)
+            self.assertFalse(result['parallel_overlap_observed'])
+            self.assertIsNone(result['token_span_overlap_seconds'])
+            self.assertGreater(result['token_span_seconds'], 0)
+            self.assertIn('Parallel inference was not tested', result['scope'])
+        self.assertGreaterEqual(report['checks']['representative_capacity']['observed_input_tokens'][0], 30000)
+
+    def test_one_slot_wrong_launch_parallel_is_rejected_before_inference(self):
+        alias = 'square-qwen-a10'
+        with serving_fixture(parallel=1, model=alias) as (host, requests):
+            report = self.run_smoke(host, model=alias, parallel=1,
+                                   launch_record=self.launch(host, parallel=3, model_alias=alias, quantization='Q4_K_M'))
+        self.assertFalse(report['ok'])
+        self.assertFalse(report['accepted_for_benchmark'])
+        self.assertIn('Launch context/parallel settings differ', report['error'])
+        self.assertEqual(requests, [])
+
+    def test_one_slot_without_observed_decoding_is_not_accepted(self):
+        with serving_fixture(parallel=1, zero_decoded=True) as (host, _):
+            report = self.run_smoke(host, parallel=1, launch_record=self.launch(host, parallel=1))
+        self.assertFalse(report['ok'])
+        self.assertIn('No actively decoding slot', report['error'])
+        self.assertFalse(report['checks']['short_capacity']['parallel_overlap_observed'])
 
     def test_concurrent_submissions_with_serial_processing_are_rejected(self):
         with serving_fixture(serial=True) as (host, requests):

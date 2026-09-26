@@ -1,0 +1,25 @@
+# Separate Ampere build. The V100 image and its defaults are unchanged.
+ARG CUDA_BASE_IMAGE
+FROM ${CUDA_BASE_IMAGE}
+ARG LLAMA_COMMIT
+ARG BUILD_JOBS=8
+LABEL org.opencontainers.image.source="https://github.com/ggml-org/llama.cpp"
+LABEL org.opencontainers.image.revision="${LLAMA_COMMIT}"
+LABEL io.square-harness.profile="a10-q4"
+LABEL io.square-harness.cuda-architectures="86"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git cmake build-essential libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /opt/llama.cpp \
+    && cd /opt/llama.cpp \
+    && git remote add origin https://github.com/ggml-org/llama.cpp.git \
+    && git fetch --depth 1 origin "${LLAMA_COMMIT}" \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${LLAMA_COMMIT}" \
+    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 \
+      -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+      -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_TESTS=OFF \
+      -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
+    && cmake --build build --target llama-server --parallel "${BUILD_JOBS}"
+ENTRYPOINT ["/opt/llama.cpp/build/bin/llama-server"]

@@ -48,7 +48,8 @@ def sha256_file(path: Path) -> str:
 
 def verify_weights(path: Path, lock: dict) -> None:
     if not path.is_file() or path.stat().st_size != lock["weights_bytes"]:
-        raise ValueError(f"Missing or wrong-sized model: {path}. Run download-llama-model.sh.")
+        download_script = lock.get("download_script", "download-llama-model.sh")
+        raise ValueError(f"Missing or wrong-sized model: {path}. Run {download_script}.")
     if sha256_file(path) != lock["weights_sha256"]:
         raise ValueError(f"Model SHA256 mismatch: {path}. Refusing inference.")
 
@@ -94,7 +95,7 @@ def download_weights(directory: Path, lock: dict) -> Path:
                 mode = "wb"  # Server ignored Range; restart rather than corrupting the file.
             else:
                 raise ValueError(f"Unexpected model download HTTP status {response.status}")
-            print(f"Downloading pinned Q8_0 model to {partial}", flush=True)
+            print(f"Downloading pinned {lock['quantization']} model to {partial}", flush=True)
             with partial.open(mode) as output:
                 shutil.copyfileobj(response, output, length=8 * 1024 * 1024)
     verify_weights(partial, lock)

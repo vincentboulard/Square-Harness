@@ -144,6 +144,8 @@ def parser():
     p.add_argument('--proof-rounds', type=int, default=10, help='Maximum mathematical work rounds per new proof (1–100)')
     p.add_argument('--proof-workers', type=int, default=1,
                    help='Independent parallel proof branches; 1 keeps the sequential workflow (1–4)')
+    p.add_argument('--proof-branch-concurrency', type=int, default=None,
+                   help='Active proof branches at once; defaults to proof-workers, use 1 for a single inference slot')
     p.add_argument('--proof-tokens', type=int, default=60000, help='Total generated-token budget per new proof, including review (minimum 512)')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
     p.add_argument('--proof-max-predict', type=int, default=8192,
@@ -215,6 +217,8 @@ def main():
         p.error('Use 1 <= proof-rounds <= 100, proof-tokens >= 512, finite proof-seconds > 0, and proof-max-predict >= 128')
     if not 1 <= args.proof_workers <= 4:
         p.error('Use proof-workers in 1–4')
+    if args.proof_branch_concurrency is not None and not 1 <= args.proof_branch_concurrency <= args.proof_workers:
+        p.error('Use proof-branch-concurrency between 1 and proof-workers')
     if args.proof_workers > 1 and (args.proof_literature or args.resume is not None):
         p.error('Parallel portfolios start fresh and do not support proof literature or parent resume')
     if (not 1 <= args.research_rounds <= 50 or args.research_tokens < 1024
@@ -329,7 +333,8 @@ def main():
                     workers=args.proof_workers, max_rounds=args.proof_rounds,
                     max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                     max_predict=args.proof_max_predict, source_files=args.proof_file,
-                    seed=args.seed if args.seed is not None else 0, selection_seconds=args.proof_selection_seconds)
+                    seed=args.seed if args.seed is not None else 0, selection_seconds=args.proof_selection_seconds,
+                    branch_concurrency=args.proof_branch_concurrency)
                 answer_notice = (f'Selected answer: {result["answer_path"]}' if result.get('answer_path')
                                  else 'No candidate was selected; inspect the retained branch work.')
                 ui.say(f'Parallel proof portfolio: {result["status"]}\nSaved work: {directory}\n'

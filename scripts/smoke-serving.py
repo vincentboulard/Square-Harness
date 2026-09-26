@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Accept a llama.cpp endpoint only after protocol, context and observed-overlap checks.
+"""Accept a llama.cpp endpoint only after protocol, context and observed-decoding checks.
 
 API contract: llama.cpp 2145525a4081d66ff1a87cf43ef809f95a85ac0c,
 https://github.com/ggml-org/llama.cpp/blob/2145525a4081d66ff1a87cf43ef809f95a85ac0c/tools/server/README.md
@@ -248,17 +248,24 @@ def capacity_batch(client_factory, probe, model, *, context, parallel, target_in
     intersection = min(r['last_token_seconds'] for r in results) - max(r['first_token_seconds'] for r in results)
     error = None
     if max_decoding < parallel:
-        error = f'Only {max_decoding}/{parallel} simultaneously decoding slots were observed; concurrent submission alone is insufficient'
+        error = ('No actively decoding slot was observed for the sequential capacity check' if parallel == 1 else
+                 f'Only {max_decoding}/{parallel} simultaneously decoding slots were observed; concurrent submission alone is insufficient')
     elif intersection <= 0:
-        error = 'Output-token time spans did not overlap; increase capacity output length and repeat'
+        error = ('The sequential output stream had no measurable token span; increase capacity output length and repeat' if parallel == 1 else
+                 'Output-token time spans did not overlap; increase capacity output length and repeat')
     generated = sum(r['generated_tokens'] for r in results)
     return {'ok': error is None, 'error': error, 'requests': parallel, 'target_input_tokens': target_input_tokens,
+            'capacity_mode': 'sequential' if parallel == 1 else 'parallel',
+            'parallel_overlap_observed': parallel > 1 and max_decoding >= parallel and intersection > 0,
             'observed_input_tokens': [r['input_tokens'] for r in results], 'output_cap_per_request': output_tokens,
             'max_observed_processing_slots': max_processing, 'max_observed_decoding_slots': max_decoding,
-            'token_span_overlap_seconds': intersection, 'elapsed_seconds': elapsed,
+            'token_span_seconds': intersection if parallel == 1 else None,
+            'token_span_overlap_seconds': intersection if parallel > 1 else None, 'elapsed_seconds': elapsed,
             'generated_tokens': generated, 'aggregate_generated_tokens_per_second': generated / elapsed,
             'slot_samples': samples, 'requests_stats': results,
-            'scope': 'Logical decode overlap at the tested context load; not a GPU-kernel concurrency or mathematical-quality claim.'}
+            'scope': ('One-slot streamed decoding at the tested context load. Parallel inference was not tested; no mathematical-quality or GPU-kernel concurrency claim.'
+                      if parallel == 1 else
+                      'Logical decode overlap at the tested context load; not a GPU-kernel concurrency or mathematical-quality claim.')}
 
 
 def run_acceptance(client_factory, probe, model, *, host, context=32768, parallel=3,
@@ -266,6 +273,8 @@ def run_acceptance(client_factory, probe, model, *, host, context=32768, paralle
                    capacity_output_tokens=256, ready_timeout=600, poll_interval=.05, launch_record=None):
     report = {'schema_version': 1, 'ok': False, 'accepted_for_benchmark': False,
               'backend': 'llamacpp', 'host': root_host(host), 'model': model,
+              'capacity_mode': 'sequential' if parallel == 1 else 'parallel',
+              'acceptance_condition': 'one_slot_streamed_decoding' if parallel == 1 else 'concurrent_logical_decoding',
               'created_at_utc': datetime.now(timezone.utc).isoformat(),
               'settings': {'context_per_slot': context, 'parallel': parallel,
                   'representative_input_tokens': representative_input_tokens, 'plain_tokens': plain_tokens,
@@ -312,7 +321,8 @@ def main(argv=None):
     p.add_argument('--host', default='http://127.0.0.1:8000')
     p.add_argument('--model', default='square-qwen')
     p.add_argument('--ctx', type=int, default=32768, help='Required context per slot, not total context across slots')
-    p.add_argument('--parallel', type=int, default=3)
+    p.add_argument('--parallel', type=int, default=3,
+                   help='Configured server slots: 1 validates sequential capacity; >1 requires observed logical decode overlap')
     p.add_argument('--representative-input-tokens', type=int, default=30000)
     p.add_argument('--plain-tokens', type=int, default=512)
     p.add_argument('--thinking-tokens', type=int, default=4096)

@@ -44,6 +44,21 @@ class ProofCliTests(unittest.TestCase):
         factory.assert_called_once_with('llamacpp', 'http://localhost:8000', timeout=7200.0)
         self.runner.start.assert_called_once()
 
+    def test_a10_proof_branch_concurrency_is_forwarded_without_reducing_branches(self):
+        with patch('mathagent.portfolio.run_proof_portfolio', return_value={'status': 'selected_unverified'}) as portfolio:
+            self.assertEqual(self.run_cli(['--proof-workers', '3', '--proof-branch-concurrency', '1',
+                                          '--prompt', 'Prove the supplied statement.']), 0)
+        self.assertEqual(portfolio.call_args.kwargs['workers'], 3)
+        self.assertEqual(portfolio.call_args.kwargs['branch_concurrency'], 1)
+        self.assertEqual(portfolio.call_args.kwargs['max_tokens'], 60000)
+
+    def test_invalid_branch_concurrency_fails_before_model_access(self):
+        for concurrency in ('0', '4'):
+            with self.subTest(concurrency=concurrency), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self.run_cli(['--proof-workers', '3', '--proof-branch-concurrency', concurrency])
+        self.client.models.assert_not_called()
+
     def test_default_prove_dispatches_bounded_job_and_prints_debrief(self):
         code = self.run_cli(['--proof-rounds', '3', '--proof-tokens', '8000',
                              '--proof-seconds', '90', '--proof-file', 'statement.tex',

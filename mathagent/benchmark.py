@@ -16,6 +16,7 @@ import time
 
 from .agent import Agent, AgentError
 from .backends import create_client, TokenBudgetError
+from .portfolio import branch_schedule
 from .proof import ProofRunner
 from .tools import Workspace
 from urllib.parse import urlparse
@@ -97,6 +98,8 @@ def parser():
     p.add_argument('--tokens', type=int, default=60000)
     p.add_argument('--selection-tokens', type=int, default=6144)
     p.add_argument('--branches', type=int, default=3)
+    p.add_argument('--branch-concurrency', type=int, default=None,
+                   help='Simultaneous logical branches within a portfolio; defaults to --branches')
     p.add_argument('--replicates', type=int, default=1)
     p.add_argument('--seed', type=int, default=20260926)
     p.add_argument('--temperature', type=float, default=0.6)
@@ -128,9 +131,11 @@ def preflight(args):
         raise ValueError('Use branches 1-8, replicates 1-100, workers/max-in-flight 1-32')
     if not args.arms or len(set(args.arms)) != len(args.arms):
         raise ValueError('Choose distinct nonempty arms')
-    width = args.branches if any(arm in {'raw-best', 'parallel'} for arm in args.arms) else 1
+    if args.branch_concurrency is not None and not 1 <= args.branch_concurrency <= 16:
+        raise ValueError('Branch concurrency must be between 1 and 16')
+    width = min(args.branches, args.branch_concurrency or args.branches) if any(arm in {'raw-best', 'parallel'} for arm in args.arms) else 1
     if args.workers * width > args.max_in_flight:
-        raise ValueError('workers times branch width must not exceed max-in-flight; reduce workers or branches')
+        raise ValueError('workers times branch width must not exceed max-in-flight; reduce workers or branch concurrency')
     if args.ctx < 2048 or args.predict < 128 or args.max_predict < args.predict or args.max_predict >= args.ctx - 1024:
         raise ValueError('Use ctx >= 2048 and 128 <= predict <= max-predict < ctx - 1024')
     if args.tokens < 1024 or args.selection_tokens < args.branches * 128 or args.tokens - args.selection_tokens < args.branches * 512:
@@ -168,6 +173,7 @@ def preflight(args):
     plan = {'version': 1, 'manifest': {k: v for k, v in data.items() if k != 'problems'},
             'problems': [{k: v for k, v in item.items() if k != 'text'} for item in data['problems']],
             'settings': settings, 'common_instruction': COMMON_INSTRUCTION, 'code_sha256': code, 'checkout': checkout,
+            'branch_schedule': branch_schedule(args.branches, args.branch_concurrency, args.seconds, args.selection_seconds),
             'provenance_warning': ('Checkpoint/server provenance is incomplete; suitable for software smoke tests only.'
                 if 'unrecorded' in {args.model_revision, args.server_image} else None),
             'output': str(output), 'jobs': len(data['problems']) * args.replicates * len(args.arms),
@@ -219,7 +225,7 @@ def _usage(calls):
             'prompt_tokens': prompts, 'reserved_unmeasured_tokens': reserved, 'request_count': len(calls)}
 
 
-def _raw(client, goal, path, args, cap, seed, max_seconds=None):
+def _raw(client, goal, path, args, cap, seed, max_seconds=None, dispatch_deadline=None):
     path.mkdir()
     max_seconds = args.seconds if max_seconds is None else max_seconds
     payload = {'model': args.model, 'messages': [{'role': 'user', 'content': goal}],
@@ -227,12 +233,22 @@ def _raw(client, goal, path, args, cap, seed, max_seconds=None):
                'options': {'num_ctx': args.ctx, 'num_predict': cap, 'temperature': args.temperature,
                            'top_p': args.top_p, 'seed': seed}}
     _json(path / 'request.json', payload)
-    call = {'reserved_tokens': cap, 'status': 'running', 'seed': seed, 'stats': {}}
+    call = {'reserved_tokens': cap, 'status': 'running', 'seed': seed, 'stats': {},
+            'max_seconds': max_seconds}
     _json(path / 'call.json', call)  # reserve durably before dispatch
     text, done, calls = '', False, False
     started = time.monotonic()
     stream = None
     try:
+        if dispatch_deadline is not None:
+            remaining = dispatch_deadline - started
+            if remaining <= 0:
+                call['reserved_tokens'] = 0
+                raise AgentError('Raw branch was not dispatched before the shared wall-time deadline')
+            max_seconds = min(max_seconds, remaining)
+            client.timeout = min(client.timeout, max_seconds)
+            call['max_seconds'] = max_seconds
+            _json(path / 'call.json', call)
         stream = client.stream(payload)
         with (path / 'stream.jsonl').open('w', encoding='utf-8') as log:
             for event in stream:
@@ -359,11 +375,19 @@ def run_job(job, output, args, gate):
         elif arm == 'raw-best':
             share = (args.tokens - args.selection_tokens) // args.branches
             # Each attempt receives a fixed partition; unused tokens are never duplicated.
-            branch_seconds = args.seconds - min(args.selection_seconds, args.seconds / 4)
-            with ThreadPoolExecutor(max_workers=args.branches) as pool:
-                futures = [pool.submit(_raw, GatedClient(create_client(args.backend, args.host, timeout=min(args.request_timeout, branch_seconds)), gate),
-                    goal, path / f'raw-{i}', args, share, branch_seed(seed, i), branch_seconds) for i in range(args.branches)]
-                candidates = [future.result() for future in futures]
+            schedule = branch_schedule(args.branches, args.branch_concurrency, args.seconds, args.selection_seconds)
+            record['branch_schedule'] = schedule
+            branch_seconds = schedule['branch_seconds']
+            deadline = started + schedule['branch_window_seconds']
+            candidates = []
+            with ThreadPoolExecutor(max_workers=schedule['branch_concurrency']) as pool:
+                for offset in range(0, args.branches, schedule['branch_concurrency']):
+                    futures = [pool.submit(_raw, GatedClient(create_client(args.backend, args.host, timeout=min(args.request_timeout, branch_seconds)), gate),
+                        goal, path / f'raw-{i}', args, share, branch_seed(seed, i), branch_seconds, deadline)
+                        for i in range(offset, min(args.branches, offset + schedule['branch_concurrency']))]
+                    candidates.extend(future.result() for future in futures)
+                    if any(candidate['call']['status'] == 'budget_violation' for candidate in candidates):
+                        break  # Never dispatch another wave after a broken server cap.
             record['raw_at_1_path'] = candidates[0]['answer_path']
             direct = _usage([item['call'] for item in candidates])
             record.update(direct)
@@ -390,7 +414,7 @@ def run_job(job, output, args, gate):
                 max_tokens=args.tokens, max_seconds=args.seconds, max_rounds=args.rounds,
                 max_predict=args.max_predict, source_files=('statement.txt',), seed=seed,
                 selection_tokens=args.selection_tokens, request_gate=None, selector_goal=goal,
-                selection_seconds=args.selection_seconds)
+                selection_seconds=args.selection_seconds, branch_concurrency=args.branch_concurrency)
             record.update(result)
             record['request_count'] = sum(len(branch.get('calls', [])) for branch in result.get('branches', [])) + len(result.get('selection', {}).get('calls', []))
         execution_errors = []
@@ -399,7 +423,7 @@ def run_job(job, output, args, gate):
             execution_errors += [str(c.get('status')) + ' selector request' for c in record.get('calls', []) if c.get('status') in {'interrupted', 'error'}]
         elif arm == 'parallel':
             execution_errors += [b.get('error') or b.get('proof_status') or 'Branch failed' for b in record.get('branches', [])
-                                 if b.get('status') in {'failed', 'interrupted'} or b.get('proof_status') in {'paused', 'interrupted', 'error', 'needs_recovery', 'budget_violation'}]
+                                 if b.get('status') in {'failed', 'interrupted', 'not_dispatched'} or b.get('proof_status') in {'paused', 'interrupted', 'error', 'needs_recovery', 'budget_violation'}]
             execution_errors += [str(c.get('status')) + ' selector request' for c in record.get('selection', {}).get('calls', []) if c.get('status') in {'interrupted', 'error'}]
         if record['status'] == 'budget_violation':
             execution_errors.append(record.get('error') or 'Server exceeded the reserved output allowance')
@@ -475,7 +499,7 @@ def execute(args, data, plan):
     records = []
     # Fixed request partitions avoid cross-process semaphore leaks if a worker
     # is killed. A job runs either N branches or one selector, never both;
-    # preflight requires workers * N <= max_in_flight.
+    # preflight requires workers * effective branch concurrency <= max_in_flight.
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(run_job, job, output, args, None): job for job in jobs}
         with (output / 'outputs.jsonl').open('w', encoding='utf-8') as log:

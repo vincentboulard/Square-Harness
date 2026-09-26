@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Separate single-A10 Q4 pilot with pinned weights/build, one 32K inference slot,
+  and its own deployment and benchmark launchers; the two-V100S Q8 profile stays available.
+- Bounded branch scheduling preserves three attempts and token partitions while
+  executing one branch at a time, with dispatch-based time windows and recorded scheduling.
+- One-slot serving acceptance is labeled sequential capacity rather than parallel speedup.
+
 - OpenAI-compatible local model transport for vLLM, with streamed reasoning,
   tool calls, structured reviews and explicit token usage.
 - Isolated parallel proof portfolios with fixed aggregate token budgets and

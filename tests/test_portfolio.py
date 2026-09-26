@@ -14,7 +14,7 @@ import warnings
 from mathagent.agent import Agent, AgentError, Ollama
 from mathagent.backends import TokenBudgetError
 from mathagent.ledger import ProofStore
-from mathagent.portfolio import branch_seed, run_proof_portfolio, select_candidates, _branch_result, _stop_processes, _GatedClient
+from mathagent.portfolio import branch_seed, branch_schedule, run_proof_portfolio, select_candidates, _branch_result, _stop_processes, _GatedClient
 from mathagent.tools import Workspace
 
 
@@ -210,6 +210,13 @@ class BranchInspectionTests(unittest.TestCase):
         self.assertEqual(result['tokens_charged'], 1000)
         self.assertIsNone(result['candidate'])
 
+    def test_provably_undispatched_branch_has_no_inference_charge(self):
+        self.job['dispatched'] = False
+        result = _branch_result(self.job)
+        self.assertEqual(result['status'], 'not_dispatched')
+        self.assertEqual(result['tokens_charged'], 0)
+        self.assertIsNone(result['candidate'])
+
     def test_truncated_draft_is_ineligible(self):
         self.store(complete=False)
         self.assertIsNone(_branch_result(self.job)['candidate'])
@@ -219,6 +226,19 @@ class BranchInspectionTests(unittest.TestCase):
         result = _branch_result(self.job)
         self.assertTrue(result['budget_violation'])
         self.assertIsNone(result['candidate'])
+
+    def test_request_cap_violation_below_branch_allocation_is_still_fatal(self):
+        store = self.store(tokens=257)
+        store.state['status'] = 'budget_violation'
+        store.save()
+        result = _branch_result(self.job)
+        self.assertTrue(result['budget_violation'])
+        self.assertEqual(result['tokens_charged'], 257)
+        self.assertIsNone(result['candidate'])
+        store.state['status'] = 'budget_exhausted'
+        store.state['calls'][0]['status'] = 'budget_violation'
+        store.save()
+        self.assertTrue(_branch_result(self.job)['budget_violation'])
 
     def test_corrupt_worker_result_does_not_hide_durable_ledger_usage(self):
         self.store(tokens=123)
@@ -304,6 +324,133 @@ class PortfolioCancellationTests(unittest.TestCase):
 
 
 class ParallelProofIntegration(unittest.TestCase):
+    def test_three_logical_branches_use_one_slot_and_start_only_when_dispatched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'input'
+            source.mkdir()
+            result_dir = root / 'portfolio'
+            lock = threading.Lock()
+            requests, starts, queued_ledgers = [], [], []
+            active = maximum = 0
+            fail_seed = None
+            overspend_seed = None
+
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, *args):
+                    pass
+
+                def do_POST(self):
+                    nonlocal active, maximum
+                    payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    with lock:
+                        active += 1
+                        maximum = max(active, maximum)
+                        requests.append(payload)
+                    schema = payload.get('format')
+                    if not schema:
+                        state = json.loads((result_dir / 'state.json').read_text())
+                        index = next(i for i, job in enumerate(state['jobs']) if job['seed'] == payload['options']['seed'])
+                        starts.append((index, time.monotonic(), state['jobs'][index]['max_seconds']))
+                        queued_ledgers.extend(list((Path(job['workspace']) / '.mathagent' / 'proofs').glob('*'))
+                                              for job in state['jobs'][index + 1:])
+                    # Long enough to distinguish actual sequential work from a
+                    # parent that starts three children and queues HTTP calls.
+                    time.sleep(0.12)
+                    if not schema and payload['options']['seed'] == fail_seed:
+                        self.send_response(503)
+                        self.end_headers()
+                        with lock:
+                            active -= 1
+                        self.wfile.write(b'Simulated first-branch failure')
+                        return
+
+                    def value(spec):
+                        if spec['type'] == 'object':
+                            return {key: value(child) for key, child in spec['properties'].items()}
+                        if spec['type'] == 'array':
+                            return []
+                        if spec['type'] == 'boolean':
+                            return False
+                        if 'enum' in spec:
+                            return 'gap' if 'gap' in spec['enum'] else spec['enum'][0]
+                        return 'A mathematical step remains unproved.'
+
+                    response = value(schema) if schema else PROOF
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/x-ndjson')
+                    self.end_headers()
+                    with lock:
+                        active -= 1
+                    count = payload['options']['num_predict'] + 1 if not schema and payload['options']['seed'] == overspend_seed else 10
+                    self.wfile.write((json.dumps(event(response, count=count)) + '\n').encode())
+
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                agent = Agent(Ollama(f'http://127.0.0.1:{server.server_port}'), Workspace(source),
+                              model='test', ctx=32768, predict=256)
+                result = run_proof_portfolio(agent, 'Prove x=x for every real x.', output_dir=result_dir,
+                    workers=3, branch_concurrency=1, max_tokens=60000, selection_tokens=6144,
+                    max_seconds=15, selection_seconds=3, max_rounds=1, max_predict=512, seed=7)
+                self.assertEqual(maximum, 1)
+                self.assertEqual([index for index, _, _ in starts], [0, 1, 2])
+                self.assertTrue(all(seconds == 4 for _, _, seconds in starts))
+                self.assertTrue(all(not files for files in queued_ledgers))
+                self.assertEqual([job['seed'] for job in result['jobs']], [branch_seed(7, i) for i in range(3)])
+                self.assertEqual([job['token_budget'] for job in result['jobs']], [17952] * 3)
+                self.assertEqual([job['wave'] for job in result['jobs']], [0, 1, 2])
+                self.assertTrue(all(job['dispatched'] for job in result['jobs']))
+                self.assertGreater(result['jobs'][2]['dispatch_seconds'], result['jobs'][1]['dispatch_seconds'])
+                self.assertEqual(len(result['selection']['calls']), 3)
+                self.assertEqual(Path(result['answer_path']).read_text(), PROOF)
+                for branch in result['branches']:
+                    store = ProofStore.load(Path(branch['directory']) / 'workspace', branch['proof_id'])
+                    self.assertEqual(store.state['settings']['max_seconds'], 4)
+                # A failed first attempt cannot suppress the other logical
+                # attempts or consume their individual wall-time allowances.
+                result_dir = root / 'failed-first'
+                fail_seed = branch_seed(7, 0)
+                starts.clear()
+                result = run_proof_portfolio(agent, 'Prove x=x for every real x.', output_dir=result_dir,
+                    workers=3, branch_concurrency=1, max_tokens=60000, selection_tokens=6144,
+                    max_seconds=15, selection_seconds=3, max_rounds=1, max_predict=512, seed=7)
+                self.assertEqual([index for index, _, _ in starts], [0, 1, 2])
+                self.assertTrue(all(seconds == 4 for _, _, seconds in starts))
+                self.assertEqual(result['branches'][0]['proof_status'], 'paused')
+                self.assertTrue(all(branch['candidate'] for branch in result['branches'][1:]))
+                self.assertEqual(len(result['selection']['calls']), 2)
+                self.assertEqual(maximum, 1)
+                result_dir = root / 'over-cap-first'
+                fail_seed, overspend_seed = None, branch_seed(7, 0)
+                starts.clear()
+                result = run_proof_portfolio(agent, 'Prove x=x for every real x.', output_dir=result_dir,
+                    workers=3, branch_concurrency=1, max_tokens=60000, selection_tokens=6144,
+                    max_seconds=15, selection_seconds=3, max_rounds=1, max_predict=512, seed=7)
+                self.assertEqual([index for index, _, _ in starts], [0])
+                self.assertEqual(result['status'], 'budget_violation')
+                self.assertEqual(result['tokens_charged'], 257)
+                self.assertTrue(result['branches'][0]['budget_violation'])
+                self.assertTrue(all(branch['status'] == 'not_dispatched' for branch in result['branches'][1:]))
+                self.assertNotIn('selection', result)
+                self.assertIsNone(result['answer_path'])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+    def test_wave_allocation_preserves_default_and_validates_concurrency(self):
+        self.assertEqual(branch_schedule(3, None, 14400, 1800)['branch_seconds'], 12600)
+        schedule = branch_schedule(3, 1, 43200, 3600)
+        self.assertEqual(schedule['branch_seconds'], 13200)
+        self.assertEqual(schedule['waves'], 3)
+        self.assertEqual(branch_schedule(3, 2, 43200, 3600)['waves'], 2)
+        self.assertEqual(branch_schedule(3, 8, 43200, 3600)['branch_concurrency'], 3)
+        for width in (0, -1, 17, 1.5, True):
+            with self.assertRaises(ValueError):
+                branch_schedule(3, width, 43200, 3600)
+
     def test_two_processes_overlap_keep_sources_private_and_share_total_allocation(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -99,6 +100,38 @@ class BenchmarkTests(unittest.TestCase):
         self.args.max_in_flight = 6
         benchmark.preflight(self.args)
 
+    def test_one_slot_keeps_three_logical_branches_and_matched_time_partitions(self):
+        self.args.branch_concurrency = 1
+        self.args.max_in_flight = 1
+        self.args.seconds, self.args.selection_seconds = 43200, 3600
+        self.args.request_timeout = 7200
+        data, plan = benchmark.preflight(self.args)
+        self.assertEqual(plan['settings']['branches'], 3)
+        self.assertEqual(plan['branch_schedule']['branch_concurrency'], 1)
+        self.assertEqual(plan['branch_schedule']['branch_seconds'], 13200)
+        output = self.root / 'runs'
+        output.mkdir()
+        with patch.object(benchmark, 'create_client', return_value=FakeClient()) as factory:
+            result = benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
+        self.assertEqual(result['branch_schedule'], plan['branch_schedule'])
+        self.assertEqual(len(result['candidates']), 3)
+        self.assertTrue(all(call.kwargs['timeout'] == 7200 for call in factory.call_args_list))
+        for index in range(3):
+            call = json.loads((output / 'jobs' / result['id'] / f'raw-{index}' / 'call.json').read_text())
+            self.assertEqual(call['reserved_tokens'], 17952)
+            self.assertEqual(call['seed'], branch_seed(4, index))
+            self.assertEqual(call['max_seconds'], 13200)
+        self.args.workers = 2
+        self.args.output = self.root / 'second-run'
+        with self.assertRaisesRegex(ValueError, 'branch width'):
+            benchmark.preflight(self.args)
+
+    def test_invalid_branch_concurrency_is_rejected_without_inference(self):
+        for width in (0, -1, 17):
+            self.args.branch_concurrency = width
+            with self.assertRaisesRegex(ValueError, 'Branch concurrency'):
+                benchmark.preflight(self.args)
+
     def test_context_check_includes_raw_partition_not_just_predict(self):
         self.args.ctx = 16384
         with self.assertRaisesRegex(ValueError, 'Context'):
@@ -156,6 +189,16 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result['measured_completion_tokens'], 3 * (17952 + 7))
         self.assertEqual(result['reserved_unmeasured_tokens'], 0)
         self.assertEqual(result['prompt_tokens'], 12)
+        self.args.branch_concurrency = 1
+        output = self.root / 'one-slot'
+        output.mkdir()
+        client = OverspendingClient()
+        with patch.object(benchmark, 'create_client', return_value=client):
+            result = benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(result['measured_completion_tokens'], 17952 + 7)
+        self.assertEqual(result['reserved_unmeasured_tokens'], 0)
 
     def test_raw_time_guard_closes_stream_and_preserves_partial_answer(self):
         class SlowClient(FakeClient):
@@ -271,6 +314,8 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_real_openai_http_cli_records_two_jobs_and_rejects_rerun(self):
         requests = []
+        lock = threading.Lock()
+        active, maximum = 0, 0
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -280,8 +325,13 @@ class BenchmarkTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b'{"data":[{"id":"test-model"}]}')
             def do_POST(self):
+                nonlocal active, maximum
                 payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                requests.append(payload)
+                with lock:
+                    requests.append(payload)
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.02)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
@@ -302,6 +352,8 @@ class BenchmarkTests(unittest.TestCase):
                     {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
                     {'choices': [], 'usage': {'prompt_tokens': 13, 'completion_tokens': 5, 'total_tokens': 18}},
                 ]
+                with lock:
+                    active -= 1
                 for event in events:
                     self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
                 self.wfile.write(b'data: [DONE]\n\n')
@@ -323,6 +375,33 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(again.returncode, 2)
             self.assertIn('already exists', again.stderr)
             self.assertEqual(len(requests), 2)
+            maximum = 0
+            serialized = [sys.executable, '-m', 'mathagent.benchmark', '--manifest', str(self.manifest),
+                          '--output', str(self.root / 'one-slot'), '--model', 'test-model',
+                          '--host', f'http://127.0.0.1:{server.server_port}', '--rounds', '1',
+                          '--predict', '1024', '--max-predict', '1024',
+                          '--branch-concurrency', '1', '--max-in-flight', '1',
+                          '--seconds', '43200', '--selection-seconds', '3600', '--request-timeout', '7200']
+            process = subprocess.run(serialized, text=True, capture_output=True, timeout=40)
+            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
+            rows = [json.loads(line) for line in (self.root / 'one-slot' / 'outputs.jsonl').read_text().splitlines()]
+            self.assertEqual(len(rows), 6)
+            self.assertEqual(maximum, 1)
+            self.assertTrue(all(row['status'] != 'error' for row in rows), rows)
+            for row in rows:
+                if row['arm'] == 'raw-best':
+                    self.assertEqual(len(row['candidates']), 3)
+                    for index in range(3):
+                        call = json.loads((self.root / 'one-slot' / 'jobs' / row['id'] / f'raw-{index}' / 'call.json').read_text())
+                        self.assertEqual(call['seed'], branch_seed(row['seed'], index))
+                        self.assertEqual(call['reserved_tokens'], 17952)
+                        self.assertEqual(call['max_seconds'], 13200)
+                elif row['arm'] == 'parallel':
+                    self.assertEqual(len(row['branches']), 3)
+                    self.assertEqual([job['token_budget'] for job in row['jobs']], [17952] * 3)
+                    self.assertEqual([job['seed'] for job in row['jobs']], [branch_seed(row['seed'], i) for i in range(3)])
+                    self.assertEqual([job['max_seconds'] for job in row['jobs']], [13200] * 3)
+                    self.assertTrue(all(job['dispatched'] for job in row['jobs']))
             all_arms = [sys.executable, '-m', 'mathagent.benchmark', '--manifest', str(self.manifest),
                         '--output', str(self.root / 'all-arms'), '--model', 'test-model',
                         '--host', f'http://127.0.0.1:{server.server_port}', '--rounds', '1',
