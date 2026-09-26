@@ -90,8 +90,14 @@ class ProofToolContextTests(unittest.TestCase):
         self.assertEqual(len(self.client.requests), 1)
         self.assertEqual(len(runner.state['pending']['tools']), 1)
         saved = json.loads(runner.store.read_artifact(runner.state['pending']['tools'][0]))
-        self.assertEqual(json.loads(saved['result'])['content'], '\\' * 6000)
-        self.assertEqual(json.loads(saved['result'])['next_offset'], 6000)
+        page = json.loads(saved['result'])
+        # Escaping is included in the page budget; retain the exact returned
+        # prefix and continuation rather than assuming 6000 raw characters.
+        self.assertGreater(len(page['content']), 1000)
+        self.assertLessEqual(len(saved['result']), 7800)
+        self.assertEqual(page['content'], '\\' * len(page['content']))
+        self.assertEqual(page['next_offset'], len(page['content']))
+        self.assertEqual(page['total_characters'], 12000)
 
     def test_recorder_reads_current_material_last_without_mutating_past_evidence(self):
         runner = self.runner([response(batch())], ctx=16384)

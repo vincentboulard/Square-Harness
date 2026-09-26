@@ -8,6 +8,8 @@ mathagent-transcript.json
 
 # Keep local research inputs and credentials out of the public source tree.
 /examples/
+/benchmark-data/
+/benchmark-runs/
 .env
 .env.*
 !.env.example

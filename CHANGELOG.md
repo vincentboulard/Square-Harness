@@ -22,6 +22,36 @@
 - Effort levels (Low to Brezis) replace budget fields in the interface; online
   search is a per-conversation and per-report switch, locked off by `--offline`.
 
+- Opt-in cooperative proof strategy: an advisor proposes precise subproblems,
+  bounded workers follow their dependencies, and an assembly job checks the
+  original theorem. One targeted repair is allowed under a fixed total budget.
+- Separate `cooperative` benchmark arm with frozen allocations and blinded
+  grading; default arms and existing A10/V100 launchers remain unchanged.
+- Complete candidates that pass the fresh critic skip recorder inference and
+  proceed to final audit; partial work keeps the bounded recorder workflow.
+
+- Separate single-A10 Q4 pilot with pinned weights/build, one 32K inference slot,
+  and its own deployment and benchmark launchers; the two-V100S Q8 profile stays available.
+- Bounded branch scheduling preserves three attempts and token partitions while
+  executing one branch at a time, with dispatch-based time windows and recorded scheduling.
+- One-slot serving acceptance is labeled sequential capacity rather than parallel speedup.
+- Serving acceptance supports the pinned llama.cpp token-state array; A10 logs
+  retain GPU placement and memory diagnostics for live validation.
+
+- OpenAI-compatible local model transport for vLLM, with streamed reasoning,
+  tool calls, structured reviews and explicit token usage.
+- Isolated parallel proof portfolios with fixed aggregate token budgets and
+  selection of an existing candidate after independent review.
+- Statement-only benchmark manifests, direct-sampling and harness comparison,
+  saved run metadata and anonymized submissions for mathematical grading.
+- Pinned two-V100S deployment using CUDA 12 llama.cpp and one shared Q8_0
+  model, with three 32K context slots and recorded model/image identities.
+- Explicit llama.cpp transport with exact formatted-prompt context checks,
+  streamed reasoning, tool history, structured reviews and token accounting.
+- Concurrent-capacity acceptance checks, longer configurable time guards, and
+  a launch wrapper that binds the benchmark to the verified serving record.
+  GPU fit, throughput and mathematical gains still require the actual server.
+
 ## 0.4.0 — initial public release candidate
 
 Early experimental version; prepared for publication, not a stability or

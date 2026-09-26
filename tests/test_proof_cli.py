@@ -35,6 +35,40 @@ class ProofCliTests(unittest.TestCase):
     def output(self):
         return '\n'.join(str(call.args[0]) for call in self.ui.say.call_args_list)
 
+    def test_llamacpp_client_uses_explicit_backend_and_long_request_timeout(self):
+        self.client.models.return_value = ['square-qwen']
+        with patch.object(cli, 'create_client', return_value=self.client) as factory:
+            code = self.run_cli(['--backend', 'llamacpp', '--request-timeout', '7200',
+                                 '--prompt', 'Prove the supplied statement.'])
+        self.assertEqual(code, 0)
+        factory.assert_called_once_with('llamacpp', 'http://localhost:8000', timeout=7200.0)
+        self.runner.start.assert_called_once()
+
+    def test_a10_proof_branch_concurrency_is_forwarded_without_reducing_branches(self):
+        with patch('mathagent.portfolio.run_proof_portfolio', return_value={'status': 'selected_unverified'}) as portfolio:
+            self.assertEqual(self.run_cli(['--proof-workers', '3', '--proof-branch-concurrency', '1',
+                                          '--prompt', 'Prove the supplied statement.']), 0)
+        self.assertEqual(portfolio.call_args.kwargs['workers'], 3)
+        self.assertEqual(portfolio.call_args.kwargs['branch_concurrency'], 1)
+        self.assertEqual(portfolio.call_args.kwargs['max_tokens'], 60000)
+
+    def test_invalid_branch_concurrency_fails_before_model_access(self):
+        for concurrency in ('0', '4'):
+            with self.subTest(concurrency=concurrency), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self.run_cli(['--proof-workers', '3', '--proof-branch-concurrency', concurrency])
+        self.client.models.assert_not_called()
+
+    def test_portfolio_protocol_failure_is_explained_even_with_selected_answer(self):
+        result = {'status': 'error', 'workflow_status': 'selected_model_approved',
+                  'answer_path': str(self.root / 'answer.md'),
+                  'error': 'branch-000: Recorder repair failed.'}
+        with patch('mathagent.portfolio.run_proof_portfolio', return_value=result):
+            self.assertEqual(self.run_cli(['--proof-workers', '3', '--prompt', 'Prove it.']), 0)
+        self.assertIn('Parallel proof portfolio: error', self.output())
+        self.assertIn(result['error'], self.output())
+        self.assertIn(result['answer_path'], self.output())
+
     def test_default_prove_dispatches_bounded_job_and_prints_debrief(self):
         code = self.run_cli(['--proof-rounds', '3', '--proof-tokens', '8000',
                              '--proof-seconds', '90', '--proof-file', 'statement.tex',

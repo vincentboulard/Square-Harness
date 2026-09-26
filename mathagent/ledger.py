@@ -246,7 +246,7 @@ class ProofStore:
         for parent in (workspace / ".mathagent", directory.parent, directory, directory / "artifacts"):
             _directory(parent)
         # An unsafe path is not ordinary corruption and must never trigger fallback.
-        for name in ("state.json", "state.backup.json", "run.lock", "state.lock", "report.md", "ledger.md"):
+        for name in ("state.json", "state.backup.json", "run.lock", "state.lock", "report.md", "ledger.md", "proof.md"):
             _regular(directory / name, optional=True)
         state, recovered = cls._read_state(directory, proof_id)
         if recovered:
@@ -272,7 +272,7 @@ class ProofStore:
         for path in (self.workspace / ".mathagent", self.directory.parent, self.directory,
                      self.directory / "artifacts"):
             _directory(path)
-        for name in ("state.json", "state.backup.json", "run.lock", "state.lock", "report.md", "ledger.md"):
+        for name in ("state.json", "state.backup.json", "run.lock", "state.lock", "report.md", "ledger.md", "proof.md"):
             _regular(self.directory / name, optional=True)
 
     @contextmanager
@@ -425,6 +425,11 @@ class ProofStore:
     def write_ledger(self, text: str) -> None:
         self._check_paths()
         _atomic_write(self.directory / "ledger.md", _bytes(text))
+
+    def write_proof(self, text: str) -> None:
+        """Export the exact audited candidate separately from its audit trail."""
+        self._check_paths()
+        _atomic_write(self.directory / "proof.md", _bytes(text))
 
     @classmethod
     def list(cls, workspace_root) -> list[dict]:

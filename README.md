@@ -2,7 +2,7 @@
 
 **A local-first, open-source harness for mathematical research.**
 
-Square Harness connects a language model running through [Ollama](https://ollama.com/)
+Square Harness connects a language model running through [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://vllm.ai/)
 to a mathematical workspace. It can read manuscripts, explore proof strategies,
 keep a record of unfinished work, and prepare literature and referee-report drafts.
 
@@ -15,6 +15,9 @@ checking: a model's critique or agreement is not a proof certificate.
 - **Explore and critique:** work with local LaTeX and text files through a terminal interface.
 - **Continue proof work:** retain statements, arguments, objections, and next steps
   across bounded, resumable solver/reviewer rounds.
+- **Compare proof strategies:** run isolated parallel branches with a shared token
+  ceiling, or opt into [cooperative subproblem work](docs/usage.md#cooperative-proof-work),
+  and benchmark them against direct model sampling.
 - **Investigate literature:** read cached or retrieved sources and draft reports
   with source locations and explicit limitations.
 - **Write up notes:** turn rough notes, drafts or PDFs into LaTeX in your own macros
@@ -91,12 +94,15 @@ from the checkout without installing the optional terminal UI dependencies.
 | `square-harness --gui` | Open the visual interface instead of the terminal prompt |
 
 Proof and research jobs are saved under `.mathagent/` in your workspace.
-Ctrl+C pauses a job; resuming preserves its remaining budget.
+Sequential proof jobs can resume after Ctrl+C with their remaining budget;
+parallel portfolios and cooperative parents are one-shot runs.
 Launch with `--online` for external research. Proof search additionally requires
 `--proof-literature` to use literature tools.
 
 See the [usage guide](docs/usage.md) for manuscript inputs, reports, budgets,
 optional PDF/Python tools, and all command-line settings.
+For GPU experiments, see the [single-A10 first pilot](docs/a10.md),
+[two-V100S Q8 setup](docs/ovh.md), and [benchmark protocol](docs/benchmark.md). GPU performance must be measured on the target server.
 
 ## Limits and privacy
 

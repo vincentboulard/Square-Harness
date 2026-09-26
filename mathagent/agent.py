@@ -1,4 +1,4 @@
-"""Native Ollama HTTP client and bounded agent loop (standard library only)."""
+"""Native Ollama HTTP client and bounded, backend-independent agent loop."""
 import copy
 import json
 from urllib.error import HTTPError, URLError
@@ -19,6 +19,8 @@ class _NoModelRedirects(HTTPRedirectHandler):
 
 
 class Ollama:
+    backend = 'ollama'
+
     def __init__(self, host='http://localhost:11434', timeout=600):
         self.host = host.rstrip('/')
         self.timeout = timeout
@@ -55,10 +57,12 @@ class Ollama:
 
 class Agent:
     def __init__(self, client, workspace, model='qwen3.8:27b', ctx=8192,
-                 predict=4096, think=True, mode='prove', max_rounds=8):
+                 predict=4096, think=True, mode='prove', max_rounds=8,
+                 seed=None, temperature=0.6, top_p=0.95):
         self.client, self.workspace = client, workspace
         self.model, self.ctx, self.predict = model, ctx, predict
         self.think, self.mode, self.max_rounds = think, mode, max_rounds
+        self.seed, self.temperature, self.top_p = seed, temperature, top_p
         self.history = []
         self.last_stats = {}
 
@@ -84,7 +88,10 @@ class Agent:
                 messages = messages[user_indices[1]:]
                 emit('notice', 'Dropped the oldest complete turn to fit the approximate context budget.')
             payload = {'model': self.model, 'messages': [system] + messages, 'stream': True,
-                       'think': self.think, 'options': {'num_ctx': self.ctx, 'num_predict': self.predict}}
+                       'think': self.think, 'options': {'num_ctx': self.ctx, 'num_predict': self.predict,
+                           'temperature': self.temperature, 'top_p': self.top_p}}
+            if self.seed is not None:
+                payload['options']['seed'] = (self.seed + round_no) % (2 ** 31)
             if tools:
                 payload['tools'] = tools
             emit('start', '')
@@ -105,7 +112,7 @@ class Agent:
                     done = True
             emit('end', '')
             if not done:
-                raise AgentError('Ollama stream ended before its completion event. This turn was not saved.')
+                raise AgentError('Model stream ended before its completion event. This turn was not saved.')
             if thinking:
                 assistant['thinking'] = thinking
             if calls:
@@ -122,7 +129,10 @@ class Agent:
                     args = fn.get('arguments', {})
                     emit('tool', name + ' ' + json.dumps(args, ensure_ascii=False)[:240])
                     result = self.workspace.execute(name, args)
-                    messages.append({'role': 'tool', 'tool_name': name, 'content': result})
+                    tool_message = {'role': 'tool', 'tool_name': name, 'content': result}
+                    if call.get('id'):
+                        tool_message['tool_call_id'] = call['id']
+                    messages.append(tool_message)
                     emit('result', result[:200])
                 if round_no + 1 == self.max_rounds:
                     emit('notice', 'Tool-round limit reached. Requesting a final answer without further tools.')

@@ -16,6 +16,7 @@ import time
 import uuid
 
 from .agent import AgentError
+from .backends import TokenBudgetError
 from .ledger import _atomic_write, _bytes, _directory, _read, _regular, _now, _ID
 from .tools import schema
 
@@ -92,7 +93,7 @@ def _job_directory(root, job_id):
 
 class ResearchRunner:
     KINDS = ('literature', 'referee')
-    TERMINAL = ('reviewed', 'partial', 'budget_exhausted')
+    TERMINAL = ('reviewed', 'partial', 'budget_exhausted', 'budget_violation')
 
     def __init__(self, agent, emit=lambda kind, value: None):
         self.agent, self.emit = agent, emit
@@ -155,6 +156,7 @@ class ResearchRunner:
     def _create(self, goal, kind, settings, sources, skill):
         settings.update(model=self.agent.model, ctx=self.agent.ctx, predict=self.agent.predict,
                         host=getattr(self.agent.client, 'host', None),
+                        backend=getattr(self.agent.client, 'backend', 'ollama'), seed=self.agent.seed,
                         online=bool(self.literature and self.literature.online))
         root = self.agent.workspace.root / '.mathagent'
         _directory(root, create=True)
@@ -185,8 +187,11 @@ class ResearchRunner:
             raise ValueError(f'This is a {self.state["kind"]} job; resume it from its own mode')
         if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
             raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
+        if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
+            raise ValueError('Resume with the original --backend')
         for key in ('model', 'ctx', 'predict'):
             setattr(self.agent, key, self.state['settings'][key])
+        self.agent.seed = self.state['settings'].get('seed')
         return self._run()
 
     @staticmethod
@@ -288,6 +293,8 @@ class ResearchRunner:
             except ResearchBudget as exc:
                 self.state['status'] = 'budget_exhausted'
                 self.state['stop_reason'] = str(exc)
+            except TokenBudgetError as exc:
+                self.state['status'], self.state['stop_reason'] = 'budget_violation', str(exc)
             except Exception as exc:
                 self.state['status'] = 'error'
                 self.state['stop_reason'] = f'{type(exc).__name__}: {exc}'
@@ -512,6 +519,8 @@ class ResearchRunner:
         fixed, optional = self._material(role)
         payload = {'model': self.agent.model, 'stream': True, 'think': False,
                    'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': 0.2}}
+        if self.agent.seed is not None:
+            payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
         if tools:
             payload['tools'] = tools
         if format_schema:
@@ -571,6 +580,8 @@ class ResearchRunner:
                     self._check_time()
             if not done:
                 raise AgentError('Model stream ended without completion; partial output saved')
+            if type(stats.get('eval_count')) is int and stats['eval_count'] > cap:
+                raise TokenBudgetError(stats, cap)
             for field, counter, reservation in [('eval_count', 'tokens_charged', cap), ('prompt_eval_count', 'input_tokens_charged', estimated)]:
                 count = stats.get(field)
                 if type(count) is int and count >= 0:
@@ -579,8 +590,15 @@ class ResearchRunner:
             complete = stats.get('done_reason') != 'length'
             call['status'] = 'complete' if complete else 'truncated'
             return {'text': text, 'calls': tool_calls if complete else [], 'complete': complete}
-        except BaseException:
+        except BaseException as exc:
             call['status'] = 'interrupted'
+            if isinstance(exc, TokenBudgetError):
+                call['stats'] = exc.stats
+                self.state['tokens_charged'] += exc.stats['eval_count'] - cap
+                prompt_count = exc.stats.get('prompt_eval_count')
+                if type(prompt_count) is int and prompt_count >= 0:
+                    self.state['input_tokens_charged'] += prompt_count - estimated
+                call['status'] = 'budget_violation'
             raise
         finally:
             if stream is not None and hasattr(stream, 'close'):

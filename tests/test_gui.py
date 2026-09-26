@@ -265,8 +265,9 @@ AUDIT = {'verdict': 'complete', 'explanation': 'Reflexivity covers every real x.
 class ProofWorkflowTests(GuiCase):
     def test_start_runs_to_an_audited_candidate_and_is_inspectable(self):
         (self.root / 'identity.tex').write_text('Prove that every real $x$ satisfies $x=x$.\n')
+        # A complete candidate the critic accepts goes straight to the whole-proof audit.
         self.fake.replies = [tool('read_file', {'path': 'identity.tex'}), text(PROOF, chunks=4),
-                             text(json.dumps(CRITIC)), text(json.dumps(RECORD)), text(json.dumps(AUDIT))]
+                             text(json.dumps(CRITIC)), text(json.dumps(AUDIT))]
         started = self.ok('POST', '/api/proofs', {'goal': 'Prove the statement in identity.tex.',
                                                   'source_files': ['identity.tex'], 'rounds': 2,
                                                   'tokens': 8000, 'seconds': 60})
@@ -283,7 +284,7 @@ class ProofWorkflowTests(GuiCase):
         self.assertEqual(detail['candidate'], PROOF)
         self.assertEqual(detail['claims'][0]['status'], 'reviewed')
         self.assertEqual(detail['sources'], [{'path': 'identity.tex', 'sha256': detail['sources'][0]['sha256'], 'lines': 1}])
-        self.assertEqual([c['role'] for c in detail['calls']], ['solver', 'solver', 'critic', 'recorder', 'auditor'])
+        self.assertEqual([c['role'] for c in detail['calls']], ['solver', 'solver', 'critic', 'auditor'])
         self.assertGreater(len(detail['artifacts']), 5)
         listed = self.ok('GET', '/api/proofs')['jobs']
         self.assertEqual([job['id'] for job in listed], [proof_id])

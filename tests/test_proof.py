@@ -91,18 +91,18 @@ class ProofControllerTests(unittest.TestCase):
 
     def test_success_requires_distinct_full_audit_and_offline_resume(self):
         runner = self.runner([response('For arbitrary real x, reflexivity gives x=x.'),
-                              response(critic()), response(batch()), response(audit())])
+                              response(critic()), response(audit())])
         result = runner.start('Prove x=x for every real x.')
         self.assertEqual(result['status'], 'candidate_complete')
-        self.assertEqual([c['role'] for c in runner.state['calls']], ['solver', 'critic', 'recorder', 'auditor'])
-        self.assertEqual(runner.state['tokens_charged'], 40)
+        self.assertEqual([c['role'] for c in runner.state['calls']], ['solver', 'critic', 'auditor'])
+        self.assertEqual(runner.state['tokens_charged'], 30)
         self.assertEqual(runner.state['rounds_started'], 1)
         self.assertFalse(self.client.requests[1]['think'])
         self.assertNotIn('tools', self.client.requests[2])
         before = copy.deepcopy(runner.state)
         runner.resume(result['id'])
         self.assertEqual(runner.state, before)
-        self.assertEqual(len(self.client.requests), 4)
+        self.assertEqual(len(self.client.requests), 3)
 
     def test_truncated_thinking_is_reviewed_and_objection_survives_next_round(self):
         objection = 'The claimed bound fails at the admissible value x=0.'
@@ -113,7 +113,7 @@ class ProofControllerTests(unittest.TestCase):
                               response('PARTIAL: The proposed positivity argument remains unsupported.'),
                               response(critic(missing_work='A valid argument is still needed.', complete_candidate=False)),
                               response(batch(bad, complete_candidate=False)), response('For arbitrary x, equality is reflexive.'),
-                              response(critic()), response(batch()), response(audit())])
+                              response(critic()), response(audit())])
         result = runner.start('Prove x=x for every real x.', max_rounds=2)
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual(runner.state['claims'][0]['status'], 'refuted')
@@ -126,21 +126,26 @@ class ProofControllerTests(unittest.TestCase):
     def test_repeated_rejected_claim_cannot_be_promoted_without_resolution(self):
         bad = review(disposition='refuted', objection='This derivation uses an extra assumption.',
                      evidence='It assumes x>0 although x=0 is allowed.', complete_candidate=False)
-        runner = self.runner([response('An attempted proof.'), response(critic()), response(batch(bad)),
-                              response('I now assert the same conclusion.'), response(critic()), response(batch())])
+        runner = self.runner([response('An attempted proof.'), response(critic(complete_candidate=False)), response(batch(bad)),
+                              response('I now assert the same conclusion.'), response(critic(complete_candidate=False)),
+                              response(batch()), response(batch())])
         runner.start('Prove x=x.', max_rounds=2)
-        self.assertEqual([c['status'] for c in runner.state['claims']], ['refuted', 'gap'])
-        self.assertIn('did not explicitly answer', runner.state['claims'][1]['objection'])
-        self.assertEqual(len(self.client.requests), 6)
+        self.assertEqual([c['status'] for c in runner.state['claims']], ['refuted'])
+        self.assertEqual(runner.state['status'], 'stalled')
+        self.assertIn('unresolved recorded objections', runner.state['stop_reason'])
+        self.assertIsNone(runner.state['final_audit'])
+        self.assertEqual(len(self.client.requests), 7)
 
     def test_explicit_repair_is_new_record_old_objection_is_preserved(self):
         bad = review(disposition='gap', objection='The argument assumes positivity.',
                      evidence='x=0 is admissible.', complete_candidate=False)
         fixed = review(resolves=['C1'], resolution='Reflexivity applies also when x=0; positivity is unused.')
-        runner = self.runner([response('A flawed attempt.'), response(critic()), response(batch(bad)),
+        runner = self.runner([response('A flawed attempt.'), response(critic(complete_candidate=False)), response(batch(bad)),
                               response('For every real x, reflexivity gives x=x.'),
-                              response(critic()), response(batch(fixed)), response(audit())])
-        self.assertEqual(runner.start('Prove x=x.', max_rounds=2)['status'], 'candidate_complete')
+                              response(critic(complete_candidate=False)), response(batch(fixed, complete_candidate=False)),
+                              response('For arbitrary real x, reflexivity gives x=x.'),
+                              response(critic()), response(audit())])
+        self.assertEqual(runner.start('Prove x=x.', max_rounds=3)['status'], 'candidate_complete')
         self.assertEqual(runner.state['claims'][0]['status'], 'gap')
         self.assertEqual(runner.state['claims'][1]['resolves'], ['C1'])
 
@@ -168,16 +173,17 @@ class ProofControllerTests(unittest.TestCase):
         for verdict in (response('{incomplete'), response(batch(), complete=False),
                         response(batch(complete_candidate='true'))):
             with self.subTest(verdict=verdict):
-                runner = self.runner([response('Some proof.'), response(critic()), verdict])
+                runner = self.runner([response('Some proof.'), response(critic(complete_candidate=False)), verdict, verdict])
                 result = runner.start('Prove x=x.', max_rounds=1)
-                self.assertEqual(result['status'], 'budget_exhausted')
-                self.assertEqual(runner.state['claims'][0]['status'], 'uncertain')
+                self.assertEqual(result['status'], 'stalled')
+                self.assertEqual(runner.state['claims'], [])
+                self.assertIn('Invalid recorder JSON', runner.state['stop_reason'])
                 self.assertIsNone(runner.state['final_audit'])
 
     def test_empty_or_contradictory_audit_cannot_complete(self):
         for verdict in (audit(explanation=''), audit(objection='Missing the case x=0.')):
             with self.subTest(verdict=verdict):
-                runner = self.runner([response('x=x by reflexivity.'), response(critic()), response(batch()), response(verdict)])
+                runner = self.runner([response('x=x by reflexivity.'), response(critic()), response(verdict)])
                 runner.start('Prove x=x.', max_rounds=1)
                 self.assertEqual(runner.state['final_audit']['verdict'], 'uncertain')
                 self.assertNotEqual(runner.state['status'], 'candidate_complete')
@@ -188,9 +194,17 @@ class ProofControllerTests(unittest.TestCase):
                    review(disposition='refuted', objection='Maybe false.', evidence='')]
         for value in invalid:
             with self.subTest(value=value):
-                runner = self.runner([response('Attempt.'), response(critic()), response(batch(value))])
+                invalid_references = bool(value['dependencies'] or value['resolves'])
+                replies = [response('Attempt.'), response(critic(complete_candidate=False)), response(batch(value))]
+                if invalid_references:
+                    replies.append(response(batch(value)))
+                runner = self.runner(replies)
                 runner.start('Prove x=x.', max_rounds=1)
-                self.assertEqual(runner.state['claims'][0]['status'], 'gap')
+                if invalid_references:
+                    self.assertEqual(runner.state['status'], 'stalled')
+                    self.assertEqual(runner.state['claims'], [])
+                else:
+                    self.assertEqual(runner.state['claims'][0]['status'], 'gap')
                 self.assertIsNone(runner.state['final_audit'])
 
     def test_separate_atomic_results_survive_with_the_remaining_obligation(self):
@@ -233,7 +247,8 @@ class ProofControllerTests(unittest.TestCase):
                               response(critic(missing_work='Write the full derivation.', complete_candidate=False)),
                               response(batch(prior, complete_candidate=False)),
                               response('For arbitrary x, x=x by reflexivity.'),
-                              response(critic()), response(batch()), response(audit())])
+                              response(critic(complete_candidate=False)),
+                              response(batch(complete_candidate=False))])
         runner.start('Prove x=x for every real x.', max_rounds=2)
         self.assertIn('PREVIOUS_REVIEW_MARKER', self.client.requests[3]['messages'][1]['content'])
         self.assertNotIn('PREVIOUS_REVIEW_MARKER', json.dumps(self.client.requests[4]['messages']))
@@ -258,7 +273,7 @@ class ProofControllerTests(unittest.TestCase):
                             response(critic(missing_work='Justify the calculation.', complete_candidate=False)),
                             response(batch(stuck, complete_candidate=False))])
         replies.extend([response(plan(3)), response('For arbitrary x, x=x by reflexivity.'),
-                        response(critic()), response(batch()), response(audit())])
+                        response(critic()), response(audit())])
         runner = self.runner(replies, predict=2048)
         self.assertEqual(runner.start('Prove x=x.', max_rounds=3)['status'], 'candidate_complete')
         solver_payloads = [request for request, call in zip(self.client.requests, runner.state['calls'])
@@ -301,12 +316,12 @@ class ProofControllerTests(unittest.TestCase):
 
     def test_explicit_source_with_spaces_disables_partial_filename_inference(self):
         (self.root / 'my lemma.tex').write_text('Prove x=x for real x.')
-        runner = self.runner([response('x=x by reflexivity.'), response(critic()), response(batch()), response(audit())])
+        runner = self.runner([response('x=x by reflexivity.'), response(critic()), response(audit())])
         runner.start('Prove my lemma.tex.', source_files=['my lemma.tex'])
         self.assertEqual([s['path'] for s in runner.state['sources']], ['my lemma.tex'])
 
     def test_fresh_context_retains_whole_proof_objection(self):
-        runner = self.runner([response('x=x by reflexivity.'), response(critic()), response(batch()),
+        runner = self.runner([response('x=x by reflexivity.'), response(critic()),
                               response(audit(verdict='gap', objection='The global limiting step is missing.'))])
         runner.start('Prove x=x.', max_rounds=1)
         messages = runner._context('Solver', 'New route.', fresh=True)
@@ -314,7 +329,7 @@ class ProofControllerTests(unittest.TestCase):
 
     def test_success_after_pause_clears_obsolete_stop_reason(self):
         runner = self.runner([response('x=x by reflexivity.'), [KeyboardInterrupt()],
-                              response(critic()), response(batch()), response(audit())])
+                              response(critic()), response(audit())])
         with self.assertRaises(KeyboardInterrupt):
             runner.start('Prove x=x.')
         result = runner.resume(runner.state['id'])
@@ -322,7 +337,7 @@ class ProofControllerTests(unittest.TestCase):
         self.assertNotIn('stop_reason', runner.state)
         self.assertIn('passed a whole-proof model audit', result['report'])
         self.assertIn('## Mathematical progress', result['report'])
-        self.assertIn('Equality is reflexive', (runner.store.directory / 'ledger.md').read_text())
+        self.assertIn('x=x by reflexivity.', (runner.store.directory / 'ledger.md').read_text())
 
 
 if __name__ == '__main__':

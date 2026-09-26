@@ -4,6 +4,128 @@ Detailed reference for the experimental 0.4 release. Start with the
 [README](../README.md) for installation. Commands below assume an existing
 workspace at `~/research/my-paper` and your own files inside it.
 
+## GPU servers and parallel proofs
+
+Ollama remains the desktop default. For the two-V100S llama.cpp deployment:
+
+```bash
+square-harness --backend llamacpp --host http://localhost:8000 \
+  --model square-qwen --workspace ~/research/my-paper \
+  --ctx 32768 --predict 8192 --seed 42 \
+  --request-timeout 7200 --proof-seconds 14400 --proof-selection-seconds 1800
+```
+
+Use `--backend openai` for vLLM. The `llamacpp` adapter uses its native template,
+exact prompt-token counting, schema output and reasoning fields. Offline mode
+still requires a loopback endpoint; an SSH tunnel can connect to your own GPU
+server. The server controls its actual context allocation: `--ctx` is the
+harness's input/output budget and must not exceed the server's configured limit.
+Use [the OVH guide](ovh.md) for the pinned model and server setup.
+
+Add `--proof-workers 3` to run three independent proof branches on the same
+statement. Each branch has its own process, client, workspace and ledger; only
+explicitly pinned source files are copied in. They share a fixed total
+`--proof-tokens` ceiling, including selection reviews. The default 60,000 tokens
+allocate 17,952 per branch and 6,144 for selection. Unused allocations stay unused.
+Solver seeds differ between branches; critics and selection reviews use
+temperature zero. Separate contexts cannot guarantee independent mathematical mistakes.
+
+For the A10, use `--model square-qwen-a10 --proof-workers 3
+--proof-branch-concurrency 1 --proof-seconds 43200 --proof-selection-seconds 3600`.
+This retains three independent attempts with one active branch at a time. Their
+individual execution windows start on dispatch, rather than while waiting.
+Use the [A10 setup](a10.md) for the separate Q4 server and benchmark launcher.
+
+The final selector audits whole candidates separately and returns an existing
+answer, without combining proofs. No clipped, truncated or malformed review
+can approve a candidate. The status is a model judgment, never a proof certificate.
+All candidates and the selected `answer.md` remain in the saved portfolio directory.
+If there is no eligible complete output, no selected answer is created.
+
+Parallel portfolios are currently one-shot jobs: an interrupted parent is not
+automatically replayed. Child proof ledgers retain the existing checkpoint and
+budget protections and can be inspected independently. Use `--proof-workers 1`
+for the original sequential workflow and `/resume`. Literature tools are not
+enabled in parallel portfolios. The [benchmark runner](benchmark.md) provides
+isolated datasets, aggregate request limits and independent grading exports.
+
+## Cooperative proof work
+
+`--proof-strategy cooperative` adds an advisor that proposes distinct subproblems,
+followed by a deterministic dependency scheduler and a final assembly of the
+original proof. This is an opt-in alternative to independent attempts:
+
+```bash
+square-harness --backend llamacpp --host http://localhost:8000 \
+  --model square-qwen --workspace ~/research/my-paper \
+  --ctx 32768 --predict 8192 --proof-max-predict 8192 \
+  --proof-strategy cooperative --cooperative-concurrency 3 \
+  --proof-tokens 60000 --proof-seconds 14400 --seed 42 \
+  --proof-file statement.tex --prompt "Prove the complete statement in statement.tex."
+```
+
+The advisor specifies exact subproblem statements, hypotheses, permitted
+dependencies, and how the proposed results would imply the original goal. The
+controller validates the plan structure and rejects cycles and unknown task
+references. This validation does not prove that the mathematical decomposition
+is correct. Invalid or truncated plans stop as `invalid_plan` without launching
+workers. An explicit advisor decision to pursue the original theorem directly
+uses the ordinary proof engine with the remaining token allocation.
+
+For a decomposition, at most three workers run concurrently. Independent tasks
+can run together; tasks whose prerequisites remain unresolved stay blocked.
+Each worker uses a separate proof workspace and the existing solver/critic/audit
+loop, bounded to at most two rounds. Dependencies carry written arguments and
+their model-review status, not a bare assertion that another agent succeeded.
+All roles use the same frozen model and can share mathematical errors.
+
+An assembly proof job must write a self-contained argument for the original
+goal. It receives both the proposed composition and the returned evidence; an
+intermediate lemma does not silently become a hypothesis of the original
+theorem. The assembled candidate goes through the existing fresh critic and
+whole-proof auditor. That audit retains exact task contracts and concrete
+objections, but does not repeat successful helper proof bodies: the assembled
+candidate must supply its own derivation. Abandoned routes need not be proved.
+All original helper arguments remain in the saved ledger. If assembly remains
+incomplete, one targeted repair task and one
+final assembly are allowed. Assembly jobs each have one proof round. There is
+no recursive agent creation or repeated replanning loop.
+
+All stages share a fixed generated-token ceiling. At 60,000 tokens the fixed
+allocations are 2,048 for planning, 1,536 for repair planning, 22,566 for initial
+workers, 16,924 for first assembly, 5,641 for the repair worker, and 11,285 for
+final assembly. These include each proof job's reviews and bookkeeping. Unused
+allocations stay unused. A direct route instead receives the total ceiling minus
+the initial advisor allowance. Cooperative work requires at least 8,192 tokens.
+`--proof-rounds` also limits worker rounds; increasing it above two does not add
+more cooperative rounds. `--cooperative-concurrency 1` serializes available
+tasks without changing their mathematical assignments or token allocations.
+The model server must support the requested concurrent contexts; measure memory
+and throughput before increasing concurrency.
+
+The time guard also reserves room for finishing: cumulative checkpoints fall at
+10% of the total time for planning, 45% for initial workers, 70% for first
+assembly, 75% for repair planning, 85% for repair work and 100% for final assembly.
+Finishing an early phase sooner leaves more time before later checkpoints; it
+does not move token allocations between stages. These are guards, not runtime
+predictions, and blocked dependencies can leave GPU slots idle.
+
+Saved parent runs live under `.mathagent/cooperative/<id>/`, with `state.json`,
+`report.md`, the plan and per-stage proof ledgers. `answer.md` retains the last
+assembled candidate when one exists, including unfinished work. `proof.md` is
+created only for a completed, model-audited candidate; neither file constitutes
+formal verification. Worker fragments alone are not exported as a full proof.
+The CLI prints an audited proof when available and otherwise its saved report.
+
+Cooperative parents are one-shot jobs: their plans are not automatically resumed
+after interruption. Child ledgers remain inspectable; manually resuming a child
+is separate work and does not update or reopen the parent. Do not combine this
+strategy with `--proof-workers`, `--proof-branch-concurrency`, `--proof-literature`
+or parent resume. The default `independent` strategy keeps the existing
+sequential and portfolio behavior. The [benchmark protocol](benchmark.md)
+provides a separately selectable `cooperative` arm; existing hardware launchers
+retain their original three-arm experiment.
+
 ## Persistent proof work
 
 `/prove` now starts a saved, bounded proof job. Plain questions in the default
@@ -29,8 +151,14 @@ The persistent proof cycle is:
    candidate without the ledger's previous judgments. It checks concrete
    inferences, identifies the first unsupported step, and preserves useful
    partial work with its restrictions.
-4. **Update the ledger.** A separate recorder receives the candidate, that fresh
-   critique, and selected ledger records. It can extract up to four small claims
+4. **Send a clean complete candidate straight to the final audit.** If the
+   untruncated solver output passes the fresh critic without a gap, uncertainty
+   or missing work, skip the recorder call and run the whole-proof audit below.
+   Save the exact candidate and audit result deterministically. A failed audit
+   becomes a persistent objection for later work; it cannot silently disappear.
+   Its simplest case uses three model calls: solver, critic and auditor.
+5. **Record partial work.** Otherwise a separate recorder receives the candidate,
+   that fresh critique, and selected ledger records. It can extract up to four small claims
    or obligations rather than recording the entire theorem as a single gap.
    Its reference view omits historical next-task instructions and places the
    current candidate and critique last, to reduce copying of stale assignments.
@@ -38,16 +166,26 @@ The persistent proof cycle is:
    preserves the critic's concrete objection even if the recorder omits it,
    and deduplicates identical records. These are consistency checks, not a
    mathematical verifier.
-5. **Choose the next task.** After two rounds without recognized progress, a
+   A malformed recorder batch gets at most one recorder-only correction using
+   the same candidate and critique, before any claims from that batch are saved.
+   Invented or unseen reference IDs and omitted resolutions of a repeated
+   disputed claim cannot silently become approvals. The correction consumes the
+   existing token/time budget, including across interruption and resume. If it
+   still fails, the job stops as `stalled` with a `protocol_error` diagnostic;
+   this is a bookkeeping failure, not a mathematical objection. Benchmarks
+   report it as an execution error and retain the written candidate.
+6. **Choose the next task.** After two rounds without recognized progress, a
    planning call proposes a different task or approach. Repeated truncation can
    also trigger an attempt with thinking disabled so the model writes usable
    mathematics. A stalled approach does not by itself terminate the whole goal.
    If the recorder repeats the previous assignment verbatim while the fresh
    critic identifies remaining work, that current obligation takes precedence.
-6. **Audit a proposed complete proof.** A separate call checks the full argument
+7. **Audit a proposed complete proof.** A separate call checks the full argument
    against the original goal before a `candidate_complete` result is recorded.
    All historical objections remain visible to this audit, including those the
    recorder claims are resolved; the auditor must check the actual repair.
+   The short path changes bookkeeping, not the requirement for both a fresh
+   critique and a final audit. Neither model verdict certifies correctness.
 
 Solver, checkpoint writer, planner, critic, recorder and auditor are separate
 calls to the same local model. They share one saved token/time budget, and can share the same
@@ -80,9 +218,21 @@ saved automatically under `<workspace>/.mathagent/proofs/<proof-id>/`:
 - `state.json`: versioned ledger, model settings, policy-file hash and persistent budget counters.
 - `ledger.md`: readable mathematical progress and open obligations.
 - `report.md`: debrief, useful partial results, remaining gaps and suggested next work.
+- `proof.md`: only for a completed, model-audited candidate; its exact written
+  text, without the controller's ledger and timing report. No extra model call
+  or post-audit rewriting is performed. Mathematical caveats remain intact.
 - `artifacts/`: exact inference request payloads, saved arguments, reviews and
   streamed incomplete attempts. Each dispatched call records its request path
   in `state.json`, so you can inspect which context and settings it received.
+
+The solver is instructed to keep its final answer mathematical. Internal saved
+artifact filenames belong to `read_proof_artifact`, not the workspace file
+reader. This tool returns candidate text or a reconstructed structured review,
+with `next_offset` pagination, instead of token-by-token transport events.
+Incomplete or malformed streams are explicitly labelled. `raw=true` retrieves
+the original artifact for diagnostics; the saved bytes are never rewritten.
+Each new inference call also records the active policy version and hash, so
+calls made after upgrading a resumed job can be distinguished from old calls.
 
 Save the ID or use `/proofs` to find it. Ctrl+C pauses the current proof; completed
 checkpoints survive process exit. Resume with the remaining original budget:

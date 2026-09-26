@@ -1,6 +1,9 @@
 include CITATION.cff CHANGELOG.md CONTRIBUTING.md
 recursive-include docs *.md
 prune examples
+prune benchmark-data
+prune benchmark-runs
+recursive-include scripts *.py *.sh
 prune .mathagent
 global-exclude .env .env.* *.pem *.key
 recursive-include mathagent/gui/static *
@@ -9,3 +12,4 @@ recursive-include frontend/src *
 recursive-include frontend/public *
 recursive-include frontend/scripts *.mjs
 prune frontend/node_modules
+recursive-include deployment *.py *.json Dockerfile*

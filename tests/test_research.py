@@ -182,7 +182,8 @@ class ResearchTests(unittest.TestCase):
         self.assertFalse(runner.state['draft_complete'])
 
     def test_output_budget_reserves_report_and_stops(self):
-        runner = self.runner([response('Plan', count=500), response('# Partial report', count=400), response('Unfinished.', count=100)], predict=512)
+        # The report request has a 320-token cap after reserving review budget.
+        runner = self.runner([response('Plan', count=500), response('# Partial report', count=300), response('Unfinished.', count=100)], predict=512)
         result = runner.start('Review a topic', max_tokens=1024, max_input_tokens=10000)
         self.assertEqual(runner.state['rounds_started'], 0)
         self.assertIn(result['status'], {'partial', 'reviewed', 'budget_exhausted'})
