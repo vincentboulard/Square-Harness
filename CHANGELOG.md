@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- OpenAI-compatible local model transport for vLLM, with streamed reasoning,
+  tool calls, structured reviews and explicit token usage.
+- Isolated parallel proof portfolios with fixed aggregate token budgets and
+  selection of an existing candidate after independent review.
+- Statement-only benchmark manifests, direct-sampling and harness comparison,
+  saved run metadata and anonymized submissions for mathematical grading.
+- Pinned OVH H100 serving recipe and live transport checks. GPU memory fit,
+  throughput and mathematical gains remain to be measured on the server.
+
 ## 0.4.0 — initial public release candidate
 
 Early experimental version; prepared for publication, not a stability or

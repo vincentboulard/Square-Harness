@@ -13,6 +13,7 @@ import re
 import time
 
 from .agent import AgentError
+from .backends import TokenBudgetError
 from .ledger import ProofStore, LedgerError
 from .prompts import SYSTEM
 from .tools import schema
@@ -105,6 +106,9 @@ class ProofRunner:
                     'allow_literature': bool(allow_literature),
                     'policy_sha256': hashlib.sha256(Path(__file__).with_name('proof_policy.py').read_bytes()).hexdigest(),
                     'think': self.agent.think,
+                    'backend': getattr(self.agent.client, 'backend', 'ollama'),
+                    'seed': self.agent.seed, 'temperature': self.agent.temperature,
+                    'top_p': self.agent.top_p,
                     'host': getattr(self.agent.client, 'host', None)}
         self.store = ProofStore.create(self.agent.workspace.root, goal.strip(), settings, sources)
         library = getattr(self.agent.workspace, 'literature', None)
@@ -119,8 +123,12 @@ class ProofRunner:
         settings = self.state['settings']
         if settings.get('host') != getattr(self.agent.client, 'host', None):
             raise ValueError('Resume with the original --host; saved proof data will not be sent to another server implicitly')
+        if settings.get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
+            raise ValueError('Resume with the original --backend')
         for key in ('model', 'ctx', 'predict', 'think'):
             setattr(self.agent, key, settings[key])
+        for key, default in (('seed', None), ('temperature', 0.6), ('top_p', 0.95)):
+            setattr(self.agent, key, settings.get(key, default))
         self.emit('notice', f'Resuming proof {proof_id}; saved budgets and model settings retained')
         for src in self.state['sources']:
             try:
@@ -154,7 +162,7 @@ class ProofRunner:
                     'Automatic inference is disabled for this job. Inspect its retained artifacts and start a new explicitly budgeted goal.')
                 self.store.save()
                 return self._result()
-            if self.state['status'] in {'candidate_complete', 'budget_exhausted', 'stalled', 'needs_recovery'}:
+            if self.state['status'] in {'candidate_complete', 'budget_exhausted', 'budget_violation', 'stalled', 'needs_recovery'}:
                 return self._result()
             library = getattr(self.agent.workspace, 'literature', None)
             if self.state['settings'].get('allow_literature') and library is not None:
@@ -282,6 +290,8 @@ class ProofRunner:
                 self.state['status'], self.state['stop_reason'] = 'budget_exhausted', str(exc)
             except ProofContext as exc:
                 self.state['status'], self.state['stop_reason'] = 'needs_context', str(exc)
+            except TokenBudgetError as exc:
+                self.state['status'], self.state['stop_reason'] = 'budget_violation', str(exc)
             except (AgentError, OSError, ValueError) as exc:
                 self.state['status'], self.state['stop_reason'] = 'paused', str(exc)
             finally:
@@ -447,6 +457,8 @@ class ProofRunner:
                 result['text'] += '\nTool budget exhausted; no complete proof was obtained.'
                 return result
             message = {'role': 'assistant', 'content': result['text'], 'tool_calls': result['calls']}
+            if result['thinking']:
+                message['thinking'] = result['thinking']
             tool_history.append(message)
             for call in result['calls']:
                 fn = call.get('function', {})
@@ -461,7 +473,10 @@ class ProofRunner:
                 evidence = self.store.write_artifact('tool-result', json.dumps({'name': name, 'arguments': args, 'result': value}, ensure_ascii=False))
                 self.state['pending'].setdefault('tools', []).append(evidence)
                 self._save()
-                tool_history.append({'role': 'tool', 'tool_name': name, 'content': value})
+                tool_message = {'role': 'tool', 'tool_name': name, 'content': value}
+                if call.get('id'):
+                    tool_message['tool_call_id'] = call['id']
+                tool_history.append(tool_message)
                 self.emit('result', value[:200])
         return result
 
@@ -510,7 +525,10 @@ class ProofRunner:
             raise ProofBudget('Elapsed-time budget exhausted')
         payload = {'model': self.agent.model, 'messages': messages, 'stream': True,
                    'think': think, 'options': {'num_ctx': self.agent.ctx, 'num_predict': cap,
-                                              'temperature': 0.6 if role == 'solver' else 0}}
+                                              'temperature': self.agent.temperature if role == 'solver' else 0,
+                                              'top_p': self.agent.top_p}}
+        if self.agent.seed is not None:
+            payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
         if tools:
             payload['tools'] = list(tools)
         if format_schema:
@@ -544,9 +562,11 @@ class ProofRunner:
                     raise ProofBudget('Elapsed-time budget exhausted during generation')
             result = self._read_stream(stream_file)
             if not any(json.loads(line).get('done') for line in self.store.read_artifact(stream_file).splitlines()):
-                raise AgentError('Ollama stream ended without a completion event; partial work saved')
+                raise AgentError('Model stream ended without a completion event; partial work saved')
             call['status'] = 'complete' if result['complete'] else 'truncated'
             count = result['stats'].get('eval_count')
+            if type(count) is int and count > cap:
+                raise TokenBudgetError(result['stats'], cap)
             if type(count) is int and count >= 0:
                 self.state['tokens_charged'] += count - cap
                 call['charged_tokens'] = count
@@ -557,8 +577,13 @@ class ProofRunner:
             if not result['complete']:
                 self.emit('notice', f'{role.capitalize()} hit its output limit; partial work retained for a conservative checkpoint')
             return result
-        except BaseException:
+        except BaseException as exc:
             call['status'] = 'interrupted'
+            if isinstance(exc, TokenBudgetError):
+                call['stats'] = exc.stats
+                call['charged_tokens'] = exc.stats['eval_count']
+                self.state['tokens_charged'] += call['charged_tokens'] - cap
+                call['status'] = 'budget_violation'
             if role == 'solver' and self.state['pending']:
                 self.state['pending']['partial'] = stream_file
             raise

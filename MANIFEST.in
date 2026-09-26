@@ -1,5 +1,8 @@
 include CITATION.cff CHANGELOG.md CONTRIBUTING.md
 recursive-include docs *.md
 prune examples
+prune benchmark-data
+prune benchmark-runs
+recursive-include scripts *.py *.sh
 prune .mathagent
 global-exclude .env .env.* *.pem *.key
