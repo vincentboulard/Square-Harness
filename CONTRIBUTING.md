@@ -26,7 +26,6 @@ version, settings, and manual check in your pull request.
   settings, relevant output, and the first false or unjustified inference.
 - Add a regression test when fixing a reproducible code bug. Keep changes focused.
 - Do not upload private manuscripts, credentials, or unredacted session logs.
-  Follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 
 Maintainers review contributions and decide what is merged. Public access lets
 others propose changes or maintain their own forks; it does not grant write

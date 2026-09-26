@@ -1,4 +1,4 @@
-include CITATION.cff CHANGELOG.md CONTRIBUTING.md SECURITY.md
+include CITATION.cff CHANGELOG.md CONTRIBUTING.md
 recursive-include docs *.md
 prune examples
 prune .mathagent

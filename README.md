@@ -87,7 +87,6 @@ software behavior, not mathematical reliability or comprehensive literature cove
 Online search queries leave your machine. A remote model host receives prompts
 and excerpts. Optional Python execution requires approval and **is not sandboxed**.
 Saved jobs can contain manuscript text: keep research workspaces private.
-See [security and privacy](SECURITY.md).
 
 ## Contributing and citation
 
