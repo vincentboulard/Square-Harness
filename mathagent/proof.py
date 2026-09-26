@@ -350,6 +350,10 @@ class ProofRunner:
                 '\nORIGINAL SOURCE SNAPSHOTS (unchanged mathematical data):\n' +
                 json.dumps(self.state['sources'], ensure_ascii=False))
 
+    def _context_claims(self, complete_ledger=False):
+        """Evidence view; specialized runners may omit redundant supporting text."""
+        return self.state['claims']
+
     def _context(self, policy, task, *, fresh=False, complete_ledger=False, output=2048,
                  retrieval=True, include_ledger=True, format_schema=None, tools=(),
                  trailing_messages=(), recording=False):
@@ -357,7 +361,7 @@ class ProofRunner:
         base = self._base()
         if not recording:
             base += '\nCURRENT TASK:\n' + task
-        claims = self.state['claims'] if include_ledger else []
+        claims = self._context_claims(complete_ledger) if include_ledger else []
         if complete_ledger:
             # A recorder's claim that an objection is resolved is fallible.
             # The independent whole-proof audit must see every objection and

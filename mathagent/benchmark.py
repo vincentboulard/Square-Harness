@@ -26,7 +26,7 @@ COMMON_INSTRUCTION = (
     'and their hypotheses checked. Do not cite the requested assertion, or an equivalent '
     'theorem, as a black box. If you cannot finish, identify the precise unproved step.'
 )
-ARMS = ('raw-single', 'raw-best', 'sequential', 'parallel')
+ARMS = ('raw-single', 'raw-best', 'sequential', 'parallel', 'cooperative')
 
 
 def _json(path, value):
@@ -100,6 +100,8 @@ def parser():
     p.add_argument('--branches', type=int, default=3)
     p.add_argument('--branch-concurrency', type=int, default=None,
                    help='Simultaneous logical branches within a portfolio; defaults to --branches')
+    p.add_argument('--cooperative-concurrency', type=int, default=3,
+                   help='Maximum active subproblem workers in the optional cooperative arm (1–3)')
     p.add_argument('--replicates', type=int, default=1)
     p.add_argument('--seed', type=int, default=20260926)
     p.add_argument('--temperature', type=float, default=0.6)
@@ -133,13 +135,21 @@ def preflight(args):
         raise ValueError('Choose distinct nonempty arms')
     if args.branch_concurrency is not None and not 1 <= args.branch_concurrency <= 16:
         raise ValueError('Branch concurrency must be between 1 and 16')
-    width = min(args.branches, args.branch_concurrency or args.branches) if any(arm in {'raw-best', 'parallel'} for arm in args.arms) else 1
+    if not 1 <= args.cooperative_concurrency <= 3:
+        raise ValueError('Cooperative concurrency must be between 1 and 3')
+    has_portfolio = any(arm in {'raw-best', 'parallel'} for arm in args.arms)
+    width = max(min(args.branches, args.branch_concurrency or args.branches) if has_portfolio else 1,
+                args.cooperative_concurrency if 'cooperative' in args.arms else 1)
     if args.workers * width > args.max_in_flight:
-        raise ValueError('workers times branch width must not exceed max-in-flight; reduce workers or branch concurrency')
+        raise ValueError('workers times branch width must not exceed max-in-flight; reduce workers, branch concurrency, or cooperative concurrency')
     if args.ctx < 2048 or args.predict < 128 or args.max_predict < args.predict or args.max_predict >= args.ctx - 1024:
         raise ValueError('Use ctx >= 2048 and 128 <= predict <= max-predict < ctx - 1024')
-    if args.tokens < 1024 or args.selection_tokens < args.branches * 128 or args.tokens - args.selection_tokens < args.branches * 512:
+    if args.tokens < 1024:
+        raise ValueError('Token budget must be at least 1024')
+    if has_portfolio and (args.selection_tokens < args.branches * 128 or args.tokens - args.selection_tokens < args.branches * 512):
         raise ValueError('Token budget must leave at least 512 tokens per branch and 128 review tokens per candidate')
+    if 'cooperative' in args.arms and args.tokens < 8192:
+        raise ValueError('Cooperative token budget must be at least 8192')
     if not math.isfinite(args.seconds) or args.seconds <= 0 or not 1 <= args.rounds <= 100:
         raise ValueError('Use positive finite seconds and rounds 1-100')
     if (not math.isfinite(args.request_timeout) or args.request_timeout <= 0
@@ -182,6 +192,11 @@ def preflight(args):
             'context_check': ('Offline conservative byte estimate; llamacpp also verifies exact formatted-prompt tokens before every generation.'
                 if args.backend == 'llamacpp' else 'Conservative byte estimate only; exact server tokenization must be checked in the GPU smoke run.'),
             'raw_first': 'First raw-best candidate retained as raw@1; no additional inference.'}
+    if 'cooperative' in args.arms:
+        from .cooperative import cooperative_budget
+        plan['cooperative_budget'] = cooperative_budget(args.tokens)
+        plan['cooperative_concurrency'] = args.cooperative_concurrency
+        plan['cooperative_strategy_version'] = 1
     return data, plan
 
 
@@ -411,7 +426,13 @@ def run_job(job, output, args, gate):
             record['candidates'] = [{'id': c['id'], 'complete': c['complete'], 'answer_path': c['answer_path'], 'status': c['call']['status']} for c in candidates]
         elif arm == 'sequential':
             record.update(_sequential(agent, goal, path, args))
-        else:
+        elif arm == 'cooperative':
+            from .cooperative import run_cooperative_proof
+            record.update(run_cooperative_proof(agent, goal, output_dir=path / 'cooperative',
+                max_tokens=args.tokens, max_seconds=args.seconds, max_rounds=args.rounds,
+                max_predict=args.max_predict, source_files=('statement.txt',), seed=seed,
+                concurrency=args.cooperative_concurrency, request_gate=gate))
+        elif arm == 'parallel':
             result = run_proof_portfolio(agent, goal, output_dir=path / 'portfolio', workers=args.branches,
                 max_tokens=args.tokens, max_seconds=args.seconds, max_rounds=args.rounds,
                 max_predict=args.max_predict, source_files=('statement.txt',), seed=seed,
@@ -419,7 +440,9 @@ def run_job(job, output, args, gate):
                 selection_seconds=args.selection_seconds, branch_concurrency=args.branch_concurrency)
             record.update(result)
             record['request_count'] = sum(len(branch.get('calls', [])) for branch in result.get('branches', [])) + len(result.get('selection', {}).get('calls', []))
-        execution_errors = []
+        else:
+            raise ValueError(f'Unknown benchmark arm: {arm}')
+        execution_errors = list(record.get('execution_errors', []))
         if arm == 'raw-best':
             execution_errors += [c['call'].get('error', 'Direct request failed') for c in candidates if c['call']['status'] == 'error']
             execution_errors += [str(c.get('status')) + ' selector request' for c in record.get('calls', []) if c.get('status') in {'interrupted', 'error'}]
@@ -427,6 +450,8 @@ def run_job(job, output, args, gate):
             execution_errors += [b.get('error') or b.get('proof_status') or 'Branch failed' for b in record.get('branches', [])
                                  if b.get('status') in {'failed', 'interrupted', 'not_dispatched'} or b.get('proof_status') in {'paused', 'interrupted', 'error', 'needs_recovery', 'budget_violation'}]
             execution_errors += [str(c.get('status')) + ' selector request' for c in record.get('selection', {}).get('calls', []) if c.get('status') in {'interrupted', 'error'}]
+        elif arm == 'cooperative' and record['status'] in {'error', 'interrupted', 'invalid_plan'} and not execution_errors:
+            execution_errors.append(record.get('error') or 'Cooperative execution did not complete')
         if record['status'] == 'budget_violation':
             execution_errors.append(record.get('error') or 'Server exceeded the reserved output allowance')
         if execution_errors:
@@ -501,7 +526,8 @@ def execute(args, data, plan):
     records = []
     # Fixed request partitions avoid cross-process semaphore leaks if a worker
     # is killed. A job runs either N branches or one selector, never both;
-    # preflight requires workers * effective branch concurrency <= max_in_flight.
+    # preflight bounds workers * maximum active width across all selected arms,
+    # including the cooperative scheduler's subproblem workers.
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(run_job, job, output, args, None): job for job in jobs}
         with (output / 'outputs.jsonl').open('w', encoding='utf-8') as log:

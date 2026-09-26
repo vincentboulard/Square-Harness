@@ -49,6 +49,83 @@ for the original sequential workflow and `/resume`. Literature tools are not
 enabled in parallel portfolios. The [benchmark runner](benchmark.md) provides
 isolated datasets, aggregate request limits and independent grading exports.
 
+## Cooperative proof work
+
+`--proof-strategy cooperative` adds an advisor that proposes distinct subproblems,
+followed by a deterministic dependency scheduler and a final assembly of the
+original proof. This is an opt-in alternative to independent attempts:
+
+```bash
+square-harness --backend llamacpp --host http://localhost:8000 \
+  --model square-qwen --workspace ~/research/my-paper \
+  --ctx 32768 --predict 8192 --proof-max-predict 8192 \
+  --proof-strategy cooperative --cooperative-concurrency 3 \
+  --proof-tokens 60000 --proof-seconds 14400 --seed 42 \
+  --proof-file statement.tex --prompt "Prove the complete statement in statement.tex."
+```
+
+The advisor specifies exact subproblem statements, hypotheses, permitted
+dependencies, and how the proposed results would imply the original goal. The
+controller validates the plan structure and rejects cycles and unknown task
+references. This validation does not prove that the mathematical decomposition
+is correct. Invalid or truncated plans stop as `invalid_plan` without launching
+workers. An explicit advisor decision to pursue the original theorem directly
+uses the ordinary proof engine with the remaining token allocation.
+
+For a decomposition, at most three workers run concurrently. Independent tasks
+can run together; tasks whose prerequisites remain unresolved stay blocked.
+Each worker uses a separate proof workspace and the existing solver/critic/audit
+loop, bounded to at most two rounds. Dependencies carry written arguments and
+their model-review status, not a bare assertion that another agent succeeded.
+All roles use the same frozen model and can share mathematical errors.
+
+An assembly proof job must write a self-contained argument for the original
+goal. It receives both the proposed composition and the returned evidence; an
+intermediate lemma does not silently become a hypothesis of the original
+theorem. The assembled candidate goes through the existing fresh critic and
+whole-proof auditor. That audit retains exact task contracts and concrete
+objections, but does not repeat successful helper proof bodies: the assembled
+candidate must supply its own derivation. Abandoned routes need not be proved.
+All original helper arguments remain in the saved ledger. If assembly remains
+incomplete, one targeted repair task and one
+final assembly are allowed. Assembly jobs each have one proof round. There is
+no recursive agent creation or repeated replanning loop.
+
+All stages share a fixed generated-token ceiling. At 60,000 tokens the fixed
+allocations are 2,048 for planning, 1,536 for repair planning, 22,566 for initial
+workers, 16,924 for first assembly, 5,641 for the repair worker, and 11,285 for
+final assembly. These include each proof job's reviews and bookkeeping. Unused
+allocations stay unused. A direct route instead receives the total ceiling minus
+the initial advisor allowance. Cooperative work requires at least 8,192 tokens.
+`--proof-rounds` also limits worker rounds; increasing it above two does not add
+more cooperative rounds. `--cooperative-concurrency 1` serializes available
+tasks without changing their mathematical assignments or token allocations.
+The model server must support the requested concurrent contexts; measure memory
+and throughput before increasing concurrency.
+
+The time guard also reserves room for finishing: cumulative checkpoints fall at
+10% of the total time for planning, 45% for initial workers, 70% for first
+assembly, 75% for repair planning, 85% for repair work and 100% for final assembly.
+Finishing an early phase sooner leaves more time before later checkpoints; it
+does not move token allocations between stages. These are guards, not runtime
+predictions, and blocked dependencies can leave GPU slots idle.
+
+Saved parent runs live under `.mathagent/cooperative/<id>/`, with `state.json`,
+`report.md`, the plan and per-stage proof ledgers. `answer.md` retains the last
+assembled candidate when one exists, including unfinished work. `proof.md` is
+created only for a completed, model-audited candidate; neither file constitutes
+formal verification. Worker fragments alone are not exported as a full proof.
+The CLI prints an audited proof when available and otherwise its saved report.
+
+Cooperative parents are one-shot jobs: their plans are not automatically resumed
+after interruption. Child ledgers remain inspectable; manually resuming a child
+is separate work and does not update or reopen the parent. Do not combine this
+strategy with `--proof-workers`, `--proof-branch-concurrency`, `--proof-literature`
+or parent resume. The default `independent` strategy keeps the existing
+sequential and portfolio behavior. The [benchmark protocol](benchmark.md)
+provides a separately selectable `cooperative` arm; existing hardware launchers
+retain their original three-arm experiment.
+
 ## Persistent proof work
 
 `/prove` now starts a saved, bounded proof job. Plain questions in the default

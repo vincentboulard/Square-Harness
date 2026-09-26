@@ -16,7 +16,8 @@ checking: a model's critique or agreement is not a proof certificate.
 - **Continue proof work:** retain statements, arguments, objections, and next steps
   across bounded, resumable solver/reviewer rounds.
 - **Compare proof strategies:** run isolated parallel branches with a shared token
-  ceiling, and benchmark them against direct model sampling.
+  ceiling, or opt into [cooperative subproblem work](docs/usage.md#cooperative-proof-work),
+  and benchmark them against direct model sampling.
 - **Investigate literature:** read cached or retrieved sources and draft reports
   with source locations and explicit limitations.
 - **Stay local by default:** external retrieval is opt-in; manuscript edits require approval.
@@ -73,7 +74,8 @@ from the checkout without installing the optional terminal UI dependencies.
 | `/help` | List all commands |
 
 Proof and research jobs are saved under `.mathagent/` in your workspace.
-Ctrl+C pauses a job; resuming preserves its remaining budget.
+Sequential proof jobs can resume after Ctrl+C with their remaining budget;
+parallel portfolios and cooperative parents are one-shot runs.
 Launch with `--online` for external research. Proof search additionally requires
 `--proof-literature` to use literature tools.
 

@@ -144,6 +144,10 @@ def parser():
     p.add_argument('--proof-rounds', type=int, default=10, help='Maximum mathematical work rounds per new proof (1–100)')
     p.add_argument('--proof-workers', type=int, default=1,
                    help='Independent parallel proof branches; 1 keeps the sequential workflow (1–4)')
+    p.add_argument('--proof-strategy', choices=('independent', 'cooperative'), default='independent',
+                   help='Independent proof search (default), or advisor-planned cooperative subproblems')
+    p.add_argument('--cooperative-concurrency', type=int, default=3,
+                   help='Maximum active cooperative proof workers (1–3); does not set the number of tasks')
     p.add_argument('--proof-branch-concurrency', type=int, default=None,
                    help='Active proof branches at once; defaults to proof-workers, use 1 for a single inference slot')
     p.add_argument('--proof-tokens', type=int, default=60000, help='Total generated-token budget per new proof, including review (minimum 512)')
@@ -217,6 +221,15 @@ def main():
         p.error('Use 1 <= proof-rounds <= 100, proof-tokens >= 512, finite proof-seconds > 0, and proof-max-predict >= 128')
     if not 1 <= args.proof_workers <= 4:
         p.error('Use proof-workers in 1–4')
+    if not 1 <= args.cooperative_concurrency <= 3:
+        p.error('Use cooperative-concurrency in 1–3')
+    if args.proof_strategy == 'cooperative':
+        if args.proof_workers != 1 or args.proof_branch_concurrency is not None:
+            p.error('Cooperative strategy uses --cooperative-concurrency; do not combine it with independent proof-worker settings')
+        if args.proof_literature or args.resume is not None:
+            p.error('Cooperative parents start fresh and do not support proof literature or parent resume')
+        if args.proof_tokens < 8192:
+            p.error('Cooperative proof work requires proof-tokens >= 8192')
     if args.proof_branch_concurrency is not None and not 1 <= args.proof_branch_concurrency <= args.proof_workers:
         p.error('Use proof-branch-concurrency between 1 and proof-workers')
     if args.proof_workers > 1 and (args.proof_literature or args.resume is not None):
@@ -260,6 +273,7 @@ def main():
         ui.say('Python enabled: each snippet requires approval and runs with your account permissions.')
     model_checked = False
     proof_running = False
+    cooperative_directory = None
     research_running = False
     last_proof_id = ''
     last_research_id = ''
@@ -322,7 +336,7 @@ def main():
             ui.say(f'Exported {dest}')
 
     def run_query(query):
-        nonlocal proof_running, last_proof_id, research_running, last_research_id
+        nonlocal proof_running, last_proof_id, research_running, last_research_id, cooperative_directory
         fresh_library()
         if agent.mode == 'prove':
             if args.output:
@@ -331,6 +345,30 @@ def main():
                 raise ValueError('--proof-max-predict must be at least --predict for a new proof job')
             ensure_model()
             last_proof_id = ''
+            if args.proof_strategy == 'cooperative':
+                from .cooperative import run_cooperative_proof
+                directory = workspace.root / '.mathagent' / 'cooperative' / str(uuid.uuid4())
+                cooperative_directory = directory
+                result = run_cooperative_proof(agent, query, output_dir=directory,
+                    max_rounds=args.proof_rounds, max_tokens=args.proof_tokens,
+                    max_seconds=args.proof_seconds, max_predict=args.proof_max_predict,
+                    source_files=args.proof_file, seed=args.seed if args.seed is not None else 0,
+                    concurrency=args.cooperative_concurrency, emit=ui.emit)
+                cooperative_directory = None
+                ui.say(f'Cooperative proof: {result["status"]}\nSaved work: {result["directory"]}')
+                if result.get('proof_path') and result['status'] == 'candidate_complete':
+                    ui.say(Path(result['proof_path']).read_text(encoding='utf-8'))
+                    ui.say('Model-audited candidate; independent mathematical checking is still needed.')
+                    ui.say(f'Proof text: {result["proof_path"]}')
+                else:
+                    ui.say(Path(result['report_path']).read_text(encoding='utf-8'))
+                    if result.get('answer_path'):
+                        ui.say(f'Unverified assembled candidate: {result["answer_path"]}')
+                ui.say(f'Debrief: {result["report_path"]}')
+                ui.say('Cooperative parents are one-shot jobs and cannot be resumed. Child proof ledgers remain inspectable.')
+                for error in result.get('execution_errors', []):
+                    ui.say('Workflow error: ' + str(error))
+                return
             if args.proof_workers > 1:
                 from .portfolio import run_proof_portfolio
                 directory = workspace.root / '.mathagent' / 'portfolios' / str(uuid.uuid4())
@@ -437,6 +475,8 @@ def main():
                 elif command == '/ledger':
                     show_ledger(ui, select_proof(workspace.root, rest or last_proof_id))
                 elif command == '/resume':
+                    if args.proof_strategy == 'cooperative':
+                        raise ValueError('Cooperative parent resume is not supported. Inspect the saved report; use the default strategy and child workspace to resume a child as separate work.')
                     store = select_proof(workspace.root, rest or last_proof_id)
                     last_proof_id = store.state['id']
                     proof_running = True
@@ -463,6 +503,8 @@ def main():
                                        'backend': args.backend, 'seed': agent.seed,
                                        'temperature': agent.temperature, 'top_p': agent.top_p,
                                        'new_proof_max_predict': args.proof_max_predict,
+                                       'proof_strategy': args.proof_strategy,
+                                       'cooperative_concurrency': args.cooperative_concurrency,
                                        'think': agent.think, 'mode': agent.mode,
                                        'online': literature.online, 'literature_usage': literature.stats,
                                        'last_request': agent.last_stats}, indent=2))
@@ -510,7 +552,11 @@ def main():
                 return 0
         except KeyboardInterrupt:
             ui.stop()
-            if proof_running:
+            if cooperative_directory is not None:
+                ui.say(f'\nCooperative proof interrupted. Inspect saved parent state and child ledgers in: {cooperative_directory}')
+                ui.say('The cooperative parent cannot be resumed; a new /prove starts a separate job with a new budget.')
+                cooperative_directory = None
+            elif proof_running:
                 ui.say('\nProof interrupted. Completed checkpoints and the original budget are saved.')
                 try:
                     store = select_proof(workspace.root, last_proof_id)
@@ -533,6 +579,9 @@ def main():
         except (AgentError, OSError, ValueError) as e:
             ui.stop()
             ui.say(f'Error: {e}')
+            if cooperative_directory is not None:
+                ui.say(f'Inspect any saved cooperative state in: {cooperative_directory}. Parent resume is not supported.')
+                cooperative_directory = None
             if proof_running:
                 ui.say('Saved proof checkpoints remain available through /proofs, /ledger and /resume.')
                 proof_running = False

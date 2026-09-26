@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Opt-in cooperative proof strategy: an advisor proposes precise subproblems,
+  bounded workers follow their dependencies, and an assembly job checks the
+  original theorem. One targeted repair is allowed under a fixed total budget.
+- Separate `cooperative` benchmark arm with frozen allocations and blinded
+  grading; default arms and existing A10/V100 launchers remain unchanged.
+- Complete candidates that pass the fresh critic skip recorder inference and
+  proceed to final audit; partial work keeps the bounded recorder workflow.
+
 - Separate single-A10 Q4 pilot with pinned weights/build, one 32K inference slot,
   and its own deployment and benchmark launchers; the two-V100S Q8 profile stays available.
 - Bounded branch scheduling preserves three attempts and token partitions while

@@ -25,6 +25,22 @@ process, workspace, seed and fixed token allowance. Independent reviews select
 an **existing full candidate**, retaining the exact text. A model's approval is
 never a mathematical score or proof certificate.
 
+An optional **`cooperative`** arm uses advisor-planned subproblems, dependency-aware
+workers and a newly assembled proof of the original theorem. It is a different
+algorithm, not a renamed portfolio. Enable it explicitly with `--arms cooperative`
+or add it to the three original arms. Ten problems with all four arms produce
+forty jobs and a 2.4-million-token aggregate ceiling at the defaults. Existing
+A10/V100 launchers and the generic runner's default arms remain unchanged.
+
+The cooperative arm uses the same statement-only inputs, model, sampling
+settings, total token ceiling and blinded human grading. It does not use the
+portfolio selector or its `--selection-tokens` allocation. Its whole assembled
+proof must pass the existing fresh critic and final audit to be marked
+`candidate_complete`; model approval still does not determine the human score.
+Unfinished assembled candidates are exported for partial-credit assessment;
+without an assembled candidate, the submission is empty. See
+[cooperative proof work](usage.md#cooperative-proof-work) for its bounded pipeline.
+
 ## Hardware profiles
 
 The [two-V100S Q8 profile](ovh.md) runs three branches concurrently. The separate
@@ -147,6 +163,29 @@ The dedicated A10 wrapper uses `--branches 3 --branch-concurrency 1
 Start with the hardware profile defaults and increase concurrency only after measuring GPU memory
 and aggregate throughput on the actual server.
 
+For the cooperative arm, `--cooperative-concurrency` controls active subproblem
+workers (1–3), independently of portfolio `--branches` and `--branch-concurrency`.
+Preflight uses the **largest active width among selected arms** in
+`workers × width <= max-in-flight`. Thus two jobs with cooperative concurrency
+three require `--max-in-flight 6`, even if portfolio branches are serialized.
+The width is an upper bound: dependencies can leave fewer tasks runnable.
+
+To inspect a cooperative smoke configuration without any inference or writes:
+
+```bash
+python -m mathagent.benchmark \
+  --manifest /srv/square/smoke-statements/manifest.json \
+  --output /srv/square/runs/cooperative-smoke-001 \
+  --backend llamacpp --host http://127.0.0.1:8000 --model square-qwen \
+  --arms cooperative --cooperative-concurrency 3 --max-in-flight 3 \
+  --ctx 32768 --predict 2048 --max-predict 4096 \
+  --tokens 16000 --seconds 1800 --workers 1 --dry-run
+```
+
+Remove `--dry-run` only for a deliberately selected software smoke run after
+server acceptance. This does not launch the ten-problem benchmark. A small
+allowance can stop before assembly or review, which is an incomplete outcome.
+
 ## Budgets, selection and failures
 
 With three branches, 6,144 tokens are reserved for selection and each branch
@@ -163,6 +202,23 @@ changed. Initial branch seeds match across direct and parallel conditions;
 subsequent harness calls get their own saved seed sequence. A saved seed is a
 reproduction aid, not a guarantee of identical GPU outputs across server builds
 or different batching schedules.
+
+The cooperative budget requires at least 8,192 tokens and is frozen in
+`plan.json` with strategy version 1. For ceiling B, initial planning receives
+`min(2048, B//16)` and repair planning receives `min(1536, B//32)`. The remaining
+tokens allocate 40% to initial workers, 30% to initial assembly, 10% to one repair
+worker, and the integer balance to final assembly. Unused allocations are not
+reassigned. At B = 60,000 these are 2,048, 1,536, 22,566, 16,924, 5,641 and 11,285
+tokens respectively. An explicit direct route uses B minus the initial planning
+allowance instead. The advisor may propose distinct tasks but cannot enlarge the
+global budget or bypass the final whole-proof checks. Malformed plans stop as an
+execution error without dispatching workers. Other worker or stage execution
+errors remain recorded even if a later model approves an assembled candidate.
+The saved parent state also records cumulative time checkpoints: 10%, 45%, 70%,
+75%, 85% and 100% of the wall-time guard for planning, workers, first assembly,
+repair planning, repair work and final assembly. Unused early time remains
+available before later checkpoints; token allocations do not move. Report a
+binding time guard separately from token exhaustion.
 
 Selection ranks model reviews `complete`, `uncertain`, then `gap`; malformed
 reviews can only produce an explicitly unreviewed fallback. Ties use the frozen
@@ -214,6 +270,8 @@ Each output contains:
 - `outputs.jsonl` and per-job `result.json`: statuses, measured usage, unknown
   usage charged at reserved limits, timing, chosen artifact and exact answer hash.
 - Per-job `answer.md`, direct request/stream journals and proof ledgers.
+- Cooperative jobs additionally retain their parent state/report, exact plan,
+  stage allocations, dependency outcomes and individual worker/assembly ledgers.
 - `grading/`: anonymized statements/answers and a blank `scores.csv` worksheet.
 - `grading-key.private.json`: arm/replicate mapping, kept outside the grading
   directory; model judgments remain in the private run records.
