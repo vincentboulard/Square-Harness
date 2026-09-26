@@ -1,0 +1,5 @@
+include CITATION.cff CHANGELOG.md CONTRIBUTING.md SECURITY.md
+recursive-include docs *.md
+prune examples
+prune .mathagent
+global-exclude .env .env.* *.pem *.key

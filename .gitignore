@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+mathagent-transcript.json
+.mathagent/
+
+# Keep local research inputs and credentials out of the public source tree.
+/examples/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
