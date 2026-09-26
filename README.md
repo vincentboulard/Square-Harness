@@ -2,7 +2,7 @@
 
 **A local-first, open-source harness for mathematical research.**
 
-Square Harness connects a language model running through [Ollama](https://ollama.com/) or [vLLM](https://vllm.ai/)
+Square Harness connects a language model running through [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://vllm.ai/)
 to a mathematical workspace. It can read manuscripts, explore proof strategies,
 keep a record of unfinished work, and prepare literature and referee-report drafts.
 
@@ -79,7 +79,7 @@ Launch with `--online` for external research. Proof search additionally requires
 
 See the [usage guide](docs/usage.md) for manuscript inputs, reports, budgets,
 optional PDF/Python tools, and all command-line settings.
-For GPU experiments, see the [OVH/vLLM setup](docs/ovh.md) and
+For GPU experiments, see the [two-V100S OVH setup](docs/ovh.md) and
 [benchmark protocol](docs/benchmark.md). GPU performance must be measured on the target server.
 
 ## Limits and privacy

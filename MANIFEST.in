@@ -6,3 +6,4 @@ prune benchmark-runs
 recursive-include scripts *.py *.sh
 prune .mathagent
 global-exclude .env .env.* *.pem *.key
+recursive-include deployment *.py *.json Dockerfile*

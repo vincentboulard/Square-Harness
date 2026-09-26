@@ -26,6 +26,8 @@ def create_client(backend, host, timeout=600):
         return client
     if backend == 'openai':
         return OpenAICompatible(host, timeout=timeout)
+    if backend == 'llamacpp':
+        return LlamaCpp(host, timeout=timeout)
     raise AgentError(f'Unknown model backend: {backend}')
 
 
@@ -97,7 +99,10 @@ class OpenAICompatible:
         self.opener = build_opener(ProxyHandler({}), _NoModelRedirects())
 
     def request(self, endpoint, data=None):
-        request = Request(self.base_url + endpoint,
+        return self._request_url(self.base_url + endpoint, data)
+
+    def _request_url(self, url, data=None):
+        request = Request(url,
                           data=None if data is None else json.dumps(data, ensure_ascii=False).encode(),
                           headers={'Content-Type': 'application/json', 'Accept': 'text/event-stream' if data else 'application/json'})
         try:
@@ -175,7 +180,11 @@ class OpenAICompatible:
 
     def stream(self, payload):
         data = self._payload(payload)
+        yield from self._stream(data)
+
+    def _stream(self, data):
         calls, finish, usage = {}, None, None
+        requested_cap = data.get('max_completion_tokens', data.get('max_tokens', float('inf')))
         deadline = time.monotonic() + self.timeout
         try:
             with self.request('/chat/completions', data) as response:
@@ -210,10 +219,10 @@ class OpenAICompatible:
                         current = chunk['usage']
                         if not isinstance(current, dict) or any(type(current.get(key)) is not int or current[key] < 0 for key in ('prompt_tokens', 'completion_tokens')):
                             raise AgentError('Missing or invalid token usage in model stream')
-                        if current['completion_tokens'] > data.get('max_completion_tokens', float('inf')):
+                        if current['completion_tokens'] > requested_cap:
                             raise TokenBudgetError({'eval_count': current['completion_tokens'],
                                                     'prompt_eval_count': current['prompt_tokens']},
-                                                   data['max_completion_tokens'])
+                                                   requested_cap)
                         usage = current
                     choices = chunk.get('choices', [])
                     if not isinstance(choices, list) or len(choices) > 1:
@@ -258,3 +267,110 @@ class OpenAICompatible:
             raise AgentError('Model stream ended before [DONE]; partial output is incomplete')
         except (ValueError, UnicodeError, TypeError, KeyError, AttributeError, OSError, HTTPException) as exc:
             raise AgentError(f'Malformed or interrupted model stream: {exc}') from exc
+
+
+class LlamaCpp(OpenAICompatible):
+    """llama-server chat API with exact, template-aware per-slot context checks.
+
+    The supported server contract is pinned in the deployment files. Its
+    /chat/completions/input_tokens route applies the same template, tool/schema
+    handling and special-token policy as generation, without running inference.
+    """
+    backend = 'llamacpp'
+
+    def __init__(self, host='http://localhost:8000', timeout=600):
+        super().__init__(host, timeout)
+        self.root_url = self.base_url[:-len('/v1')]
+        self._properties = None
+
+    def _payload(self, payload):
+        if payload.get('reasoning_effort') is not None:
+            raise AgentError('The llama.cpp preset uses think on/off, not reasoning_effort levels')
+        if type(payload.get('think', True)) is not bool:
+            raise AgentError('llama.cpp thinking must be a boolean')
+        data = super()._payload(payload)
+        if 'max_completion_tokens' not in data:
+            raise AgentError('llama.cpp requires a positive output token cap')
+        data['max_tokens'] = data.pop('max_completion_tokens')
+        data['reasoning_format'] = 'deepseek'
+        data['chat_template_kwargs'] = {'enable_thinking': payload.get('think', True),
+                                        'preserve_reasoning': True}
+        for message in data['messages']:
+            if 'reasoning' in message:
+                message['reasoning_content'] = message.pop('reasoning')
+        if 'repetition_penalty' in data:
+            data['repeat_penalty'] = data.pop('repetition_penalty')
+        if 'structured_outputs' in data:
+            schema = data.pop('structured_outputs')['json']
+            data['response_format'] = {'type': 'json_schema', 'json_schema': {
+                'name': 'square_harness_response', 'strict': True, 'schema': schema}}
+        return data
+
+    def _json(self, endpoint, data=None, *, root=False):
+        try:
+            request = self._request_url(self.root_url + endpoint, data) if root else self.request(endpoint, data)
+            with request as response:
+                result = json.load(response)
+            if not isinstance(result, dict):
+                raise ValueError('Expected a JSON object')
+            return result
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, HTTPException) as exc:
+            raise AgentError(f'Malformed llama.cpp response from {endpoint}: {exc}') from exc
+
+    def properties(self, *, refresh=False):
+        if refresh or self._properties is None:
+            props = self._json('/props', root=True)
+            settings = props.get('default_generation_settings')
+            context = settings.get('n_ctx') if isinstance(settings, dict) else None
+            if type(context) is not int or context <= 0:
+                raise AgentError('llama.cpp /props must report a positive per-slot n_ctx')
+            if not isinstance(props.get('chat_template'), str) or not props['chat_template'].strip():
+                raise AgentError('llama.cpp must expose its configured chat template through /props')
+            self._properties = props
+        return copy.deepcopy(self._properties)
+
+    def _count_input_tokens(self, data):
+        count = self._json('/chat/completions/input_tokens', data).get('input_tokens')
+        if type(count) is not int or count < 0:
+            raise AgentError('llama.cpp must return an integer input_tokens count')
+        return count
+
+    def count_input_tokens(self, payload):
+        """Count a native request after the server applies its exact chat template."""
+        return self._count_input_tokens(self._payload(payload))
+
+    def stream(self, payload):
+        data = self._payload(payload)
+        context = payload.get('options', {}).get('num_ctx')
+        if type(context) is not int or context <= 0:
+            raise AgentError('llama.cpp requires an explicit positive num_ctx context budget')
+        timeout, started = self.timeout, time.monotonic()
+
+        def remaining_timeout():
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise AgentError('llama.cpp request exceeded its elapsed-time guard before generation')
+            self.timeout = remaining
+
+        try:
+            remaining_timeout()
+            slot_context = self.properties()['default_generation_settings']['n_ctx']
+            if context > slot_context:
+                raise AgentError(f'Requested context {context} exceeds llama.cpp per-slot context {slot_context}; '
+                                 'restart the server with the required slot capacity or explicitly lower --ctx')
+            remaining_timeout()
+            prompt_tokens = self._count_input_tokens(data)
+            # llama-server stops at prompt.n_tokens()+1 >= slot.n_ctx. Reserve
+            # that boundary token as well as every requested output token.
+            if prompt_tokens + data['max_tokens'] + 1 > context:
+                raise AgentError(f'Context budget exceeded: {prompt_tokens} prompt tokens + '
+                                 f'{data["max_tokens"]} output tokens + 1 boundary token > {context}; '
+                                 'the statement and output allowance were not truncated')
+            remaining_timeout()
+            for event in self._stream(data):
+                if event.get('done') and event.get('prompt_eval_count') != prompt_tokens:
+                    raise AgentError('llama.cpp prompt token count changed between validation and generation; '
+                                     'refusing a potentially truncated or differently formatted completion')
+                yield event
+        finally:
+            self.timeout = timeout

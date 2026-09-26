@@ -104,6 +104,31 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Context'):
             benchmark.preflight(self.args)
 
+    def test_v100_time_guards_are_recorded_and_forwarded_to_direct_requests(self):
+        self.args.backend = 'llamacpp'
+        self.args.seconds = 14400
+        self.args.request_timeout = 7200
+        self.args.selection_seconds = 1800
+        data, plan = benchmark.preflight(self.args)
+        self.assertEqual(plan['settings']['request_timeout'], 7200)
+        self.assertEqual(plan['settings']['selection_seconds'], 1800)
+        output = self.root / 'runs'
+        output.mkdir()
+        with patch.object(benchmark, 'create_client', return_value=FakeClient()) as factory:
+            benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
+        self.assertEqual(len(factory.call_args_list), 4)
+        self.assertTrue(all(c.kwargs['timeout'] == 7200 for c in factory.call_args_list))
+
+    def test_invalid_request_and_selection_time_guards_fail_before_dispatch(self):
+        for field in ('request_timeout', 'selection_seconds'):
+            for value in (0, -1, float('nan'), float('inf')):
+                with self.subTest(field=field, value=value):
+                    args = benchmark.parser().parse_args([
+                        '--manifest', str(self.manifest), '--output', str(self.root / 'runs')])
+                    setattr(args, field, value)
+                    with self.assertRaisesRegex(ValueError, 'finite and positive'):
+                        benchmark.preflight(args)
+
     def test_missing_usage_keeps_full_reservation_and_partial_text(self):
         client = FakeClient(usage=False)
         result = benchmark._raw(client, 'Prove the goal.', self.root / 'raw', self.args, 1000, 3)

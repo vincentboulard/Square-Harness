@@ -4,17 +4,19 @@ Detailed reference for the experimental 0.4 release. Start with the
 [README](../README.md) for installation. Commands below assume an existing
 workspace at `~/research/my-paper` and your own files inside it.
 
-## vLLM and parallel proofs
+## GPU servers and parallel proofs
 
-Ollama remains the default. For a running vLLM server:
+Ollama remains the desktop default. For the two-V100S llama.cpp deployment:
 
 ```bash
-square-harness --backend openai --host http://localhost:8000 \
+square-harness --backend llamacpp --host http://localhost:8000 \
   --model square-qwen --workspace ~/research/my-paper \
-  --ctx 32768 --predict 8192 --seed 42
+  --ctx 32768 --predict 8192 --seed 42 \
+  --request-timeout 7200 --proof-seconds 14400 --proof-selection-seconds 1800
 ```
 
-Here `openai` names the HTTP protocol, not a paid model provider. Offline mode
+Use `--backend openai` for vLLM. The `llamacpp` adapter uses its native template,
+exact prompt-token counting, schema output and reasoning fields. Offline mode
 still requires a loopback endpoint; an SSH tunnel can connect to your own GPU
 server. The server controls its actual context allocation: `--ctx` is the
 harness's input/output budget and must not exceed the server's configured limit.

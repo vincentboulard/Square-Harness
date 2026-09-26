@@ -78,7 +78,7 @@ writes:
 python -m mathagent.benchmark \
   --manifest /srv/square/smoke-statements/manifest.json \
   --output /srv/square/runs/smoke-001 \
-  --backend openai --host http://127.0.0.1:8000 --model square-qwen \
+  --backend llamacpp --host http://127.0.0.1:8000 --model square-qwen \
   --dry-run
 ```
 
@@ -87,22 +87,27 @@ exact tokenizer. The GPU smoke run must verify actual server context handling,
 reasoning, structured outputs and tool calls before the mathematical experiment.
 There is no implicit text truncation to make a full-proof review fit.
 
-After the server passes its smoke checks, run the frozen private manifest:
+For the two-V100S experiment, use the wrapper after the server passes the
+[OVH acceptance checks](ovh.md). It fixes the scientific settings, checks the
+current server against the acceptance record, and embeds both records in the plan:
 
 ```bash
-python -m mathagent.benchmark \
-  --manifest /srv/square/pilot/manifest.json \
-  --output /srv/square/runs/pilot-001 \
-  --backend openai --host http://127.0.0.1:8000 --model square-qwen \
-  --model-revision EXACT_WEIGHTS_COMMIT --server-image EXACT_IMAGE_DIGEST \
-  --dtype bfloat16 --ctx 32768 --tokens 60000 \
-  --predict 8192 --max-predict 8192 \
-  --branches 3 --selection-tokens 6144 --replicates 1 \
-  --workers 1 --max-in-flight 3
+python scripts/run-v100-benchmark.py \
+  --manifest "$HOME/square-data/pilot-10-v1/manifest.json" \
+  --output "$HOME/square-runs/pilot-q8-001" \
+  --launch-record "$HOME/square-runs/server/launch.json" \
+  --acceptance "$HOME/square-runs/server/acceptance.json"
 ```
 
-The serving settings must match the metadata supplied here; the runner does not
-infer checkpoint identity, precision or an image digest from a model alias.
+The V100 condition uses the same Q8_0 weights, template, 32K context, sampling
+settings and server for every arm. Quantization changes the numerical model: do
+not pool these results with BF16 runs. Weights are identified by their complete
+GGUF SHA-256 digest, not merely a model alias. The V100 wrapper retains three
+branches and the original token partition; no scientific statement is changed.
+
+The generic `python -m mathagent.benchmark` runner remains available for other
+servers with explicit `--model-revision`, `--server-image` and `--dtype` metadata.
+It does not infer those identities from a model alias.
 `unrecorded` metadata is permitted for software smoke tests and flagged in the
 plan. See the [OVH runbook](ovh.md) for server configuration.
 
@@ -144,6 +149,14 @@ harness calls can have more input/prefill work. Compare actual consumption and
 rented GPU-hours alongside mathematical quality.
 
 `--seconds` is a wall-time guard, not an equal-time experimental allocation.
+The V100 wrapper starts with 14,400 seconds per job, a 7,200-second request
+timeout and a 1,800-second selection reserve. These are ceilings, not runtime
+predictions. Calibrate them on synthetic inputs before scoring and keep them
+fixed across arms. If a guard binds, report the trial as time-limited; the token
+ceiling alone no longer describes the effective resource limit. The generic
+runner exposes `--request-timeout` and `--selection-seconds`; portfolio review
+reserves are capped at one quarter of the job time. These settings and all
+actual times are saved.
 Raw and parallel portfolios reserve a tail for selection. Socket timeouts and
 active requests can delay interruption; do not expect immediate cancellation
 of an entire batch. Individual failures remain in the result set and do not

@@ -8,8 +8,13 @@
   selection of an existing candidate after independent review.
 - Statement-only benchmark manifests, direct-sampling and harness comparison,
   saved run metadata and anonymized submissions for mathematical grading.
-- Pinned OVH H100 serving recipe and live transport checks. GPU memory fit,
-  throughput and mathematical gains remain to be measured on the server.
+- Pinned two-V100S deployment using CUDA 12 llama.cpp and one shared Q8_0
+  model, with three 32K context slots and recorded model/image identities.
+- Explicit llama.cpp transport with exact formatted-prompt context checks,
+  streamed reasoning, tool history, structured reviews and token accounting.
+- Concurrent-capacity acceptance checks, longer configurable time guards, and
+  a launch wrapper that binds the benchmark to the verified serving record.
+  GPU fit, throughput and mathematical gains still require the actual server.
 
 ## 0.4.0 — initial public release candidate
 

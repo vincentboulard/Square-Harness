@@ -12,7 +12,7 @@ import uuid
 from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
-from .backends import OpenAICompatible
+from .backends import OpenAICompatible, create_client
 from .prompts import MODES
 from .proof import ProofRunner
 from .ledger import ProofStore
@@ -127,11 +127,13 @@ Reports save automatically in .mathagent/research/; --output exports Markdown.
 
 def parser():
     p = argparse.ArgumentParser(description='Square Harness: a small local mathematics agent')
-    p.add_argument('--backend', choices=('ollama', 'openai'), default='ollama',
-                   help='Model protocol; openai means an OpenAI-compatible local server such as vLLM')
-    p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for vLLM)')
+    p.add_argument('--backend', choices=('ollama', 'openai', 'llamacpp'), default='ollama',
+                   help='Model protocol: ollama, openai (vLLM), or llamacpp (with exact context checks)')
+    p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for other servers)')
     p.add_argument('--workspace', type=Path, default=Path.cwd())
-    p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for openai)')
+    p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
+    p.add_argument('--request-timeout', type=float, default=600, help='Maximum seconds per model request')
+    p.add_argument('--proof-selection-seconds', type=float, default=300, help='Reserved review time for parallel proofs, at most one quarter of the job')
     p.add_argument('--seed', type=int, help='Base sampling seed; saved proof jobs retain their original seed')
     p.add_argument('--temperature', type=float, default=0.6, help='Solver/chat temperature; proof reviews remain at zero')
     p.add_argument('--top-p', type=float, default=0.95)
@@ -202,6 +204,9 @@ def main():
             or not math.isfinite(args.top_p) or not 0 < args.top_p <= 1
             or args.seed is not None and not 0 <= args.seed < 2 ** 31):
         p.error('Use temperature 0–2, top-p in (0, 1], and seed in [0, 2**31)')
+    if (not math.isfinite(args.request_timeout) or args.request_timeout <= 0
+            or not math.isfinite(args.proof_selection_seconds) or args.proof_selection_seconds <= 0):
+        p.error('Request timeout and proof selection seconds must be finite and positive')
     if args.ctx < 2048 or not 0 < args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
         p.error('Use ctx >= 2048, 0 < predict < ctx - 1024, and 1 <= max-rounds <= 32')
     if (not 1 <= args.proof_rounds <= 100 or args.proof_tokens < 512
@@ -234,7 +239,9 @@ def main():
         literature = LiteratureTools(args.workspace, online=args.online,
             max_requests=args.research_requests, max_chars=args.research_chars)
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
-        client = Ollama(args.host) if args.backend == 'ollama' else OpenAICompatible(args.host)
+        client = (Ollama(args.host, timeout=args.request_timeout) if args.backend == 'ollama'
+                  else OpenAICompatible(args.host, timeout=args.request_timeout) if args.backend == 'openai'
+                  else create_client('llamacpp', args.host, timeout=args.request_timeout))
         agent = Agent(client, workspace, args.model, args.ctx, args.predict,
                       not args.no_think, args.mode, args.max_rounds,
                       seed=args.seed, temperature=args.temperature, top_p=args.top_p)
@@ -322,7 +329,7 @@ def main():
                     workers=args.proof_workers, max_rounds=args.proof_rounds,
                     max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                     max_predict=args.proof_max_predict, source_files=args.proof_file,
-                    seed=args.seed if args.seed is not None else 0)
+                    seed=args.seed if args.seed is not None else 0, selection_seconds=args.proof_selection_seconds)
                 answer_notice = (f'Selected answer: {result["answer_path"]}' if result.get('answer_path')
                                  else 'No candidate was selected; inspect the retained branch work.')
                 ui.say(f'Parallel proof portfolio: {result["status"]}\nSaved work: {directory}\n'

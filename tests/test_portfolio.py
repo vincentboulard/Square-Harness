@@ -120,6 +120,15 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(result['tokens_charged'], 1024)
         self.assertIsNone(result['answer_path'])
 
+    def test_llamacpp_exact_context_rejection_excludes_the_candidate(self):
+        for index, message in enumerate(('Context budget exceeded: input plus output exceeds 32768',
+                                         'Requested context 32768 exceeds llama.cpp per-slot context 8192')):
+            with self.subTest(message=message):
+                result = self.select(Client([AgentError(message)]), output_dir=self.root / str(index))
+                self.assertEqual(result['status'], 'needs_context')
+                self.assertIsNone(result['answer_path'])
+                self.assertEqual(result['evaluations'][0]['verdict'], 'needs_context')
+
     def test_truncated_interrupted_and_contradictory_reviews_cannot_approve(self):
         for index, response in enumerate([
                 [event(review(), reason='length')],
@@ -354,7 +363,10 @@ class ParallelProofIntegration(unittest.TestCase):
         result = run_proof_portfolio(agent, 'Prove the statement in statement.txt.',
             output_dir=root / 'portfolio', workers=2, max_tokens=10000, selection_tokens=1024,
             max_seconds=30, max_rounds=1, max_predict=512, source_files=['statement.txt'], seed=7,
-            selector_goal=selector_goal)
+            selector_goal=selector_goal, selection_seconds=4)
+        self.assertEqual(result['selection_seconds'], 4)
+        self.assertTrue(all(job['max_seconds'] == 26 for job in result['jobs']))
+        self.assertTrue(all(job['request_timeout'] == client.timeout for job in result['jobs']))
         self.assertTrue(overlapped.is_set())
         self.assertEqual(sorted(seeds), [branch_seed(7, i) for i in range(2)])
         self.assertEqual(sum(j['token_budget'] for j in result['jobs']) + result['selection_tokens'], 10000)

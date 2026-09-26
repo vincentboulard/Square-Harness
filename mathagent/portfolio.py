@@ -226,7 +226,8 @@ def select_candidates(client, *, model, candidates, goal, ctx, token_budget,
                     call['status'] = 'interrupted'
                 # The server is authoritative about context overflow. Do not
                 # treat a rejected full-proof review as a shorter valid review.
-                if any(word in str(exc).lower() for word in ('context length', 'context window', 'maximum context', 'max_model_len')):
+                if any(word in str(exc).lower() for word in ('context length', 'context window', 'maximum context', 'max_model_len',
+                                                                         'context budget', 'per-slot context')):
                     evaluation['verdict'] = 'needs_context'
             finally:
                 if stream is not None and hasattr(stream, 'close'):
@@ -297,7 +298,7 @@ def _proof_worker(job, request_gate=None):
     from .backends import create_client
     result_file = Path(job['directory']) / 'worker-result.json'
     try:
-        client = create_client(job['backend'], job['host'], timeout=job['max_seconds'])
+        client = create_client(job['backend'], job['host'], timeout=min(job.get('request_timeout', job['max_seconds']), job['max_seconds']))
         if request_gate is not None:
             client = _GatedClient(client, request_gate)
         agent = Agent(client, Workspace(job['workspace']), model=job['model'],
@@ -388,7 +389,7 @@ def _branch_result(job):
 def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
                         max_seconds=1800, max_rounds=10, max_predict=8192,
                         source_files=(), seed=0, selection_tokens=6144,
-                        request_gate=None, selector_goal=None):
+                        request_gate=None, selector_goal=None, selection_seconds=300):
     """Run isolated sequential harness branches under fixed shared allocations."""
     if type(workers) is not int or not 1 <= workers <= 16:
         raise ValueError('Proof workers must be between 1 and 16')
@@ -398,6 +399,8 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
         raise ValueError('Budget must cover each branch and its independent selection review')
     if not math.isfinite(max_seconds) or max_seconds <= 0:
         raise ValueError('Portfolio time budget must be finite and positive')
+    if not math.isfinite(selection_seconds) or selection_seconds <= 0:
+        raise ValueError('Selection seconds must be finite and positive')
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError('Provide a nonempty proof goal')
     if selector_goal is not None and (not isinstance(selector_goal, str) or not selector_goal.strip()):
@@ -417,7 +420,7 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
     directory = _new_directory(output_dir)
     started = time.monotonic()
     # Reserve a wall-time tail as well as tokens for the independent reviews.
-    selection_seconds = min(300, max_seconds / 4)
+    selection_seconds = min(selection_seconds, max_seconds / 4)
     branch_seconds = max_seconds - selection_seconds
     base, remainder = divmod(max_tokens - selection_tokens, workers)
     jobs = []
@@ -435,12 +438,13 @@ def run_proof_portfolio(agent, goal, *, output_dir, workers=3, max_tokens=60000,
                      'model': agent.model, 'ctx': agent.ctx, 'predict': agent.predict, 'think': agent.think,
                      'seed': branch_seed(seed, index), 'temperature': getattr(agent, 'temperature', 0.6),
                      'top_p': getattr(agent, 'top_p', 0.95), 'token_budget': base + (index < remainder),
+                     'request_timeout': getattr(agent.client, 'timeout', branch_seconds),
                      'max_seconds': branch_seconds, 'max_rounds': max_rounds, 'max_predict': max_predict})
     state = {'version': 1, 'status': 'running', 'goal': goal, 'source_snapshots': snapshots,
              'directory': str(directory),
              'selector_goal': selector_goal,
              'token_budget': max_tokens, 'selection_tokens': selection_tokens,
-             'max_seconds': max_seconds, 'jobs': jobs, 'branches': [],
+             'max_seconds': max_seconds, 'selection_seconds': selection_seconds, 'jobs': jobs, 'branches': [],
              'resume_policy': 'Parent is one-shot. Inspect or explicitly resume child proof ledgers individually; never rerun this directory.',
              'answer_path': None, 'selected_id': None, 'selected_status': None}
     state.update(_usage([]))

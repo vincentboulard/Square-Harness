@@ -84,7 +84,7 @@ def parser():
     p.add_argument('--manifest', type=Path)
     p.add_argument('--output', type=Path)
     p.add_argument('--init-smoke', type=Path, help='Create a new external dataset containing two synthetic toy statements')
-    p.add_argument('--backend', choices=('openai', 'ollama'), default='openai')
+    p.add_argument('--backend', choices=('openai', 'ollama', 'llamacpp'), default='openai')
     p.add_argument('--host', default='http://127.0.0.1:8000')
     p.add_argument('--model', default='square-qwen')
     p.add_argument('--model-revision', default='unrecorded', help='Immutable weights revision; required for a scientific run record')
@@ -102,6 +102,8 @@ def parser():
     p.add_argument('--temperature', type=float, default=0.6)
     p.add_argument('--top-p', type=float, default=0.95)
     p.add_argument('--seconds', type=float, default=1800)
+    p.add_argument('--request-timeout', type=float, default=600, help='Maximum seconds per model request, bounded by job time remaining')
+    p.add_argument('--selection-seconds', type=float, default=300, help='Reserved portfolio review time, at most one quarter of the job')
     p.add_argument('--rounds', type=int, default=10)
     p.add_argument('--workers', type=int, default=1, help='Independent problem/arm jobs in flight')
     p.add_argument('--max-in-flight', type=int, default=3, help='Global cap on simultaneous model requests, including branches')
@@ -135,6 +137,9 @@ def preflight(args):
         raise ValueError('Token budget must leave at least 512 tokens per branch and 128 review tokens per candidate')
     if not math.isfinite(args.seconds) or args.seconds <= 0 or not 1 <= args.rounds <= 100:
         raise ValueError('Use positive finite seconds and rounds 1-100')
+    if (not math.isfinite(args.request_timeout) or args.request_timeout <= 0
+            or not math.isfinite(args.selection_seconds) or args.selection_seconds <= 0):
+        raise ValueError('Request timeout and selection seconds must be finite and positive')
     if not math.isfinite(args.temperature) or not 0 <= args.temperature <= 2 or not 0 < args.top_p <= 1:
         raise ValueError('Invalid sampling parameters')
     # Dry run intentionally does not contact /models or a tokenizer server.
@@ -168,7 +173,8 @@ def preflight(args):
             'output': str(output), 'jobs': len(data['problems']) * args.replicates * len(args.arms),
             'generated_token_ceiling': len(data['problems']) * args.replicates * sum(
                 args.predict if arm == 'raw-single' else args.tokens for arm in args.arms),
-            'context_check': 'Conservative byte estimate only; exact server tokenization is verified in the GPU smoke run.',
+            'context_check': ('Offline conservative byte estimate; llamacpp also verifies exact formatted-prompt tokens before every generation.'
+                if args.backend == 'llamacpp' else 'Conservative byte estimate only; exact server tokenization must be checked in the GPU smoke run.'),
             'raw_first': 'First raw-best candidate retained as raw@1; no additional inference.'}
     return data, plan
 
@@ -336,7 +342,7 @@ def run_job(job, output, args, gate):
     workspace.mkdir()
     (workspace / 'statement.txt').write_text(problem['text'], encoding='utf-8')
     goal = COMMON_INSTRUCTION + '\n\nSTATEMENT:\n' + problem['text']
-    client = GatedClient(create_client(args.backend, args.host, timeout=min(600, args.seconds)), gate)
+    client = GatedClient(create_client(args.backend, args.host, timeout=min(args.request_timeout, args.seconds)), gate)
     agent = Agent(client, Workspace(workspace), args.model, args.ctx, args.predict, not args.no_think,
                   seed=seed, temperature=args.temperature, top_p=args.top_p)
     record = {'id': key, 'problem_id': problem['id'], 'statement_sha256': problem['sha256'],
@@ -353,9 +359,9 @@ def run_job(job, output, args, gate):
         elif arm == 'raw-best':
             share = (args.tokens - args.selection_tokens) // args.branches
             # Each attempt receives a fixed partition; unused tokens are never duplicated.
-            branch_seconds = args.seconds - min(300, args.seconds / 4)
+            branch_seconds = args.seconds - min(args.selection_seconds, args.seconds / 4)
             with ThreadPoolExecutor(max_workers=args.branches) as pool:
-                futures = [pool.submit(_raw, GatedClient(create_client(args.backend, args.host, timeout=min(600, branch_seconds)), gate),
+                futures = [pool.submit(_raw, GatedClient(create_client(args.backend, args.host, timeout=min(args.request_timeout, branch_seconds)), gate),
                     goal, path / f'raw-{i}', args, share, branch_seed(seed, i), branch_seconds) for i in range(args.branches)]
                 candidates = [future.result() for future in futures]
             record['raw_at_1_path'] = candidates[0]['answer_path']
@@ -383,7 +389,8 @@ def run_job(job, output, args, gate):
             result = run_proof_portfolio(agent, goal, output_dir=path / 'portfolio', workers=args.branches,
                 max_tokens=args.tokens, max_seconds=args.seconds, max_rounds=args.rounds,
                 max_predict=args.max_predict, source_files=('statement.txt',), seed=seed,
-                selection_tokens=args.selection_tokens, request_gate=None, selector_goal=goal)
+                selection_tokens=args.selection_tokens, request_gate=None, selector_goal=goal,
+                selection_seconds=args.selection_seconds)
             record.update(result)
             record['request_count'] = sum(len(branch.get('calls', [])) for branch in result.get('branches', [])) + len(result.get('selection', {}).get('calls', []))
         execution_errors = []
@@ -452,7 +459,7 @@ def execute(args, data, plan):
     output = Path(plan['output'])
     output.mkdir(parents=True, exist_ok=False)
     _json(output / 'plan.json', plan)
-    client = create_client(args.backend, args.host, timeout=min(600, args.seconds))
+    client = create_client(args.backend, args.host, timeout=min(args.request_timeout, args.seconds))
     try:
         if args.model not in client.models():
             raise ValueError(f'Model {args.model!r} not offered by the configured server')

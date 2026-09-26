@@ -1,128 +1,194 @@
-# OVH H100 experiment
+# OVH experiment: two V100S GPUs
 
-Target: one H100 with 80 GB GPU memory, Ubuntu 24.04, Python 3.10+.
-Prepare the private dataset locally before renting. The scripts do not create
-or purchase cloud resources. No H100 measurement has yet been made for this project.
+Target: **OVH t2-90, 2 × Tesla V100S 32 GB**, 90 GB system RAM, 30 vcores,
+800 GB NVMe, x86-64 Ubuntu 22.04 or 24.04, Python 3.10+.
+The scripts do not rent a server. No V100S GPU inference has yet been measured
+for this project; the live checks below must pass before scoring problems.
 
-## Model server
+## Frozen experimental condition
 
-Use **one vLLM process** for all direct-model and harness requests. Multiple
-clients share that model through continuous batching; do not load one model per
-agent. Ollama supports parallel requests too, but its default `qwen3.8:27b` is
-quantized. Keep the checkpoint, dtype and server identical across experimental arms.
-
-Pinned starting configuration:
+Use **one llama.cpp server and one Q8_0 model distributed across both GPUs**.
+All direct answers, sequential proof searches and parallel proof searches use
+this same endpoint. Three agents do not load three model copies.
 
 | Setting | Value |
 | --- | --- |
-| Model | `Qwen/Qwen3.8-27B` |
-| Model/tokenizer revision | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` |
-| vLLM image | `vllm/vllm-openai:v0.30.0-cu129` (record and then pin its digest) |
-| Weights | BF16, no weight quantization or CPU offload |
-| Context | 32,768 tokens, including input and output |
-| Active sequences | 4 |
-| Scheduled batch tokens | 8,192; this is not the context limit |
-| GPU allocation fraction | 0.90 |
-| KV precision | `auto`; keep default recurrent-state precision |
-| Reasoning / tool parser | `qwen3` / `qwen3_xml` |
+| Model | Qwen3.8-27B, official Ollama Q8_0 GGUF, text only |
+| Model SHA-256 | `2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf` |
+| llama.cpp commit | `2145525a4081d66ff1a87cf43ef809f95a85ac0c` |
+| Build | CUDA 12.9.1, explicitly compiled for V100 `sm_70` |
+| Weights | Q8_0, about 29.05 GB / 27.05 GiB; download verified by SHA-256 |
+| GPU allocation | All model layers, split equally across two GPUs |
+| Context | **32,768 tokens per request**, including input and output |
+| Concurrent slots | **3**; explicit total context 98,304, separate KV allocation |
+| KV cache / Flash Attention | F16 / off for the initial compatibility configuration |
+| Sampling | Solver temperature 0.6, top-p 0.95; top-k disabled, min-p 0, neutral repetition/presence/frequency penalties; reviewers temperature 0 |
+| Prompt template | Embedded Qwen Jinja template, fingerprinted in the launch record |
+| Context shifting / automatic fitting | Disabled; no silent truncation or context reduction |
+| Endpoint | `http://127.0.0.1:8000`, served alias `square-qwen` |
 
-The checkpoint files total about 55.6 GB. The model configuration implies about
-64 KiB of full-attention KV per cached token: approximately 2 GiB for a full 32K
-sequence, or 8 GiB for four. These estimates exclude recurrent-state storage,
-activation buffers, CUDA graphs, allocation padding and other runtime memory.
-BF16 at 4 × 32K is a starting hypothesis, not a measured fit guarantee. System
-RAM helps loading and storage caching; it does not replace GPU memory.
+The immutable build and model identifiers are stored in
+[`deployment/llama-v100.lock.json`](../deployment/llama-v100.lock.json).
+Q8_0 is weight quantization, not FP8 or BF16 inference. V100 does not have native
+BF16 support, and the prepared vLLM 0.30.0 image requires a newer GPU architecture.
+The optional `serve-vllm.sh` remains an H100 recipe; do not use it on V100.
 
-The native 262,144-token context is unnecessary for these short statements and
-would sharply reduce concurrency. Move to 64K only after observing actual
-context failures and measuring memory. Do not silently switch to FP8 or a
-quantized Ollama model midway through a comparison.
+The official Q8 artifact includes a text-model GGUF plus a separate vision
+projector. We download only the text model. Its embedded template supports
+thinking and tools; neither the projector nor image inputs are needed here.
 
-## Before the first launch
+The smaller weights leave substantially more room than FP16/BF16 for context,
+recurrent state and runtime buffers. That is a capacity hypothesis, not a fit
+measurement. System RAM does not turn two 32 GB GPUs into one 64 GB device.
+The initial split uses layers and makes no assumption about NVLink connectivity.
 
-1. Verify `nvidia-smi` identifies the intended GPU and 80 GB memory. Install Docker
-   and the NVIDIA Container Toolkit using their official Ubuntu instructions.
-   Check host-driver compatibility with the pinned CUDA 12.9 image.
-2. Allow room for model downloads, Docker images and result logs. About 150 GB
-   of free disk is a prudent starting allowance; retain more if keeping variants.
-3. Clone this repository and install its small CPU-side package:
+## Prepare the server
+
+1. Verify `nvidia-smi` shows **two V100S with about 32 GB each**. Check the driver
+   supports CUDA 12.9. Install Docker and the NVIDIA Container Toolkit using their
+   [official instructions](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+   Run `nvidia-smi topo -m` and retain the output; topology can affect performance.
+2. Keep at least 100 GB free for model weights, image builds and logs, with more
+   room for accumulated experiment results. Use a persistent SSH terminal such
+   as tmux for the server and benchmark.
+3. Clone and install the harness:
 
    ```bash
+   git clone https://github.com/vincentboulard/Square-Harness.git
+   cd Square-Harness
    python3 -m venv .venv
    source .venv/bin/activate
    python -m pip install -e .
-   docker pull vllm/vllm-openai:v0.30.0-cu129
-   docker image inspect vllm/vllm-openai:v0.30.0-cu129 --format '{{json .RepoDigests}}'
+   mkdir -p "$HOME/square-runs/server" "$HOME/square-data"
    ```
 
-4. Save the returned image digest and run the server using it:
+4. Build the pinned CUDA 12 server, then download and verify the model. Building
+   happens on the rented Linux host, not on your Mac:
 
    ```bash
-   export VLLM_IMAGE='vllm/vllm-openai@sha256:PASTE_VERIFIED_DIGEST'
-   bash scripts/serve-vllm.sh 2>&1 | tee ~/square-vllm-startup.log
+   bash scripts/build-llama.sh
+   bash scripts/download-llama-model.sh
    ```
 
-   The initial model download occurs here and takes paid instance time. Keep
-   this process in a persistent terminal session. The host port is bound only
-   to loopback; inference stays on the server. For a Mac-side client, use an
-   SSH tunnel: `ssh -L 8000:127.0.0.1:8000 ubuntu@YOUR_SERVER`.
+   CUDA 13 is not a substitute: this build explicitly targets the older V100
+   architecture. The default model directory is
+   `~/.cache/square-harness/models`; override `MODEL_DIR` consistently if needed.
+   The download is approximately 29 GB and setup consumes paid instance time.
 
-## Validate serving before scoring
+5. Start the model server:
 
-Run the live transport checks in another terminal:
+   ```bash
+   set -o pipefail
+   bash scripts/serve-llama.sh 2>&1 | tee "$HOME/square-runs/server/startup.log"
+   ```
+
+   Startup verifies the pinned model file and built image and records the exact
+   launch in `~/square-runs/server/launch.json`. Keep this terminal running.
+   Inspect the log: all model layers must be on the GPUs, each slot must have
+   32,768 context tokens, and both GPUs must be used. The port is published only
+   on loopback. A Mac-side client can use
+   `ssh -L 8000:127.0.0.1:8000 ubuntu@YOUR_SERVER`.
+
+## Validate before the scored run
+
+In another terminal, enter the checkout and activate `.venv`:
 
 ```bash
 source .venv/bin/activate
-python scripts/smoke-vllm.py --host http://127.0.0.1:8000 --model square-qwen
+python scripts/smoke-serving.py \
+  --backend llamacpp --host http://127.0.0.1:8000 --model square-qwen \
+  --ctx 32768 --parallel 3 \
+  --launch-record "$HOME/square-runs/server/launch.json" \
+  --output "$HOME/square-runs/server/acceptance.json"
 ```
 
-They check ordinary generation, reasoning, a tool round trip, JSON schema output,
-streamed usage, a capped response and concurrent requests. These are software
-checks, not mathematical grading. Retain the JSON output in the experiment record.
+This checks the running build/template against the launch record, each slot's
+context size, ordinary and thinking responses, a tool round trip, structured
+JSON, streamed usage and output caps. Short and representative-context batches
+check that three different requests actually decode concurrently. Merely sending
+three HTTP requests is not evidence of concurrent inference. Synthetic filler
+is used for capacity checks; scored problems are never used for tuning.
 
-Then generate a synthetic dataset and rehearse the entire benchmark workflow
-using the commands in [benchmark.md](benchmark.md). Keep scored problems out of
-calibration. Inspect server startup KV capacity and logs for preemptions or OOMs.
-Measure concurrency 1, 2 and 4 with representative output lengths; fix settings
-before the scored run. Higher aggregate throughput can increase individual latency.
+A passing report must have `accepted_for_benchmark: true`. These checks establish
+software behavior for the tested loads, not mathematical correctness or a
+throughput guarantee for every future request. Save the report and startup log.
+The adapter also counts the exact formatted prompt before every generation and
+rejects requests whose full input plus output allowance would exceed context.
 
-If startup fails from memory pressure, reduce context/concurrency and batch-token
-size. An eager-mode run can diagnose CUDA-graph memory pressure. If parsing fails,
-fix the parser/version combination before benchmarking; a failed tool or JSON
-transport is not a mathematical failure. The exact-model recipe is not an H100
-performance validation, so retain this live acceptance step.
+If startup or capacity checks fail, stop before scoring. Inspect the logs and
+GPU memory. Adjust batch/physical batch sizes before changing scientific context
+or quantization, for example `bash scripts/serve-llama.sh --batch-size 256 --ubatch-size 64`.
+Stop the previous server first; any changed server launch needs a fresh acceptance
+report under a new filename. Pass that report to the benchmark wrapper.
+The fixed pilot wrapper requires three 32K slots. Reducing context to 16K would
+also invalidate the original 17,952-token direct-answer allowance. Do not make
+that change silently. A two-slot fallback would require an explicitly revised
+serving profile and acceptance test, while preserving three logical branches.
 
-## Benchmark and retain results
+## Rehearse, then run the same pilot
 
-Copy only the prepared statement dataset to a private directory outside this
-repository, for example `~/square-data/pilot-10-v1`. Keep annotated sources and
-grading references elsewhere. Follow [benchmark.md](benchmark.md) for dry-run,
-the one-replicate pilot and the optional three-replicate experiment.
+Create a tiny synthetic statement dataset and rehearse all three arms:
 
-Record the image digest, model and tokenizer revisions, driver/GPU details,
-`git rev-parse HEAD`, any working-tree patch, server startup log and run manifest.
-The client cannot infer a checkpoint revision from a served alias: verify it
-against the actual server launch command. Seeds aid reproducibility but do not
-guarantee identical output across different scheduling or runtime environments.
+```bash
+python -m mathagent.benchmark --init-smoke "$HOME/square-data/smoke-statements"
+python scripts/run-v100-benchmark.py \
+  --manifest "$HOME/square-data/smoke-statements/manifest.json" \
+  --output "$HOME/square-runs/rehearsal-q8-001" \
+  --acceptance "$HOME/square-runs/server/acceptance.json"
+```
 
-Save request-level prompt tokens, generated tokens (including thinking), charged
-reservations, timing, all candidates, selected answers and error states. Equal
-generated-token ceilings do not imply equal GPU time or equal input-token work.
-Estimate rental duration from measured throughput and setup time, not model-size
-arithmetic. Copy the complete results to your Mac and verify checksums before
-releasing cloud storage or the instance.
+Inspect the outputs for transport/context errors. Use this rehearsal to check
+elapsed times. The wrapper uses generous guards: 14,400 seconds per job, 7,200
+per request, and up to 1,800 reserved for selection. These are upper bounds, not
+runtime estimates. Fix any changed guards on synthetic inputs and use them
+consistently for every arm. No unused token allowance is consumed artificially.
 
-## Primary references checked for this configuration
+Copy **only the existing statement-only dataset** to the server. From your Mac,
+substitute your actual SSH destination:
 
-- [Pinned Qwen model card and configuration](https://huggingface.co/Qwen/Qwen3.8-27B/tree/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0)
-- [Official exact-model vLLM recipe](https://github.com/vllm-project/recipes/blob/main/models/Qwen/Qwen3.8-27B.yaml)
-- [vLLM 0.30.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.30.0)
-- [Pinned engine arguments](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/engine/arg_utils.py)
-- [NVIDIA Container Toolkit installation](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- [CUDA 12.9 driver release notes](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-toolkit-release-notes/index.html)
-- [Ollama concurrency documentation](https://docs.ollama.com/faq)
+```bash
+scp -r /Users/vincent/Documents/SquareHarness/benchmarks/pilot-10-v1 \
+  ubuntu@YOUR_SERVER:~/square-data/
+```
 
-Qwen's published thinking temperature is 1.0. This first comparison explicitly
-uses the existing harness solver temperature 0.6 and top-p 0.95 across all solver
-arms, with zero-temperature reviewers. A temperature change is a separately
-recorded experimental configuration.
+Keep annotated sources, hints and grading references on your Mac. The public
+repository intentionally does not contain those private benchmark files.
+
+On the server, validate the frozen plan without network or output writes:
+
+```bash
+python scripts/run-v100-benchmark.py \
+  --manifest "$HOME/square-data/pilot-10-v1/manifest.json" \
+  --output "$HOME/square-runs/pilot-q8-001" \
+  --acceptance "$HOME/square-runs/server/acceptance.json" \
+  --dry-run
+```
+
+Then run the same command without `--dry-run`. The wrapper rechecks the current
+server and refuses missing or mismatched acceptance evidence. Its plan embeds
+both serving records, model/image hashes, dataset hashes, code hashes and Git
+revision. Existing output directories are never overwritten.
+
+The scientific comparison is unchanged: **ten statements; direct best-of-three,
+sequential harness and three-branch harness; 60,000 generated tokens per method
+and problem, including thinking and reviews; blinded human grading**. One
+replicate makes 30 jobs and authorizes at most 1.8 million generated tokens.
+The numerical condition is now Q8_0; report it separately from any BF16 run.
+Equal output budgets do not imply equal input-token work or equal GPU time.
+See [benchmark.md](benchmark.md) for the exact allocation and failure policy.
+
+Estimate the rental duration from measured throughput and rehearsal times.
+Copy the complete results and serving logs back to your Mac and verify their
+checksums before releasing the instance or its storage.
+
+## Primary references
+
+- [Ollama Qwen3.8-27B Q8_0 artifact](https://ollama.com/library/qwen3.8:27b-q8_0)
+- [Pinned llama.cpp server API and options](https://github.com/ggml-org/llama.cpp/blob/2145525a4081d66ff1a87cf43ef809f95a85ac0c/tools/server/README.md)
+- [Pinned CUDA build configuration](https://github.com/ggml-org/llama.cpp/blob/2145525a4081d66ff1a87cf43ef809f95a85ac0c/ggml/src/ggml-cuda/CMakeLists.txt)
+- [NVIDIA CUDA 12.9 driver notes](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-toolkit-release-notes/index.html)
+- [vLLM 0.30.0 GPU requirements](https://docs.vllm.ai/en/v0.30.0/getting_started/installation/gpu/)
+
+Ollama remains supported for local use. Its current Qwen architecture restriction
+would serialize requests in one model instance; this deployment uses llama.cpp
+directly to test shared-model concurrency.

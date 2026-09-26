@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "square-harness"
 version = "0.4.0"
-description = "An experimental local-first harness for mathematical research with Ollama or vLLM"
+description = "An experimental local-first harness for mathematical research with Ollama, llama.cpp or vLLM"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
     {name = "Vincent Boulard"},
     {name = "Louis Carillo"},
 ]
-keywords = ["mathematics", "research", "ollama", "vllm", "local-first"]
+keywords = ["mathematics", "research", "ollama", "llama.cpp", "vllm", "local-first"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",

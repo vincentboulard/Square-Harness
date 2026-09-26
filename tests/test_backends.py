@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mathagent.agent import Agent, AgentError, Ollama
-from mathagent.backends import OpenAICompatible, TokenBudgetError, create_client
+from mathagent.backends import OpenAICompatible, LlamaCpp, TokenBudgetError, create_client
 from mathagent.tools import Workspace
 
 
@@ -75,6 +75,56 @@ def fixture(*responses, status=200, model_data=None):
     thread.start()
     try:
         yield OpenAICompatible(f'http://127.0.0.1:{server.server_port}', timeout=2), requests, paths
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@contextmanager
+def llama_fixture(*responses, slot_context=32768, input_tokens=11, props=None,
+                  count_response=None, count_status=200):
+    requests, paths, replies = [], [], list(responses)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            paths.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            value = ({'default_generation_settings': {'n_ctx': slot_context},
+                      'chat_template': '{{ messages }}', 'total_slots': 3}
+                     if props is None else props)
+            if self.path.endswith('/models'):
+                value = {'data': [{'id': 'square-qwen'}]}
+            self.wfile.write(json.dumps(value).encode())
+
+        def do_POST(self):
+            paths.append(self.path)
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            requests.append((self.path, body))
+            counting = self.path.endswith('/input_tokens')
+            self.send_response(count_status if counting else 200)
+            self.send_header('Content-Type', 'application/json' if counting else 'text/event-stream')
+            self.end_headers()
+            if counting:
+                value = {'input_tokens': input_tokens} if count_response is None else count_response
+                response = json.dumps(value).encode()
+            else:
+                response = replies.pop(0) if replies else b''
+            try:
+                self.wfile.write(response)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield LlamaCpp(f'http://127.0.0.1:{server.server_port}', timeout=2), requests, paths
     finally:
         server.shutdown()
         server.server_close()
@@ -269,6 +319,144 @@ class BackendTests(unittest.TestCase):
             report = run_smoke(lambda: client, 'square-qwen')
             self.assertFalse(report['ok'])
             self.assertIn('Plain response did not return 42', report['error'])
+
+
+class LlamaCppBackendTests(unittest.TestCase):
+    def payload(self, **kwargs):
+        payload = {'model': 'square-qwen', 'messages': [{'role': 'user', 'content': 'Prove it.'}],
+                   'think': True, 'options': {'num_ctx': 32768, 'num_predict': 128}}
+        payload.update(kwargs)
+        return payload
+
+    def test_native_wire_schema_exact_count_and_reasoning_usage(self):
+        body = sse(delta(reasoning_content='Check the hypotheses.'), delta('{"status":"ok"}'), finish(), usage())
+        payload = self.payload(think=False, format={'type': 'object', 'properties': {'status': {'type': 'string'}}})
+        payload['options'].update(seed=42, top_k=20, min_p=0, repeat_penalty=1.05)
+        original = copy.deepcopy(payload)
+        with llama_fixture(body) as (client, requests, paths):
+            events = list(client.stream(payload))
+            self.assertEqual(paths, ['/props', '/v1/chat/completions/input_tokens', '/v1/chat/completions'])
+            self.assertEqual(requests[0][1], requests[1][1])
+            wire = requests[1][1]
+            self.assertEqual(wire['max_tokens'], 128)
+            self.assertNotIn('max_completion_tokens', wire)
+            self.assertNotIn('structured_outputs', wire)
+            self.assertEqual(wire['response_format']['json_schema']['schema'], payload['format'])
+            self.assertEqual(wire['response_format']['type'], 'json_schema')
+            self.assertEqual(wire['reasoning_format'], 'deepseek')
+            self.assertEqual(wire['chat_template_kwargs'], {'enable_thinking': False, 'preserve_reasoning': True})
+            self.assertEqual(wire['repeat_penalty'], 1.05)
+            self.assertNotIn('repetition_penalty', wire)
+            self.assertEqual(wire['seed'], 42)
+            self.assertEqual(wire['min_p'], 0)
+            self.assertEqual(events[0]['message']['thinking'], 'Check the hypotheses.')
+            self.assertEqual(events[-1]['eval_count'], 7)  # Includes thinking; no double charge.
+            self.assertEqual(events[-1]['prompt_eval_count'], 11)
+        self.assertEqual(payload, original)
+
+    def test_tool_roundtrip_preserves_reasoning_content_ids_and_arguments(self):
+        tool = sse(delta(reasoning_content='Inspect the statement.'), delta(tool_calls=[{
+            'index': 0, 'id': 'call_a', 'type': 'function',
+            'function': {'name': 'read_file', 'arguments': '{"path":'}}]),
+            delta(tool_calls=[{'index': 0, 'function': {'arguments': '"lemma.txt"}'}}]),
+            finish('tool_calls'), usage())
+        with llama_fixture(tool, sse(delta('Not every integer is even.'), finish(), usage())) as (client, requests, paths):
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / 'lemma.txt').write_text('Every integer is even.')
+                agent = Agent(client, Workspace(tmp), model='square-qwen', ctx=16384)
+                self.assertEqual(agent.run('Read lemma.txt'), 'Not every integer is even.')
+            count_requests = [body for path, body in requests if path.endswith('/input_tokens')]
+            generation_requests = [body for path, body in requests if path.endswith('/completions')]
+            self.assertEqual(count_requests, generation_requests)
+            history = generation_requests[1]['messages']
+            self.assertEqual(history[-2]['reasoning_content'], 'Inspect the statement.')
+            self.assertNotIn('reasoning', history[-2])
+            self.assertEqual(history[-2]['tool_calls'][0]['id'], 'call_a')
+            self.assertEqual(history[-1]['tool_call_id'], 'call_a')
+            self.assertEqual(paths.count('/props'), 1)
+
+    def test_per_slot_context_not_total_pool_is_enforced_before_generation(self):
+        with llama_fixture(slot_context=8192) as (client, requests, paths):
+            with self.assertRaisesRegex(AgentError, 'per-slot context 8192'):
+                list(client.stream(self.payload()))
+            self.assertEqual(paths, ['/props'])
+            self.assertEqual(requests, [])
+
+    def test_exact_prompt_plus_full_output_and_boundary_token_must_fit(self):
+        for count, fits in ((871, True), (872, False)):
+            with self.subTest(count=count), llama_fixture(sse(delta('ok'), finish(), usage(prompt=count)),
+                                                         slot_context=1000, input_tokens=count) as (client, requests, _):
+                payload = self.payload(options={'num_ctx': 1000, 'num_predict': 128})
+                if fits:
+                    self.assertTrue(list(client.stream(payload))[-1]['done'])
+                    self.assertEqual(requests[-1][1]['max_tokens'], 128)
+                else:
+                    with self.assertRaisesRegex(AgentError, 'were not truncated'):
+                        list(client.stream(payload))
+                    self.assertEqual(len(requests), 1)
+                    self.assertTrue(requests[0][0].endswith('/input_tokens'))
+
+    def test_requested_context_is_honored_even_when_server_slot_is_larger(self):
+        with llama_fixture(slot_context=32768, input_tokens=900) as (client, requests, _):
+            with self.assertRaisesRegex(AgentError, 'Context budget exceeded'):
+                list(client.stream(self.payload(options={'num_ctx': 1000, 'num_predict': 128})))
+            self.assertEqual(len(requests), 1)
+
+    def test_changed_actual_prompt_count_never_emits_completion_or_tools(self):
+        with llama_fixture(sse(delta('partial'), finish(), usage(prompt=12)), input_tokens=11) as (client, _, __):
+            events = []
+            with self.assertRaisesRegex(AgentError, 'prompt token count changed'):
+                events.extend(client.stream(self.payload()))
+            self.assertFalse(any(event.get('done') for event in events))
+
+    def test_output_cap_violation_retains_actual_usage(self):
+        with llama_fixture(sse(delta('partial'), finish(), usage(output=129))) as (client, _, __):
+            with self.assertRaises(TokenBudgetError) as caught:
+                list(client.stream(self.payload()))
+            self.assertEqual(caught.exception.requested_cap, 128)
+            self.assertEqual(caught.exception.stats['eval_count'], 129)
+
+    def test_count_endpoint_is_mandatory_and_malformed_counts_fail_closed(self):
+        for response in ({}, {'input_tokens': True}, {'input_tokens': -1}, {'input_tokens': '11'}):
+            with self.subTest(response=response), llama_fixture(count_response=response) as (client, requests, _):
+                with self.assertRaises(AgentError):
+                    list(client.stream(self.payload()))
+                self.assertEqual(len(requests), 1)
+        with llama_fixture(count_status=404) as (client, requests, _):
+            with self.assertRaisesRegex(AgentError, 'HTTP 404'):
+                list(client.stream(self.payload()))
+            self.assertEqual(len(requests), 1)
+
+    def test_invalid_server_properties_do_not_dispatch_generation(self):
+        for props in ({}, {'default_generation_settings': None},
+                      {'default_generation_settings': {'n_ctx': True}, 'chat_template': 'x'},
+                      {'default_generation_settings': {'n_ctx': 32768}, 'chat_template': ''}):
+            with self.subTest(props=props), llama_fixture(props=props) as (client, requests, _):
+                with self.assertRaises(AgentError):
+                    list(client.stream(self.payload()))
+                self.assertEqual(requests, [])
+
+    def test_factory_v1_host_count_helper_and_properties_cache_are_isolated(self):
+        with llama_fixture(input_tokens=11) as (client, requests, paths):
+            client = create_client('llamacpp', client.host + '/v1/', timeout=2)
+            self.assertEqual(client.backend, 'llamacpp')
+            self.assertEqual(client.models(), ['square-qwen'])
+            props = client.properties()
+            props['default_generation_settings']['n_ctx'] = 1
+            self.assertEqual(client.properties()['default_generation_settings']['n_ctx'], 32768)
+            self.assertEqual(client.count_input_tokens(self.payload()), 11)
+            client.properties(refresh=True)
+            self.assertEqual(paths.count('/props'), 2)
+            self.assertEqual(requests[0][0], '/v1/chat/completions/input_tokens')
+
+    def test_unsupported_effort_or_missing_context_or_cap_is_not_silently_ignored(self):
+        client = LlamaCpp()
+        for payload in (self.payload(reasoning_effort='xhigh'), self.payload(think='yes'),
+                        self.payload(options={'num_predict': 128}), self.payload(options={'num_ctx': 1000})):
+            with self.subTest(payload=payload), patch.object(client, 'request') as request:
+                with self.assertRaises(AgentError):
+                    list(client.stream(payload))
+                request.assert_not_called()
 
 
 if __name__ == '__main__':

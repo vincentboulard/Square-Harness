@@ -35,6 +35,15 @@ class ProofCliTests(unittest.TestCase):
     def output(self):
         return '\n'.join(str(call.args[0]) for call in self.ui.say.call_args_list)
 
+    def test_llamacpp_client_uses_explicit_backend_and_long_request_timeout(self):
+        self.client.models.return_value = ['square-qwen']
+        with patch.object(cli, 'create_client', return_value=self.client) as factory:
+            code = self.run_cli(['--backend', 'llamacpp', '--request-timeout', '7200',
+                                 '--prompt', 'Prove the supplied statement.'])
+        self.assertEqual(code, 0)
+        factory.assert_called_once_with('llamacpp', 'http://localhost:8000', timeout=7200.0)
+        self.runner.start.assert_called_once()
+
     def test_default_prove_dispatches_bounded_job_and_prints_debrief(self):
         code = self.run_cli(['--proof-rounds', '3', '--proof-tokens', '8000',
                              '--proof-seconds', '90', '--proof-file', 'statement.tex',
