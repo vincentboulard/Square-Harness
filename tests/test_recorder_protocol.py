@@ -30,12 +30,12 @@ class RecorderProtocolTests(unittest.TestCase):
 
     def test_same_batch_id_is_corrected_before_any_ledger_commit(self):
         original = 'For each real x, reflexivity gives x=x.'
-        runner = self.runner([response(original), response(critic()),
-            response(self.invented_batch()), response(batch()), response(audit())])
-        self.assertEqual(runner.start('Prove x=x.')['status'], 'candidate_complete')
+        runner = self.runner([response(original), response(critic(complete_candidate=False)),
+            response(self.invented_batch()), response(batch())])
+        self.assertEqual(runner.start('Prove x=x.', max_rounds=1)['status'], 'budget_exhausted')
         self.assertEqual([c['role'] for c in runner.state['calls']],
-                         ['solver', 'critic', 'recorder', 'recorder', 'auditor'])
-        self.assertEqual(runner.state['tokens_charged'], 50)
+                         ['solver', 'critic', 'recorder', 'recorder'])
+        self.assertEqual(runner.state['tokens_charged'], 40)
         self.assertEqual(runner.state['rounds_started'], 1)
         self.assertEqual([c['status'] for c in runner.state['claims']], ['reviewed'])
         saved_round = runner.state['rounds'][0]
@@ -50,7 +50,7 @@ class RecorderProtocolTests(unittest.TestCase):
         self.assertIn(original, self.client.requests[-1]['messages'][1]['content'])
 
     def test_two_malformed_batches_stop_without_fabricating_mathematical_gap(self):
-        runner = self.runner([response('x=x by reflexivity.'), response(critic()),
+        runner = self.runner([response('x=x by reflexivity.'), response(critic(complete_candidate=False)),
             response(self.invented_batch()), response(self.invented_batch())])
         result = runner.start('Prove x=x.', max_rounds=10)
         self.assertEqual(result['status'], 'stalled')
@@ -67,12 +67,26 @@ class RecorderProtocolTests(unittest.TestCase):
     def test_empty_complete_batch_is_corrected_before_solver_can_repeat(self):
         empty = batch()
         empty['claims'] = []
-        runner = self.runner([response('x=x by reflexivity.'), response(critic()),
-            response(empty), response(batch()), response(audit())])
-        self.assertEqual(runner.start('Prove x=x.')['status'], 'candidate_complete')
+        # A saved job already in review retains its recorder protocol even
+        # though a new clean candidate would now take the direct audit path.
+        runner = self.runner([response(empty), response(batch()), response(audit())])
+        store = ProofStore.create(self.root, 'Prove x=x.',
+            {'max_rounds': 1, 'max_tokens': 60000, 'max_seconds': 60,
+             'host': self.client.host, 'model': runner.agent.model, 'ctx': runner.agent.ctx,
+             'predict': runner.agent.predict, 'think': runner.agent.think})
+        draft = store.write_artifact('candidate', json.dumps(
+            {'text': 'x=x by reflexivity.', 'thinking': '', 'complete': True}))
+        store.state.update(status='paused', rounds_started=1,
+            pending={'index': 1, 'phase': 'review', 'fresh': False, 'think': False,
+                     'task': 'Audit the complete proof.', 'draft': draft,
+                     'solver_truncated': False, 'critique': critic()})
+        store.save()
+        self.assertEqual(runner.resume(store.state['id'])['status'], 'candidate_complete')
         self.assertEqual(runner.state['rounds_started'], 1)
         self.assertEqual([c['role'] for c in runner.state['calls']],
-                         ['solver', 'critic', 'recorder', 'recorder', 'auditor'])
+                         ['recorder', 'recorder', 'auditor'])
+        self.assertIn('claims is empty',
+                      runner.state['rounds'][0]['recorder_rejections'][0]['errors'][0])
 
     def test_omitted_resolution_is_repaired_and_old_objection_reaches_auditor(self):
         objection = 'The argument assumes x>0 and omits x=0.'
@@ -82,15 +96,16 @@ class RecorderProtocolTests(unittest.TestCase):
             response(critic(complete_candidate=False, missing_work=objection)),
             response(batch(previous, complete_candidate=False)),
             response('For all real x, including zero, reflexivity gives x=x.'),
-            response(critic()), response(batch()), response(batch(fixed)), response(audit())])
-        self.assertEqual(runner.start('Prove x=x.', max_rounds=2)['status'], 'candidate_complete')
-        self.assertEqual([c['status'] for c in runner.state['claims']], ['gap', 'reviewed'])
+            response(critic(complete_candidate=False)), response(batch()), response(batch(fixed)),
+            response('For arbitrary real x, reflexivity gives x=x.'), response(critic()), response(audit())])
+        self.assertEqual(runner.start('Prove x=x.', max_rounds=3)['status'], 'candidate_complete')
+        self.assertEqual([c['status'] for c in runner.state['claims']], ['gap', 'reviewed', 'reviewed'])
         self.assertEqual(runner.state['claims'][1]['resolves'], ['C1'])
-        self.assertEqual(runner.state['rounds_started'], 2)
-        self.assertEqual(runner.state['tokens_charged'], 80)
+        self.assertEqual(runner.state['rounds_started'], 3)
+        self.assertEqual(runner.state['tokens_charged'], 100)
         self.assertIn(objection, self.client.requests[-1]['messages'][1]['content'])
         self.assertIn('same claim has unresolved recorded objections (C1)',
-                      self.client.requests[-2]['messages'][1]['content'])
+                      self.client.requests[6]['messages'][1]['content'])
 
     def test_correction_can_retain_a_gap_instead_of_inventing_a_resolution(self):
         gap = review(disposition='gap', objection='The positivity assumption is unjustified.')
@@ -117,7 +132,7 @@ class RecorderProtocolTests(unittest.TestCase):
                          ['solver', 'critic', 'recorder', 'recorder'])
 
     def test_interrupted_correction_cannot_be_retried_by_resume(self):
-        runner = self.runner([response('x=x by reflexivity.'), response(critic()),
+        runner = self.runner([response('x=x by reflexivity.'), response(critic(complete_candidate=False)),
             response(self.invented_batch()), [KeyboardInterrupt()]])
         with self.assertRaises(KeyboardInterrupt):
             runner.start('Prove x=x.')
@@ -132,20 +147,20 @@ class RecorderProtocolTests(unittest.TestCase):
         self.assertEqual(runner.state['claims'], [])
 
     def test_interrupted_initial_recorder_gets_only_one_new_dispatch(self):
-        runner = self.runner([response('x=x by reflexivity.'), response(critic()),
-            [KeyboardInterrupt()], response(batch()), response(audit())])
+        runner = self.runner([response('x=x by reflexivity.'), response(critic(complete_candidate=False)),
+            [KeyboardInterrupt()], response(batch())])
         with self.assertRaises(KeyboardInterrupt):
-            runner.start('Prove x=x.')
+            runner.start('Prove x=x.', max_rounds=1)
         charged = runner.state['tokens_charged']
         result = runner.resume(runner.state['id'])
-        self.assertEqual(result['status'], 'candidate_complete')
-        self.assertEqual(runner.state['tokens_charged'], charged + 20)
+        self.assertEqual(result['status'], 'budget_exhausted')
+        self.assertEqual(runner.state['tokens_charged'], charged + 10)
         self.assertEqual(runner.state['rounds'][0]['recorder_attempts'], 2)
-        self.assertEqual(len(self.client.requests), 5)
+        self.assertEqual(len(self.client.requests), 4)
 
     def test_recorder_recovery_does_not_bypass_generated_token_budget(self):
         runner = self.runner([response('x=x by reflexivity.', count=128),
-            response(critic(), count=128), response(self.invented_batch(), count=200)])
+            response(critic(complete_candidate=False), count=128), response(self.invented_batch(), count=200)])
         result = runner.start('Prove x=x.', max_tokens=512)
         self.assertEqual(result['status'], 'budget_exhausted')
         self.assertEqual(runner.state['tokens_charged'], 456)
@@ -174,7 +189,7 @@ class RecorderProtocolTests(unittest.TestCase):
                 runner._review({'text': 'x=x.', 'thinking': '', 'complete': True}, critic())
 
     def test_pre_dispatch_context_failure_does_not_consume_attempt(self):
-        runner = self.runner([response('x=x by reflexivity.'), response(critic())])
+        runner = self.runner([response('x=x by reflexivity.'), response(critic(complete_candidate=False))])
         with mock.patch.object(runner, '_review', side_effect=ProofContext('Too little context')):
             result = runner.start('Prove x=x.')
         self.assertEqual(result['status'], 'needs_context')

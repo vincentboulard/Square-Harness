@@ -302,7 +302,7 @@ class BenchmarkTests(unittest.TestCase):
         output.mkdir()
         invalid = batch(review(dependencies=['C1']))
         client = ProofClient([response('For every real x, reflexivity gives x=x.'),
-                              response(critic()), response(invalid), response(invalid)])
+                              response(critic(complete_candidate=False)), response(invalid), response(invalid)])
         client.backend = 'ollama'
         with patch.object(benchmark, 'create_client', return_value=client):
             result = benchmark.run_job((data['problems'][0], 'sequential', 0, 8), output, self.args, None)

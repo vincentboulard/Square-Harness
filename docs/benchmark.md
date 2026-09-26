@@ -152,6 +152,11 @@ and aggregate throughput on the actual server.
 With three branches, 6,144 tokens are reserved for selection and each branch
 receives 17,952 tokens. A raw branch can use its whole allocation in one response;
 a proof branch spends its allocation across solver, critics and ledger calls.
+Complete untruncated candidates that pass the fresh critic go directly to the
+whole-proof auditor, with deterministic recording afterward. Partial work still
+uses the recorder loop. This applies equally to sequential and portfolio proof
+branches; it does not change their token ceilings or selection rule. Record the
+code revision when comparing results from before and after this workflow change.
 Each full candidate gets a separate review, capped at 2,048 tokens. Reviewer
 sampling temperature is zero. Solver temperature is 0.6 and top-p is 0.95 unless
 changed. Initial branch seeds match across direct and parallel conditions;

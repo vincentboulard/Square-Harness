@@ -59,7 +59,7 @@ class ProofExportTests(unittest.TestCase):
         return ProofRunner(Agent(client, Workspace(self.root), ctx=16384, predict=512))
 
     def complete(self):
-        client = Client([PROOF, CRITIQUE, REVIEW, AUDIT])
+        client = Client([PROOF, CRITIQUE, AUDIT])
         runner = self.runner(client)
         result = runner.start('Prove x=x for every real x.', max_rounds=1,
                               max_tokens=10000, max_seconds=60)
@@ -73,10 +73,10 @@ class ProofExportTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), candidate['text'].encode('utf-8'))
         self.assertEqual(path.read_text(encoding='utf-8'), PROOF)
         self.assertEqual(result['status'], 'candidate_complete')
-        self.assertEqual(len(client.requests), 4)
-        self.assertEqual(runner.state['tokens_charged'], 52)
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(runner.state['tokens_charged'], 39)
         self.assertEqual([call['role'] for call in runner.state['calls']],
-                         ['solver', 'critic', 'recorder', 'auditor'])
+                         ['solver', 'critic', 'auditor'])
         self.assertIn(PROOF, result['report'])
         self.assertIn('Model reviews are fallible', result['report'])
         self.assertTrue((runner.store.directory / 'ledger.md').is_file())
@@ -97,7 +97,7 @@ class ProofExportTests(unittest.TestCase):
     def test_rejected_whole_proof_audit_never_exports_approval(self):
         audit = {**AUDIT, 'verdict': 'gap', 'explanation': 'The endpoint is omitted.',
                  'objection': 'The endpoint remains unproved.', 'next_task': 'Prove the endpoint.'}
-        runner = self.runner(Client([PROOF, CRITIQUE, REVIEW, audit]))
+        runner = self.runner(Client([PROOF, CRITIQUE, audit]))
         result = runner.start('Prove the claim including the endpoint.', max_rounds=1,
                               max_seconds=60)
         self.assertIsNone(result['proof_path'])
@@ -118,7 +118,7 @@ class ProofExportTests(unittest.TestCase):
         (self.root / 'statement.txt').write_text('Prove x=x for every real x.', encoding='utf-8')
         output = self.root / 'benchmark-job'
         output.mkdir()
-        client = Client([PROOF, CRITIQUE, REVIEW, AUDIT])
+        client = Client([PROOF, CRITIQUE, AUDIT])
         agent = Agent(client, Workspace(self.root), ctx=16384, predict=512)
         args = SimpleNamespace(rounds=1, tokens=10000, seconds=60, max_predict=2048)
         outcome = _sequential(agent, 'Prove statement.txt.', output, args)
@@ -127,8 +127,8 @@ class ProofExportTests(unittest.TestCase):
         exported = (Path(outcome['proof_directory']) / 'proof.md').read_bytes()
         self.assertEqual(answer, PROOF.encode('utf-8'))
         self.assertEqual(answer, exported)
-        self.assertEqual(outcome['tokens_charged'], 52)
-        self.assertEqual(len(client.requests), 4)
+        self.assertEqual(outcome['tokens_charged'], 39)
+        self.assertEqual(len(client.requests), 3)
 
     def test_portfolio_selection_receives_the_same_candidate_as_clean_export(self):
         runner, client, result = self.complete()
@@ -140,7 +140,7 @@ class ProofExportTests(unittest.TestCase):
         self.assertEqual(outcome['candidate']['text'], PROOF)
         self.assertEqual(outcome['candidate']['text'], Path(result['proof_path']).read_text(encoding='utf-8'))
         self.assertEqual(outcome['tokens_charged'], runner.state['tokens_charged'])
-        self.assertEqual(len(client.requests), 4)
+        self.assertEqual(len(client.requests), 3)
 
     def test_proof_export_symlink_is_rejected_without_touching_target(self):
         runner, _, result = self.complete()

@@ -33,6 +33,8 @@ from .proof_policy import (
     SOLVER_POLICY, REVIEW_POLICY, CRITIC_POLICY, PLAN_POLICY, CHECKPOINT_POLICY, AUDIT_POLICY,
 )
 
+POLICY_VERSION = 4
+
 
 def _normal(text):
     # Mathematical symbols are case sensitive; do not conflate A with a.
@@ -102,7 +104,7 @@ class ProofRunner:
         settings = {'max_rounds': max_rounds, 'max_tokens': max_tokens,
                     'max_seconds': max_seconds, 'model': self.agent.model,
                     'ctx': self.agent.ctx, 'predict': self.agent.predict,
-                    'max_predict': max_predict, 'policy_version': 3,
+                    'max_predict': max_predict, 'policy_version': POLICY_VERSION,
                     'harness_version': '0.4.0',
                     'allow_literature': bool(allow_literature),
                     'policy_sha256': hashlib.sha256(Path(__file__).with_name('proof_policy.py').read_bytes()).hexdigest(),
@@ -230,7 +232,15 @@ class ProofRunner:
                     if p['phase'] == 'critic':
                         draft = json.loads(self.store.read_artifact(p['draft']))
                         p['critique'] = self._critic(draft)
-                        p['phase'] = 'review'
+                        # A complete written proof needs a whole-proof audit,
+                        # not another model call to restate it as ledger items.
+                        # Partial checkpoints keep the richer recorder route.
+                        p['fast_path'] = bool(draft['complete'] and draft['text'].strip()
+                            and not p.get('solver_truncated') and not p.get('raw_draft')
+                            and p['critique']['complete_candidate']
+                            and not any(p['critique'][key].strip()
+                                        for key in ('first_invalid_step', 'reason', 'missing_work')))
+                        p['phase'] = 'audit' if p['fast_path'] else 'review'
                         self._save()
                     if p['phase'] == 'review':
                         draft = json.loads(self.store.read_artifact(p['draft']))
@@ -275,17 +285,33 @@ class ProofRunner:
                             self.emit('notice', f'{claim["id"]}: {claim["status"]}. {claim["objection"] or claim["statement"]}')
                     if p['phase'] == 'audit':
                         draft = json.loads(self.store.read_artifact(p['draft']))
-                        audit = self._audit(draft)
-                        self.state['final_audit'] = {'round': p['index'], 'candidate': p['draft'], **audit}
-                        if audit['verdict'] == 'complete':
-                            self.state['status'] = 'candidate_complete'
-                        else:
-                            self.state['next_task'] = audit['next_task'] or audit['objection'] or 'Repair the unresolved whole-proof audit'
-                            for claim in self.state['claims']:
-                                if claim['id'] in p.get('claim_ids', [p.get('claim_id')]):
-                                    claim['whole_proof_objection'] = audit['objection'] or audit['explanation']
-                        p['phase'] = 'finish'
-                        self._save()
+                        if 'audit' not in p:
+                            p['audit'] = self._audit(draft)
+                            # Resume local recording from this response without
+                            # spending tokens on a second completed audit.
+                            self._save()
+                        audit = p['audit']
+                        snapshot = copy.deepcopy(self.state)
+                        try:
+                            if p.get('fast_path'):
+                                claim = self._record_audited_candidate(audit, p, draft)
+                                p['claim_ids'] = [claim['id']]
+                                p['strategy_summary'] = audit['explanation']
+                            self.state['final_audit'] = {'round': p['index'], 'candidate': p['draft'], **audit}
+                            if audit['verdict'] == 'complete':
+                                self.state['status'] = 'candidate_complete'
+                            else:
+                                self.state['next_task'] = audit['next_task'] or audit['objection'] or 'Repair the unresolved whole-proof audit'
+                                for claim in self.state['claims']:
+                                    if claim['id'] in p.get('claim_ids', [p.get('claim_id')]):
+                                        claim['whole_proof_objection'] = audit['objection'] or audit['explanation'] or 'Whole-proof audit did not establish completion.'
+                            p['phase'] = 'finish'
+                            self._save()
+                        except BaseException:
+                            # Record and phase advance form one local commit.
+                            # Keep the cached audit when that commit is retried.
+                            self.store.state = snapshot
+                            raise
                     if p['phase'] == 'finish':
                         self.state['truncation_streak'] = self.state['truncation_streak'] + 1 if p.get('solver_truncated') else 0
                         self.state['rounds'].append(copy.deepcopy(p))
@@ -577,7 +603,7 @@ class ProofRunner:
         stream_file = self.store.start_stream(role)
         call = {'role': role, 'round': self.state['rounds_started'], 'status': 'running',
                 'reserved_tokens': cap, 'stream': stream_file, 'request': request_file,
-                'policy_version': 3,
+                'policy_version': POLICY_VERSION,
                 'policy_sha256': hashlib.sha256(Path(__file__).with_name('proof_policy.py').read_bytes()).hexdigest()}
         self.state['calls'].append(call)
         self.state['tokens_charged'] += cap  # reserve BEFORE dispatch, survives crashes
@@ -946,12 +972,44 @@ class ProofRunner:
             self.emit('notice', f'{claim["id"]}: {status}. {objection or review["next_task"]}')
         return claim
 
+    def _record_audited_candidate(self, audit, pending, draft):
+        """Copy whole-proof evidence without inventing a mathematical summary.
+
+        This is an audit of the exact original goal and complete draft, not a
+        decomposition into locally proved lemmas. In particular, do not infer
+        dependency IDs or silently mark historical objections as resolved.
+        """
+        complete = audit['verdict'] == 'complete'
+        objection = '' if complete else (audit['objection'] or audit['explanation']
+                                        or 'Whole-proof audit did not establish completion.')
+        claim = {'id': f'C{len(self.state["claims"])+1}', 'round': pending['index'],
+                 'statement': self.state['goal'],
+                 'status': 'reviewed' if complete else audit['verdict'],
+                 'assumptions': [], 'dependencies': [], 'argument': draft['text'],
+                 'objection': objection, 'evidence': audit['explanation'],
+                 'resolves': [], 'resolution': '', 'candidate_artifact': pending['draft'],
+                 'review_artifact': audit.get('_artifact'), 'next_task': audit['next_task'],
+                 'record_kind': 'whole_candidate_audit'}
+        if not complete:
+            claim['whole_proof_objection'] = objection
+        # A changed objection may be useful, but an auditor rejecting another
+        # candidate does not by itself establish new mathematical progress.
+        self.state['stagnant_rounds'] = 0 if complete else self.state['stagnant_rounds'] + 1
+        self.state['claims'].append(claim)
+        return claim
+
     def _audit(self, draft):
         try:
             result = self._json_call('auditor', AUDIT_POLICY, 'SELF-CONTAINED CANDIDATE:\n' + draft['text'], AUDIT_SCHEMA, complete_ledger=True)
-            if result['verdict'] == 'complete' and (result['objection'].strip() or not result['explanation'].strip()):
+            if result['verdict'] == 'complete' and (result['objection'].strip()
+                    or result['next_task'].strip() or not result['explanation'].strip()):
+                if result['next_task'].strip():
+                    # Preserve the inconsistent follow-up as unresolved
+                    # evidence before replacing it with a controller task.
+                    result['objection'] += ('\n' if result['objection'] else '') + (
+                        'The audit claimed completion but requested additional work: ' + result['next_task'])
                 result['verdict'] = 'uncertain'
-                result['next_task'] = 'Resubmit the self-contained proof for audit: the previous audit returned inconsistent fields, so completion was not recorded. An approval requires a nonempty explanation and an empty objection field.'
+                result['next_task'] = 'Resubmit the self-contained proof for audit: the previous audit returned inconsistent fields, so completion was not recorded. An approval requires a nonempty explanation and empty objection and next_task fields.'
             return result
         except (json.JSONDecodeError, ValueError) as exc:
             return {'verdict': 'uncertain', 'explanation': 'Whole-proof audit did not yield a valid verdict: ' + str(exc),

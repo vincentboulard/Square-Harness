@@ -17,24 +17,10 @@ class PersistentProofHttpIntegration(unittest.TestCase):
         proof = ('Let x be an arbitrary real number. Equality is reflexive, so x=x. '
                  'Since x was arbitrary, the statement holds for every real number. '
                  'This is a complete proof; there are no remaining obligations.')
-        review = {
-            'critical_claim': 'For every real number x, x=x.',
-            'assumptions': ['x is a real number.'], 'dependencies': [],
-            'argument': proof, 'disposition': 'supported', 'objection': '',
-            'evidence': 'Reflexivity of equality applies to every real number.',
-            'next_task': 'Audit the self-contained proof against the original statement.',
-            'new_progress': True, 'complete_candidate': False,
-            'resolves': [], 'resolution': '',
-        }
         critic = {
             'valid_steps': ['For arbitrary real x, reflexivity gives x=x.'],
             'first_invalid_step': '', 'reason': '', 'missing_work': '',
             'complete_candidate': True,
-        }
-        recorded = {
-            'claims': [review], 'complete_candidate': True,
-            'next_task': 'Audit the complete proof.',
-            'strategy_summary': 'Apply reflexivity to an arbitrary real number.',
         }
         audit = {
             'verdict': 'complete',
@@ -78,9 +64,6 @@ class PersistentProofHttpIntegration(unittest.TestCase):
                     events = [{'message': {'content': json.dumps(critic)}, 'done': True,
                                'done_reason': 'stop', 'eval_count': 15}]
                 elif index == 4:
-                    events = [{'message': {'content': json.dumps(recorded)}, 'done': True,
-                               'done_reason': 'stop', 'eval_count': 40}]
-                elif index == 5:
                     events = [{'message': {'content': json.dumps(audit)}, 'done': True,
                                'done_reason': 'stop', 'eval_count': 20}]
                 else:
@@ -105,8 +88,8 @@ class PersistentProofHttpIntegration(unittest.TestCase):
                 self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
                 self.assertIn('candidate_complete', process.stdout)
                 self.assertIn('read_file', process.stdout)
-                self.assertEqual(endpoints, [('GET', '/api/tags')] + [('POST', '/api/chat')] * 5)
-                self.assertEqual(len(requests), 5)
+                self.assertEqual(endpoints, [('GET', '/api/tags')] + [('POST', '/api/chat')] * 4)
+                self.assertEqual(len(requests), 4)
                 self.assertTrue(all(payload['model'] == model for payload in requests))
                 self.assertTrue(all(payload['stream'] for payload in requests))
                 self.assertTrue(requests[0]['think'])
@@ -120,13 +103,10 @@ class PersistentProofHttpIntegration(unittest.TestCase):
                     self.assertNotIn('tools', payload)
                     self.assertEqual(payload['format']['type'], 'object')
                 self.assertEqual(set(requests[2]['format']['required']), set(critic))
-                self.assertEqual(set(requests[3]['format']['required']), set(recorded))
-                self.assertEqual(set(requests[3]['format']['properties']['claims']['items']['required']),
-                                 set(review))
-                self.assertEqual(set(requests[4]['format']['required']), set(audit))
+                self.assertEqual(set(requests[3]['format']['required']), set(audit))
                 self.assertIn('CURRENT CANDIDATE', requests[2]['messages'][1]['content'])
                 self.assertNotIn('FRESH INDEPENDENT CRITIQUE', requests[2]['messages'][1]['content'])
-                self.assertIn('FRESH INDEPENDENT CRITIQUE', requests[3]['messages'][1]['content'])
+                self.assertIn('SELF-CONTAINED CANDIDATE', requests[3]['messages'][1]['content'])
 
                 jobs = list((root / '.mathagent' / 'proofs').iterdir())
                 self.assertEqual(len(jobs), 1)
@@ -134,9 +114,9 @@ class PersistentProofHttpIntegration(unittest.TestCase):
                 state = json.loads((directory / 'state.json').read_text())
                 self.assertEqual(state['status'], 'candidate_complete')
                 self.assertEqual(state['rounds_started'], 1)
-                self.assertEqual(state['tokens_charged'], 115)
+                self.assertEqual(state['tokens_charged'], 75)
                 self.assertEqual([call['role'] for call in state['calls']],
-                                 ['solver', 'solver', 'critic', 'recorder', 'auditor'])
+                                 ['solver', 'solver', 'critic', 'auditor'])
                 self.assertTrue(all(call['status'] == 'complete' for call in state['calls']))
                 self.assertEqual(state['sources'][0]['content'], statement)
                 self.assertEqual(state['claims'][0]['status'], 'reviewed')

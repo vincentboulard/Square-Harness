@@ -149,15 +149,14 @@ class ProofRecoveryTests(unittest.TestCase):
     def test_completed_solver_before_draft_commit_is_recovered_without_rerunning(self):
         store, stream, text = self.seeded_solver(call_status='complete', complete=True)
         client = ScriptedClient([[done(json.dumps(critic(complete=True)), 15)],
-                                 [done(json.dumps(review(complete=True)), 30)],
                                  [done(json.dumps(AUDIT), 25)]])
         result = self.runner(client).resume(store.state['id'])
         final = ProofStore.load(self.root, store.state['id'])
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual(final.state['rounds_started'], 1)
-        self.assertEqual(final.state['tokens_charged'], 90)
-        self.assertEqual([c['role'] for c in final.state['calls']], ['solver', 'critic', 'recorder', 'auditor'])
-        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(final.state['tokens_charged'], 60)
+        self.assertEqual([c['role'] for c in final.state['calls']], ['solver', 'critic', 'auditor'])
+        self.assertEqual(len(client.requests), 2)
         self.assertTrue(all('format' in request for request in client.requests))
         self.assertIn(text, client.requests[0]['messages'][-1]['content'])
         self.assertIn(text, result['report'])
@@ -251,11 +250,10 @@ class ProofRecoveryTests(unittest.TestCase):
         self.assertIn(original.strip(), runner._base())
 
     def test_interrupt_after_batch_notice_does_not_duplicate_claims_on_resume(self):
-        client = ScriptedClient([
-            [done('For every real x, equality is reflexive, so x=x.')],
-            [done(json.dumps(critic(complete=True)))],
-            [done(json.dumps(review(complete=True, two_claims=True)))],
-        ])
+        # A pre-fast-path job already committed to its recorder phase must
+        # finish that phase without losing its atomic batch or recovery rules.
+        store = self.seeded_review()
+        client = ScriptedClient([[done(json.dumps(review(complete=True, two_claims=True)))]])
 
         def interrupt_after_commit(kind, text):
             if kind == 'notice' and text.startswith('C1:'):
@@ -263,8 +261,7 @@ class ProofRecoveryTests(unittest.TestCase):
 
         runner = self.runner(client, interrupt_after_commit)
         with self.assertRaises(KeyboardInterrupt):
-            runner.start('Prove x=x for every real x.', max_rounds=1,
-                         max_tokens=16000, max_seconds=60)
+            runner.resume(store.state['id'])
         paused = ProofStore.load(self.root, runner.state['id'])
         self.assertEqual(paused.state['pending']['phase'], 'audit')
         before = copy.deepcopy(paused.state['claims'])
@@ -280,11 +277,10 @@ class ProofRecoveryTests(unittest.TestCase):
         self.assertEqual(final.state['calls'][-1]['role'], 'auditor')
 
     def test_batch_interruption_rolls_back_all_records_before_retry(self):
-        client = ScriptedClient([
-            [done('For every real x, equality is reflexive, so x=x.')],
-            [done(json.dumps(critic(complete=True)))],
-            [done(json.dumps(review(complete=True, two_claims=True)))],
-        ])
+        # A pre-fast-path job already committed to its recorder phase must
+        # finish that phase without losing its atomic batch or recovery rules.
+        store = self.seeded_review()
+        client = ScriptedClient([[done(json.dumps(review(complete=True, two_claims=True)))]])
         runner = self.runner(client)
         original = runner._record
 
@@ -296,8 +292,7 @@ class ProofRecoveryTests(unittest.TestCase):
 
         with mock.patch.object(runner, '_record', side_effect=interrupted_record):
             with self.assertRaises(KeyboardInterrupt):
-                runner.start('Prove x=x for every real x.', max_rounds=1,
-                             max_tokens=16000, max_seconds=60)
+                runner.resume(store.state['id'])
         paused = ProofStore.load(self.root, runner.state['id'])
         self.assertEqual(paused.state['pending']['phase'], 'review')
         self.assertEqual(paused.state['claims'], [])
@@ -310,8 +305,21 @@ class ProofRecoveryTests(unittest.TestCase):
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual([claim['id'] for claim in final.state['claims']], ['C1', 'C2'])
         self.assertEqual([call['role'] for call in final.state['calls']],
-                         ['solver', 'critic', 'recorder', 'auditor'])
+                         ['recorder', 'auditor'])
         self.assertEqual(final.state['rounds_started'], 1)
+
+    def seeded_review(self):
+        store = ProofStore.create(self.root, 'Prove x=x for every real x.',
+                                  dict(self.settings, max_tokens=16000))
+        draft = {'text': 'For every real x, reflexivity gives x=x.',
+                 'thinking': '', 'complete': True, 'calls': [], 'stats': {}}
+        candidate = store.write_artifact('candidate', json.dumps(draft))
+        store.state.update(status='paused', rounds_started=1,
+            pending={'index': 1, 'phase': 'review', 'fresh': False, 'think': True,
+                     'task': 'Audit the complete proof.', 'draft': candidate,
+                     'solver_truncated': False, 'critique': critic(complete=True)})
+        store.save()
+        return store
 
     def seeded_phase(self, phase, role, *, done_before_commit=False):
         store = ProofStore.create(self.root, 'Prove x=x for every real x.',
@@ -347,8 +355,7 @@ class ProofRecoveryTests(unittest.TestCase):
         for phase, role in cases:
             with self.subTest(phase=phase):
                 store, charged = self.seeded_phase(phase, role)
-                tail = [[done(json.dumps(critic(complete=True)))],
-                        [done(json.dumps(review(complete=True)))], [done(json.dumps(AUDIT))]]
+                tail = [[done(json.dumps(critic(complete=True)))], [done(json.dumps(AUDIT))]]
                 if phase == 'plan':
                     scripts = [[done(json.dumps(PLAN))], [done('Every real x equals itself.')]] + tail
                 elif phase == 'checkpoint':
@@ -357,9 +364,9 @@ class ProofRecoveryTests(unittest.TestCase):
                 elif phase == 'critic':
                     scripts = tail
                 elif phase == 'review':
-                    scripts = tail[1:]
+                    scripts = [[done(json.dumps(review(complete=True)))], [done(json.dumps(AUDIT))]]
                 else:
-                    scripts = tail[2:]
+                    scripts = tail[1:]
                 client = ScriptedClient(scripts)
                 result = self.runner(client).resume(store.state['id'])
                 final = ProofStore.load(self.root, store.state['id'])
@@ -373,14 +380,13 @@ class ProofRecoveryTests(unittest.TestCase):
     def test_completed_uncommitted_critic_is_not_treated_as_a_committed_verdict(self):
         store, charged = self.seeded_phase('critic', 'critic', done_before_commit=True)
         client = ScriptedClient([[done(json.dumps(critic(complete=True)))],
-                                 [done(json.dumps(review(complete=True)))],
                                  [done(json.dumps(AUDIT))]])
         result = self.runner(client).resume(store.state['id'])
         final = ProofStore.load(self.root, store.state['id'])
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual([call['role'] for call in final.state['calls']],
-                         ['critic', 'critic', 'recorder', 'auditor'])
-        self.assertEqual(final.state['tokens_charged'], charged + 60)
+                         ['critic', 'critic', 'auditor'])
+        self.assertEqual(final.state['tokens_charged'], charged + 40)
         self.assertNotIn('UNCOMMITTED RESPONSE', result['report'])
 
     def test_terminal_audit_result_does_not_restart_inference(self):
@@ -402,7 +408,6 @@ class ProofRecoveryTests(unittest.TestCase):
         store.save()
         client = ScriptedClient([[done(json.dumps(PLAN))], [done('Every real x equals itself.')],
                                  [done(json.dumps(critic(complete=True)))],
-                                 [done(json.dumps(review(complete=True)))],
                                  [done(json.dumps(AUDIT))]])
         runner = self.runner(client)
         runner.agent.predict = 4096

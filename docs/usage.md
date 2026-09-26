@@ -74,8 +74,14 @@ The persistent proof cycle is:
    candidate without the ledger's previous judgments. It checks concrete
    inferences, identifies the first unsupported step, and preserves useful
    partial work with its restrictions.
-4. **Update the ledger.** A separate recorder receives the candidate, that fresh
-   critique, and selected ledger records. It can extract up to four small claims
+4. **Send a clean complete candidate straight to the final audit.** If the
+   untruncated solver output passes the fresh critic without a gap, uncertainty
+   or missing work, skip the recorder call and run the whole-proof audit below.
+   Save the exact candidate and audit result deterministically. A failed audit
+   becomes a persistent objection for later work; it cannot silently disappear.
+   Its simplest case uses three model calls: solver, critic and auditor.
+5. **Record partial work.** Otherwise a separate recorder receives the candidate,
+   that fresh critique, and selected ledger records. It can extract up to four small claims
    or obligations rather than recording the entire theorem as a single gap.
    Its reference view omits historical next-task instructions and places the
    current candidate and critique last, to reduce copying of stale assignments.
@@ -91,16 +97,18 @@ The persistent proof cycle is:
    still fails, the job stops as `stalled` with a `protocol_error` diagnostic;
    this is a bookkeeping failure, not a mathematical objection. Benchmarks
    report it as an execution error and retain the written candidate.
-5. **Choose the next task.** After two rounds without recognized progress, a
+6. **Choose the next task.** After two rounds without recognized progress, a
    planning call proposes a different task or approach. Repeated truncation can
    also trigger an attempt with thinking disabled so the model writes usable
    mathematics. A stalled approach does not by itself terminate the whole goal.
    If the recorder repeats the previous assignment verbatim while the fresh
    critic identifies remaining work, that current obligation takes precedence.
-6. **Audit a proposed complete proof.** A separate call checks the full argument
+7. **Audit a proposed complete proof.** A separate call checks the full argument
    against the original goal before a `candidate_complete` result is recorded.
    All historical objections remain visible to this audit, including those the
    recorder claims are resolved; the auditor must check the actual repair.
+   The short path changes bookkeeping, not the requirement for both a fresh
+   critique and a final audit. Neither model verdict certifies correctness.
 
 Solver, checkpoint writer, planner, critic, recorder and auditor are separate
 calls to the same local model. They share one saved token/time budget, and can share the same

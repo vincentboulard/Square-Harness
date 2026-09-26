@@ -128,7 +128,7 @@ class ProofRegressionTests(unittest.TestCase):
 
     def test_ready_assembly_overrides_stagnation_and_fourth_round_exploration(self):
         runner, client = self.runner([response('For every real x, reflexivity gives x=x.'),
-                                     response(CRITIC), response(REVIEW), response(AUDIT)])
+                                     response(CRITIC), response(AUDIT)])
         assembly = 'Recheck the checkpoint, then write a self-contained proof for the final audit.'
         runner.state.update(status='paused', rounds_started=3, stagnant_rounds=3,
                             truncation_streak=2, assemble_next=True, next_task=assembly,
@@ -139,7 +139,7 @@ class ProofRegressionTests(unittest.TestCase):
         result = runner.resume(runner.state['id'])
         self.assertEqual(result['status'], 'candidate_complete')
         self.assertEqual([call['role'] for call in runner.state['calls']],
-                         ['solver', 'critic', 'recorder', 'auditor'])
+                         ['solver', 'critic', 'auditor'])
         self.assertFalse(client.requests[0]['think'])
         self.assertIn(assembly, client.requests[0]['messages'][1]['content'])
         self.assertEqual(runner.state['rounds_started'], 4)
