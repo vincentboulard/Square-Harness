@@ -82,6 +82,22 @@ def _slots(probe, parallel, context):
     return slots
 
 
+def slot_decoded_tokens(slot):
+    """Read active-slot decode metadata without treating malformed data as evidence.
+
+    The pinned server_slot::to_json emits a one-element next_token array; older
+    servers used the object directly. Idle slots need not have this field.
+    """
+    value = slot.get('next_token')
+    if isinstance(value, list):
+        require(len(value) == 1, 'Active slot next_token must contain exactly one token-state object')
+        value = value[0]
+    require(isinstance(value, dict) and type(value.get('n_decoded')) is int
+            and value['n_decoded'] >= 0,
+            'Active slot next_token needs a nonnegative integer n_decoded')
+    return value['n_decoded']
+
+
 def inspect_server(probe, *, context, parallel, ready_timeout=600):
     deadline = time.monotonic() + ready_timeout
     last_error = None
@@ -234,14 +250,14 @@ def capacity_batch(client_factory, probe, model, *, context, parallel, target_in
             active = [s for s in slots if s['is_processing']]
             require(all(s.get('params', {}).get('seed') in seeds for s in active),
                     'An unrelated inference request occupied a slot during acceptance')
-            decoding = [s for s in active if type(s.get('next_token', {}).get('n_decoded')) is int
-                        and s['next_token']['n_decoded'] > 0]
+            decoded_counts = {s['id']: slot_decoded_tokens(s) for s in active}
+            decoding = [s for s in active if decoded_counts[s['id']] > 0]
             max_processing = max(max_processing, len(active))
             max_decoding = max(max_decoding, len(decoding))
             if len(samples) < 64 and (len(decoding) == parallel or not samples):
                 samples.append({'seconds': time.monotonic() - epoch,
                                 'processing_slots': [{'id': s['id'], 'seed': s.get('params', {}).get('seed'),
-                                    'n_decoded': s.get('next_token', {}).get('n_decoded')} for s in active]})
+                                    'n_decoded': decoded_counts[s['id']]} for s in active]})
             time.sleep(poll_interval)
         results = [future.result() for future in futures]
     elapsed = time.monotonic() - epoch

@@ -21,7 +21,8 @@ TEMPLATE = '{{ messages }}'
 
 @contextmanager
 def serving_fixture(*, serial=False, zero_decoded=False, context=4096, parallel=3,
-                    wrong_json=False, change_identity=False, ready=True, model='square-qwen'):
+                    wrong_json=False, change_identity=False, ready=True, model='square-qwen',
+                    next_token_list=False, next_token_factory=None):
     active, requests = {}, []
     lock = threading.Lock()
     slots_gate = threading.Semaphore(1 if serial else parallel)
@@ -49,8 +50,15 @@ def serving_fixture(*, serial=False, zero_decoded=False, context=4096, parallel=
             elif self.path == '/slots':
                 with lock:
                     values = [dict(active.get(i, {})) for i in range(parallel)]
+                def next_token(item):
+                    decoded = 0 if zero_decoded else item.get('decoded', 0)
+                    if next_token_factory is not None:
+                        return next_token_factory(decoded)
+                    value = {'has_next_token': bool(item), 'has_new_line': False,
+                             'n_remain': -1, 'n_decoded': decoded}
+                    return [value] if next_token_list else value
                 self.json_response([{'id': i, 'n_ctx': context, 'is_processing': bool(item),
-                    'params': {'seed': item.get('seed')}, 'next_token': {'n_decoded': 0 if zero_decoded else item.get('decoded', 0)}}
+                    'params': {'seed': item.get('seed')}, 'next_token': next_token(item)}
                     for i, item in enumerate(values)])
             elif self.path == '/v1/models':
                 self.json_response({'data': [{'id': model}]})
@@ -209,6 +217,44 @@ class ServingSmokeTests(unittest.TestCase):
             self.assertGreater(result['token_span_seconds'], 0)
             self.assertIn('Parallel inference was not tested', result['scope'])
         self.assertGreaterEqual(report['checks']['representative_capacity']['observed_input_tokens'][0], 30000)
+
+    def test_pinned_slot_array_metadata_accepts_one_and_three_streaming_slots(self):
+        for parallel in (1, 3):
+            with self.subTest(parallel=parallel):
+                with serving_fixture(parallel=parallel, next_token_list=True) as (host, requests):
+                    report = self.run_smoke(host, parallel=parallel,
+                                            launch_record=self.launch(host, parallel=parallel))
+                self.assertTrue(report['accepted_for_benchmark'], report)
+                self.assertEqual(len(requests), 6 + 2 * parallel)
+                for name in ('short_capacity', 'representative_capacity'):
+                    capacity = report['checks'][name]
+                    self.assertEqual(capacity['max_observed_decoding_slots'], parallel)
+                    self.assertEqual(capacity['parallel_overlap_observed'], parallel > 1)
+                    self.assertTrue(any(len(sample['processing_slots']) == parallel
+                        and all(slot['n_decoded'] > 0 for slot in sample['processing_slots'])
+                        for sample in capacity['slot_samples']))
+
+    def test_empty_or_malformed_slot_array_is_rejected_over_http(self):
+        for metadata in ([], [None], [{'n_decoded': True}], [{'n_decoded': 1}, {}]):
+            with self.subTest(metadata=metadata):
+                with serving_fixture(parallel=1, next_token_factory=lambda _, value=metadata: value) as (host, _):
+                    report = self.run_smoke(host, parallel=1,
+                                            launch_record=self.launch(host, parallel=1))
+                self.assertFalse(report['ok'])
+                self.assertFalse(report['accepted_for_benchmark'])
+                self.assertIn('Active slot next_token', report['error'])
+
+    def test_slot_decode_metadata_rejects_invalid_counts(self):
+        for count in (None, True, -1, 1.5, '2'):
+            for metadata in ({'n_decoded': count}, [{'n_decoded': count}]):
+                with self.subTest(metadata=metadata), self.assertRaises(SMOKE['SmokeFailure']):
+                    SMOKE['slot_decoded_tokens']({'next_token': metadata})
+
+    def test_array_slot_metadata_with_no_decoding_cannot_prove_capacity(self):
+        with serving_fixture(parallel=1, next_token_list=True, zero_decoded=True) as (host, _):
+            report = self.run_smoke(host, parallel=1, launch_record=self.launch(host, parallel=1))
+        self.assertFalse(report['accepted_for_benchmark'])
+        self.assertIn('No actively decoding slot', report['error'])
 
     def test_one_slot_wrong_launch_parallel_is_rejected_before_inference(self):
         alias = 'square-qwen-a10'

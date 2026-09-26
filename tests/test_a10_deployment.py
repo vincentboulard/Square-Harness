@@ -49,7 +49,8 @@ class A10DeploymentTests(unittest.TestCase):
                     "--alias": "square-qwen-a10", "--cache-type-k": "f16",
                     "--cache-type-v": "f16", "--flash-attn": "off",
                     "--batch-size": "256", "--ubatch-size": "64", "--temp": "0.6",
-                    "--top-p": "0.95", "--top-k": "0", "--min-p": "0"}
+                    "--top-p": "0.95", "--top-k": "0", "--min-p": "0",
+                    "--log-verbosity": "4"}
         for flag, value in expected.items():
             self.assertEqual(argv[argv.index(flag) + 1], value)
         for flag in ("--no-context-shift", "--no-kv-unified", "--slots", "--metrics", "--jinja"):

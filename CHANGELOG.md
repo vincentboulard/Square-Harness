@@ -7,6 +7,8 @@
 - Bounded branch scheduling preserves three attempts and token partitions while
   executing one branch at a time, with dispatch-based time windows and recorded scheduling.
 - One-slot serving acceptance is labeled sequential capacity rather than parallel speedup.
+- Serving acceptance supports the pinned llama.cpp token-state array; A10 logs
+  retain GPU placement and memory diagnostics for live validation.
 
 - OpenAI-compatible local model transport for vLLM, with streamed reasoning,
   tool calls, structured reviews and explicit token usage.

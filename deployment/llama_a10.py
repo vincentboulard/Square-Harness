@@ -52,6 +52,9 @@ def server_arguments(lock: dict, context: int, batch_size: int = 256,
     argv[argv.index("--split-mode") + 1] = "none"
     split_index = argv.index("--tensor-split")
     del argv[split_index:split_index + 2]
+    # This revision emits model placement and memory allocation at trace level.
+    # Keep the evidence needed to verify full GPU offload in startup logs.
+    argv += ["--log-verbosity", "4"]
     return argv
 
 
