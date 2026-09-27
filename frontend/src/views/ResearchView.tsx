@@ -5,10 +5,11 @@ import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago, count, firstLine } from '../format'
+import { isPanelHidden } from '../panels'
 import { go } from '../router'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
-import { ActivityLog, ArtifactViewer, BusyNote, ROLES, StreamBody, useLiveStream } from './shared'
+import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done'] as const
 const STEP_NAMES: Record<string, string> = {
@@ -24,12 +25,13 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
   const [artifact, setArtifact] = useState<string | null>(null)
   const [cite, setCite] = useState<string | null>(null)
   const active = tab || 'report'
+  const jobClass = useJobClass()
   const task = app.snapshot.task
   const ours = !!task && task.kind === 'research' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
 
   const openCite = useCallback((ref: string) => {
     setCite(ref)
-    if (window.matchMedia('(max-width: 1179px)').matches) go(data?.kind || 'literature', id, 'checks')
+    if (isPanelHidden('aside') || window.matchMedia('(max-width: 1179px)').matches) go(data?.kind || 'literature', id, 'checks')
   }, [data?.kind, id])
 
   if (!data) {
@@ -38,7 +40,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
   const flagged = flaggedCitations(data)
   const issues = [...new Set([...data.citation_issues, ...data.review_context_issues, ...data.warnings])]
   return (
-    <div className="job">
+    <div className={jobClass}>
       <div className="job-main sheet paper">
         <div className="sheet-inner">
           <ResearchHeader data={data} ours={ours} pausing={task?.state === 'pausing'} />
@@ -60,9 +62,9 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
-      <aside className="job-aside" aria-label="Checks">
+      <JobAside label="Checks">
         <Checks data={data} sources={sources.data?.sources || null} issues={issues} cite={cite} onCite={setCite} />
-      </aside>
+      </JobAside>
       {artifact && <ArtifactViewer job="research" id={id} name={artifact} onClose={() => setArtifact(null)} />}
     </div>
   )
@@ -82,6 +84,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const app = useApp()
   const [error, setError] = useState('')
   const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const current = STEPS.indexOf(data.phase as typeof STEPS[number])
   return (
@@ -89,7 +92,7 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">{data.kind === 'referee' ? 'Referee report' : 'Literature report'}</span>
+        <span className="job-stop">{data.kind === 'referee' ? 'Review' : 'Literature report'}</span>
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">
@@ -109,11 +112,13 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
         {ours ? (
           <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause())}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
         ) : researchResumable(data.status) ? (
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => act(api.resumeResearch(data.id))}><PlayIcon size={16} /> Resume with the remaining budget</button>
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, busy))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Resume when the model is free' : 'Resume with the remaining budget'}
+          </button>
         ) : null}
         {data.running && !ours && <span className="muted">Running in another process, such as a terminal.</span>}
       </div>
-      {!ours && busy && researchResumable(data.status) && <BusyNote />}
+      {!ours && busy && researchResumable(data.status) && !queued && <BusyNote queue />}
       <ErrorNote>{error}</ErrorNote>
     </header>
   )

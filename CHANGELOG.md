@@ -27,6 +27,26 @@
 - The interface uses the model server chosen with `--backend` (Ollama, vLLM or
   llama.cpp), the sampling options and the `--proof-*` limits; pausing works
   with every backend.
+- Interface notebooks are now Default, Prove, Literature, Review and Write-up.
+  Free mode is renamed Default: for each message the model picks one or more jobs,
+  each with an effort level, and starts them at once in order, without asking for
+  confirmation; each job's card says what started and can cancel it. Critic
+  and explore are no longer notebooks; Default answers questions with them, and
+  earlier critique and exploration conversations stay listed and readable there.
+  Referee reports are called reviews in the interface (the engine mode is still
+  `referee`).
+- Effort levels have fixed budgets instead of multiples of the launch defaults:
+  from Low (1 attempt, 1 minute, 30,000 tokens) through Medium (3 attempts) to
+  Brezis (10 attempts, 2 hours, 200,000 tokens). A proof's per-call ceilings are
+  reduced when needed so one full solve and its review always fit the budget.
+- Any job can be started while the model is busy: proof, report and write-up
+  forms, suggestions and resume buttons add it to the queue instead of refusing.
+- Online search is on by default in the interface for new conversations and
+  reports; untick it per conversation or report. An explicit `--offline` launch
+  still locks it off. Write-ups never search.
+- The job list and a job page's overview (budget, candidates, checks) can slide
+  away to a thin spine on wide screens; the choice is remembered per browser.
+- The logo opens an About page describing the harness.
 
 ## 0.5.1 — 2026-09-27
 

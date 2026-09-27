@@ -5,11 +5,12 @@ import { PauseIcon, PlayIcon } from '../components/Icons'
 import { Markdown } from '../components/Markdown'
 import { researchLook, researchResumable, Square, type Variant } from '../components/Square'
 import { ago } from '../format'
+import { isPanelHidden } from '../panels'
 import { go } from '../router'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
-import { ActivityLog, ArtifactViewer, BusyNote, ROLES, StreamBody, useLiveStream } from './shared'
+import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
 
 const STEPS = ['plan', 'section', 'assemble', 'compile', 'review', 'export'] as const
 const STEP_NAMES: Record<string, string> = {
@@ -25,11 +26,12 @@ export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
   const [artifact, setArtifact] = useState<string | null>(null)
   const [cite, setCite] = useState<string | null>(null)
   const active = tab || 'document'
+  const jobClass = useJobClass()
   const task = app.snapshot.task
   const ours = !!task && task.kind === 'research' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
   const openCite = (ref: string) => {
     setCite(ref)
-    if (window.matchMedia('(max-width: 1179px)').matches) go('writeup', id, 'checks')
+    if (isPanelHidden('aside') || window.matchMedia('(max-width: 1179px)').matches) go('writeup', id, 'checks')
   }
   if (!data) {
     return <div className="sheet paper"><div className="sheet-inner">{error ? <ErrorNote>{error}</ErrorNote> : <Loading />}</div></div>
@@ -37,7 +39,7 @@ export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
   const issues = [...new Set([...data.citation_issues, ...data.warnings])]
   const aside = <Aside data={data} issues={issues} cite={cite} onCite={setCite} sources={sources.data?.sources || null} />
   return (
-    <div className="job">
+    <div className={jobClass}>
       <div className="job-main sheet paper">
         <div className="sheet-inner">
           <Header data={data} ours={ours} pausing={task?.state === 'pausing'} />
@@ -59,7 +61,7 @@ export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
-      <aside className="job-aside" aria-label="Checks">{aside}</aside>
+      <JobAside label="Checks">{aside}</JobAside>
       {artifact && <ArtifactViewer job="research" id={id} name={artifact} onClose={() => setArtifact(null)} />}
     </div>
   )
@@ -70,6 +72,7 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const look = researchLook(data.status, data.running)
   const [error, setError] = useState('')
   const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const phase = data.phase === 'repair' ? 'compile' : data.phase
   const current = STEPS.indexOf(phase as typeof STEPS[number])
@@ -102,10 +105,12 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
         {ours ? (
           <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause())}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
         ) : researchResumable(data.status) ? (
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => act(api.resumeResearch(data.id))}><PlayIcon size={16} /> Resume with the remaining budget</button>
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, busy))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Resume when the model is free' : 'Resume with the remaining budget'}
+          </button>
         ) : null}
       </div>
-      {!ours && busy && researchResumable(data.status) && <BusyNote />}
+      {!ours && busy && researchResumable(data.status) && !queued && <BusyNote queue />}
       <ErrorNote>{error}</ErrorNote>
     </header>
   )

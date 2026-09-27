@@ -18,13 +18,15 @@ from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
 from ..research import ResearchRunner
-from ..router import JOB_MODES, classify
+from ..router import JOB_MODES, clarify, classify
 from ..tools import Workspace
 from ..writeup import WriteupRunner
-from . import store
+from . import effort, store
 from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
+# Task labels shown in the interface; the engine's kind stays 'referee'.
+LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up'}
 
 
 class Busy(Exception):
@@ -216,7 +218,7 @@ class Hub:
             raise ValueError('The workspace must be inside --gui-root')
         self.bus = bus or EventBus()
         # An explicit --offline at launch is a hard guarantee (for unaided work);
-        # otherwise the user may allow online search per conversation or job.
+        # otherwise online search is on, and the user may turn it off per conversation or job.
         self.online_locked = bool(getattr(args, 'offline', False))
         self._lock = threading.Lock()
         self.task = None
@@ -376,12 +378,12 @@ class Hub:
     # -- engine construction (mirrors the terminal interface) ----------
 
     def online(self, requested=None):
-        """Whether new work may search the web: the user's choice unless launched --offline."""
+        """Whether new work may search the web: on unless the user turns it off or launched --offline."""
         if self.online_locked:
             if requested:
                 raise ValueError('This interface was launched with --offline, so online search stays off')
             return False
-        return bool(self.args.online if requested is None else requested)
+        return True if requested is None else bool(requested)
 
     def _engine(self, task, *, mode='prove', think=None, ctx=None, online=None):
         args = self.args
@@ -486,7 +488,7 @@ class Hub:
                                 source_files=list(source_files))
         return self._started(self._begin('proof', None, 'Proof', goal, work, queue=queue, on_update=on_update))
 
-    def resume_proof(self, proof_id):
+    def resume_proof(self, proof_id, queue=False):
         state = ProofStore.load(self.root, proof_id).state
         if state['version'] != 2:
             raise ValueError('This proof was made by the earlier v0.4 engine. It stays readable here, '
@@ -497,7 +499,7 @@ class Hub:
             runner = ProofRunner(agent)
             runner.emit = self._job_emit(task, runner, 'proof')
             return runner.resume(proof_id)
-        task = self._begin('proof', proof_id, 'Proof', state['goal'], work)
+        task = self._begin('proof', proof_id, 'Proof', state['goal'], work, queue=queue)
         task.ready.set()
         return task
 
@@ -524,8 +526,7 @@ class Hub:
             runner = ResearchRunner(agent)
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, kind=kind, source_files=list(source_files), **budgets)
-        label = 'Literature report' if kind == 'literature' else 'Referee report'
-        return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
+        return self._started(self._begin('research', None, LABELS[kind], goal, work, queue=queue, on_update=on_update))
 
     def start_writeup(self, goal, *, source_files=(), template_files=(), template=None, save_template=None,
                       notes='', output='', queue=False, on_update=None, **limits):
@@ -535,15 +536,16 @@ class Hub:
             store.save_template(self.base, Workspace(self.root), save_template, list(template_files))
 
         def work(task):
-            agent, _ = self._engine(task, mode='writeup')
+            # A write-up works from the pinned notes only; it never searches.
+            agent, _ = self._engine(task, mode='writeup', online=False)
             self._ensure_model(agent)
             runner = WriteupRunner(agent)
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, source_files=list(source_files), template_files=list(template_files),
                                 template_texts=texts, notes=notes, output=output, **budgets)
-        return self._started(self._begin('research', None, 'Write-up', goal, work, queue=queue, on_update=on_update))
+        return self._started(self._begin('research', None, LABELS['writeup'], goal, work, queue=queue, on_update=on_update))
 
-    def resume_research(self, job_id):
+    def resume_research(self, job_id, queue=False):
         state = store.research_state(self.root, job_id)
         runner_class = WriteupRunner if state['kind'] == 'writeup' else ResearchRunner
         # A job keeps the network choice it started with (never more, per the runner).
@@ -554,14 +556,13 @@ class Hub:
             runner = runner_class(agent)
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.resume(job_id)
-        label = {'literature': 'Literature report', 'referee': 'Referee report'}.get(state['kind'], 'Write-up')
-        task = self._begin('research', job_id, label, state['goal'], work)
+        task = self._begin('research', job_id, LABELS.get(state['kind'], LABELS['writeup']), state['goal'], work, queue=queue)
         task.ready.set()
         return task
 
     # -- conversational modes -----------------------------------------
 
-    def chat(self, chat_id, content, *, files=(), mode=None, echo_user=True, on_update=None):
+    def chat(self, chat_id, content, *, files=(), mode=None, echo_user=True, on_update=None, queue=False):
         session = store.load_chat(self.root, chat_id)
         if not isinstance(content, str) or not content.strip():
             raise ValueError('Write a message first')
@@ -592,7 +593,7 @@ class Hub:
             return {'status': 'done', 'answer': answer}
         live = {'chat': chat_id, 'kind': 'message', 'user': content if echo_user else '', 'steps': [], 'mode': mode}
         label = 'Critique' if mode == 'critic' else 'Exploration'
-        return self._begin('chat', chat_id, label, content, work, live, on_update=on_update)
+        return self._begin('chat', chat_id, label, content, work, live, queue=queue, on_update=on_update)
 
     def review(self, chat_id):
         def last_exchange(session):
@@ -634,12 +635,12 @@ class Hub:
         except (OSError, ValueError):
             pass
 
-    # -- Free mode: guess the workflow, show it, then run it -----------------
+    # -- Default mode: pick the workflows and their effort, then run them -------
 
     def route(self, chat_id, content, files=()):
         session = store.load_chat(self.root, chat_id)
         if session['mode'] != 'free':
-            raise ValueError('Only Free conversations guess the workflow')
+            raise ValueError('Only Default conversations guess the workflow')
         if not isinstance(content, str) or not content.strip() or len(content) > 60000:
             raise ValueError('Write a message of at most 60000 characters')
         files = self.check_files(list(files))
@@ -656,25 +657,42 @@ class Hub:
                          name='square-route').start()
 
     def _route(self, root, chat_id, content, files):
-        # Deliberately outside the one-task slot: a short call (about 700 tokens)
-        # so a guess appears even while a job runs; its seconds count for that job.
+        # Deliberately outside the one-task slot: a short call (at most ROUTE_PREDICT
+        # tokens) so a guess appears even while a job runs; its seconds count for that job.
         try:
             context = self._free_context(root, chat_id)
-            route = classify(create_client(self.args.backend, self.args.host, timeout=180), self.args.model, content,
-                             context=context, files=files,
-                             available=[f['path'] for f in store.list_files(root, limit=200)],
-                             ctx=self.args.ctx)
+            routes = classify(create_client(self.args.backend, self.args.host, timeout=180), self.args.model, content,
+                              context=context, files=files,
+                              available=[f['path'] for f in store.list_files(root, limit=200)],
+                              ctx=self.args.ctx)
             known = set(f['path'] for f in store.list_files(root, limit=2000))
             # Small models attach plausible-looking files; keep only files the user
             # attached or actually named, so an unrelated statement is never pinned.
             said = content + '\n' + context
-            named = [f for f in route['files'] if f in files or f in said or Path(f).name in said]
-            dropped = [f for f in named if f not in known]
-            route['files'] = [f for f in named if f in known]
-            item = {'role': 'route', 'status': 'proposed', **route, 'time': store._now()}
-            if dropped:
-                item['missing'] = dropped
-            store.append_items(root, chat_id, [item])
+            items = []
+            for route in routes:
+                named = [f for f in route['files'] if f in files or f in said or Path(f).name in said]
+                if route['mode'] in ('referee', 'writeup') and route['files'] and not named:
+                    continue  # it rests only on files the user never mentioned: a guess, not a request
+                dropped = [f for f in named if f not in known]
+                route['files'] = [f for f in named if f in known]
+                item = {'role': 'route', 'status': 'proposed', **route, 'time': store._now()}
+                if dropped:
+                    item['missing'] = dropped
+                items.append(item)
+            if not items:
+                items = [{'role': 'route', 'status': 'proposed', **clarify(content, files), 'time': store._now()}]
+            first = store.append_items(root, chat_id, items)
+            # No confirmation: each job starts at once in order (the first runs, the
+            # others queue); its card says what started and can cancel it.
+            for index, item in enumerate(items, first):
+                if item['mode'] == 'clarify' or self.root != root:
+                    continue
+                try:
+                    self.start_route(chat_id, index, item['mode'], item['request'], item['files'],
+                                     effort.limits(item['mode'], item['effort'], self.args))
+                except (Busy, ValueError, OSError, AgentError, store.NotFound):
+                    pass  # start_route recorded the failure on the card
         except (AgentError, OSError, ValueError) as exc:
             store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Could not read the request: ' + str(exc),
                                                 'time': store._now()}])
@@ -720,7 +738,7 @@ class Hub:
     def start_route(self, chat_id, index, mode, request, files=(), limits=None):
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
-            raise ValueError('Only Free conversations have routes')
+            raise ValueError('Only Default conversations have suggestions')
         if type(index) is not int or not 0 <= index < len(chat['transcript']) or chat['transcript'][index].get('role') != 'route':
             raise store.NotFound('Unknown suggestion')
         if chat['transcript'][index].get('status') not in ('proposed', 'failed', 'cancelled'):
@@ -742,6 +760,8 @@ class Hub:
                 fields['status'] = 'queued'
             elif task.state == 'cancelled':
                 fields['status'] = 'cancelled'
+            elif task.state == 'paused':
+                fields['status'] = 'stopped'  # kept: a job resumes from its own page
             elif task.state == 'error' and not task.target:
                 fields.update(status='failed', error=task.error)
             store.update_item(root, chat_id, index, **fields)
@@ -754,7 +774,8 @@ class Hub:
             text_files = [f for f in files if not f.lower().endswith('.pdf')]
             if mode == 'prove':
                 task = self.start_proof(request, source_files=text_files, queue=True, on_update=on_update,
-                                        **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'seconds')})
+                                        **{k: v for k, v in limits.items()
+                                           if k in ('rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens')})
             elif mode in ('literature', 'referee'):
                 task = self.start_research(mode, request, source_files=files, online=online, queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
@@ -763,12 +784,25 @@ class Hub:
                                           queue=True, on_update=on_update,
                                           **{k: v for k, v in limits.items() if k in ('tokens', 'input_tokens', 'seconds')})
             else:
-                task = self.chat(chat_id, request, files=files, mode=mode, echo_user=False, on_update=on_update)
+                task = self.chat(chat_id, request, files=files, mode=mode, echo_user=False, on_update=on_update, queue=True)
         except (Busy, ValueError, OSError, AgentError) as exc:
             store.update_item(root, chat_id, index, status='failed', error=str(exc))
             self.bus.publish('chat_saved', chat=chat_id)
             raise
         return task
+
+    def cancel_route(self, chat_id, index):
+        """Cancel what a card started: remove it from the queue, or pause it if it is running."""
+        chat = store.load_chat(self.root, chat_id)
+        if type(index) is not int or not 0 <= index < len(chat['transcript']) or chat['transcript'][index].get('role') != 'route':
+            raise store.NotFound('Unknown suggestion')
+        task_id = chat['transcript'][index].get('task')
+        with self._lock:
+            queued = any(t.id == task_id for t in self.queue)
+            running = self.task is not None and self.task.id == task_id and self.task.state in RUNNING
+        if not task_id or not (queued or running):
+            raise ValueError('This job is no longer running or waiting')
+        return self.cancel_queued(task_id) if queued else self.pause()
 
     def dismiss_route(self, chat_id, index):
         chat = store.load_chat(self.root, chat_id)

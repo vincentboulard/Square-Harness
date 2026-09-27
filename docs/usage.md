@@ -213,24 +213,39 @@ The launch options apply as in the terminal: the model server (`--backend`,
 The browser opens automatically; `--no-browser` prevents it and `--gui-port`
 changes the port (default 8765, or the next free one). The left rail holds one
 notebook per mode, and the list beside it shows that mode's saved jobs or
-conversations.
+conversations. The logo above the notebooks opens an About page.
 
 | Mode | What the page shows |
 | --- | --- |
-| Free | A conversation where the model suggests the workflow for each message; you confirm before anything runs (see below) |
+| Default | A conversation where the model picks the job for each message and its effort, or answers the question itself, and starts at once; each job's card can cancel it (see below) |
 | Prove | The selected answer and its review status; each attempt with its written answer (and thinking), the verifier's verdict, explanation and located issues, and the exact model calls; live model output while a call runs; a side panel with budgets and every retained candidate |
-| Critic, Explore | A conversation with typeset answers, collapsible thinking and tool calls, a thinking toggle, and a fresh-context review of the last answer |
-| Literature, Referee | The report with clickable citations that open the exact passage read, the controller's citation checks, manuscript coverage, evidence, plan, notes and budgets |
+| Literature, Review | The report with clickable citations that open the exact passage read, the controller's citation checks, manuscript coverage, evidence, plan, notes and budgets. Review is the interface's name for a referee report |
 | Write-up | The LaTeX document with source marks that open the note lines each paragraph came from, compile errors, the PDF, TODOs and template macros (see [LaTeX write-ups](research.md#latex-write-ups)) |
 
-New proofs, reports and write-ups take an **effort**: Low, Medium, High, Extra
-high or Brezis. Medium is the launch budget (`--proof-rounds`, `--proof-tokens`,
-`--research-tokens` and so on); the other levels scale it by 0.35, 2.5, 6 and 20,
-within the engine's limits (at most 100 attempts or rounds, and always room for one
-full solve and its review). The summary under the slider states the exact limits,
-and Advanced limits lets you edit them, including a proof's solve and review output
-ceilings and its context. The Brezis effort, named after Haïm Brezis, can run for
-hours; pause it whenever you like. Suggestions in Free mode carry the same control.
+On a wide screen, the job list and a job's side panel (budgets, candidates,
+citation checks) can slide away to a thin spine: use the panel icon at the top
+of each, and click the spine to bring it back. The choice is remembered by the
+browser; when the side panel is hidden, its content is a tab of the page.
+
+New proofs, reports and write-ups take an **effort**. Each level is a fixed budget:
+
+| Effort | Attempts or rounds | Time | Generated tokens | Input tokens (reports) | Web requests |
+| --- | --- | --- | --- | --- | --- |
+| Low | 1 | 1 min | 30,000 | 120,000 | 4 |
+| Medium | 3 | 15 min | 60,000 | 240,000 | 12 |
+| High | 5 | 30 min | 100,000 | 400,000 | 24 |
+| Extra high | 7 | 1 h | 150,000 | 600,000 | 40 |
+| Brezis | 10 | 2 h | 200,000 | 800,000 | 60 |
+
+A proof attempt reserves one solve and one review (`--proof-solve-tokens` and
+`--proof-verify-tokens`); when a level's tokens cannot hold both, the form lowers
+these two ceilings in proportion, so every level can make at least one full
+attempt. The attempts are a maximum: a job also stops when its tokens or time
+run out. Write-ups have no rounds. The summary under the slider states the exact
+limits, and Advanced limits lets you edit them, including a proof's solve and
+review output ceilings and its context. The Brezis effort, named after Haïm
+Brezis, can run for two hours; pause it whenever you like. The `--proof-*` and
+`--research-*` budget flags keep applying to the terminal and to the API.
 
 A proof started in the interface is the same job as `/prove`: the model sees the
 statement and the pinned files only, with thinking on and no tools. The form warns
@@ -240,13 +255,17 @@ v0.4 stay listed with their report, sources and files, but cannot be resumed.
 Every job page also lists its saved files: exact request payloads, streamed
 answers and intermediate results. Pause stops model work at the next checkpoint,
 like Ctrl+C in the terminal; Resume continues with the remaining saved budget.
-The model serves one task at a time, because time budgets count wall-clock time:
-pause a running job before starting another. Approval dialogs replace the
-terminal's `[y/N]` prompt for file writes and, with `--allow-python`, for Python.
+The model serves one task at a time, because time budgets count wall-clock time.
+A job started while another runs, from a form, a suggestion or a Resume button,
+waits in the queue shown under the running task, where it can be cancelled; it
+starts when the model is free. Approval dialogs replace the terminal's `[y/N]`
+prompt for file writes and, with `--allow-python`, for Python.
 
-Critic and explore conversations are saved in `.mathagent/chats/` so that they
-survive a reload. As in the terminal, a turn that is paused or fails never enters
-the model's context; the interface keeps it visible and marks it as discarded.
+Conversations are saved in `.mathagent/chats/` so that they survive a reload. As
+in the terminal, a turn that is paused or fails never enters the model's context;
+the interface keeps it visible and marks it as discarded. Critique and
+exploration conversations made by earlier versions of the interface stay listed
+in the Default notebook and can be continued.
 
 ### Folders and file access
 
@@ -273,24 +292,29 @@ What happens next depends on the page: a proof or report form pins the files, th
 write-up form puts `.sty` and `.cls` files in the template slot and the rest in
 the notes, and a conversation attaches them to your next message.
 
-### Free mode
+### Default mode
 
 The ∀ notebook accepts any request. For each message the model makes one short
-structured call that suggests a workflow (proof, critique, exploration,
-literature report, referee report or write-up) and rewrites the request so that
-it stands on its own: proof and report jobs never see the conversation. A card
-shows the suggestion; you can edit the request, change the workflow and remove
-files before pressing Start, or dismiss it. When the message is ambiguous, the
-card asks one question instead.
+structured call that picks what to do (a proof, a literature report, a review of
+a manuscript, a write-up, or an answer in the conversation) with an effort level,
+and rewrites the request so that it stands on its own: proof and report jobs never
+see the conversation. The job then starts at once, with no confirmation. Its card
+says what started and at which effort, for example "Starting a proof · Low
+effort"; **Cancel** takes a waiting job out of the queue, or stops a running one at
+its next checkpoint (the job is kept, and its page can resume it). The request
+the job received is under the card's "Request given to …". When the message is
+ambiguous, the card asks one question instead and nothing starts.
 
-One conversation can hold several jobs: prove a statement, then ask for a
-literature report, then referee a manuscript. Jobs appear on their cards with a
-live status and open in their own notebook; later suggestions see the earlier
-requests and their outcomes. Critiques and explorations are answered in the
-conversation itself. Only files you attached or named are pinned, even if the
-model suggests others. Reading a message is allowed while a job runs (its few
-seconds count toward that job's time budget); a job started meanwhile waits in
-the queue shown under the running task, where it can be cancelled.
+One message can ask for several jobs, such as "prove this lemma and survey its
+literature": each gets its own card, and they run in order, the first now and the
+others in the queue. One conversation can also hold jobs asked for one after
+another. Jobs appear on their cards with a live status and open in
+their own notebook; later suggestions see the earlier requests and their
+outcomes. Questions are answered in the conversation itself, by the engine's
+critic or explore mode as the model suggests. Only files you attached or named
+are pinned, and a review or write-up of a file you never mentioned is not
+suggested. Reading a message is allowed while a job runs (its few seconds count
+toward that job's time budget).
 
 ### Security and phones
 
@@ -302,8 +326,10 @@ web sites and unexpected `Host` headers are refused, and a strict
 Content-Security-Policy stops rendered model or document text from loading
 anything outside the harness. Fonts and KaTeX are bundled, so the interface itself
 never contacts another server. Online search is a switch you set per conversation
-(next to Thinking) and per report; it is off by default, starting from `--online`
-when that flag is given. Launching with an explicit `--offline` locks it off, which
+(next to Thinking) and per report. In the interface it is on by default, so
+literature tools may send short search queries to arXiv, Semantic Scholar and
+OpenAlex; untick it to keep a conversation or a report offline. Write-ups and
+proofs never search. Launching with an explicit `--offline` locks it off, which
 keeps unaided benchmarks unaided. A document or a model answer can never turn it
 on. Python stays a launch-time permission (`--allow-python`), and proof jobs have
 no tools at all. Delete `.mathagent/gui-token` to unpair devices.

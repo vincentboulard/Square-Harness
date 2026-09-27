@@ -11,6 +11,8 @@ export type Defaults = {
   proof_seconds: number
   proof_solve_tokens: number
   proof_verify_tokens: number
+  proof_repair_tokens: number | null
+  proof_min_solve_tokens: number | null
   research_rounds: number
   research_tokens: number
   research_input_tokens: number
@@ -302,11 +304,12 @@ export type TranscriptItem = {
   request?: string
   reason?: string
   question?: string
-  status?: 'proposed' | 'starting' | 'queued' | 'started' | 'failed' | 'cancelled' | 'dismissed'
+  status?: 'proposed' | 'starting' | 'queued' | 'started' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
   task?: string
   error?: string | null
   missing?: string[]
+  effort?: string
 }
 
 export type Chat = {
@@ -396,7 +399,7 @@ export const api = {
   proofArtifact: (id: string, name: string) => get<Artifact>(`/api/proofs/${id}/artifacts/${name}`),
   proofStream: (id: string, name: string, from = 0) => get<StreamChunk>(`/api/proofs/${id}/stream/${name}?from=${from}`),
   startProof: (body: Record<string, unknown>) => post<StartResult>('/api/proofs', body),
-  resumeProof: (id: string) => post<StartResult>(`/api/proofs/${id}/resume`),
+  resumeProof: (id: string, queue = false) => post<StartResult>(`/api/proofs/${id}/resume`, { queue }),
 
   researches: () => get<{ jobs: ResearchListItem[] }>('/api/research'),
   research: (id: string) => get<ResearchDetail>(`/api/research/${id}`),
@@ -404,7 +407,7 @@ export const api = {
   researchArtifact: (id: string, name: string) => get<Artifact>(`/api/research/${id}/artifacts/${name}`),
   researchStream: (id: string, name: string, from = 0) => get<StreamChunk>(`/api/research/${id}/stream/${name}?from=${from}`),
   startResearch: (body: Record<string, unknown>) => post<StartResult>('/api/research', body),
-  resumeResearch: (id: string) => post<StartResult>(`/api/research/${id}/resume`),
+  resumeResearch: (id: string, queue = false) => post<StartResult>(`/api/research/${id}/resume`, { queue }),
 
   folders: (path = '') => get<FolderListing>('/api/folders?path=' + encodeURIComponent(path)),
   createFolder: (path: string, name: string) => post<{ path: string }>('/api/folders', { path, name }),
@@ -430,6 +433,7 @@ export const api = {
   route: (id: string, content: string, files: string[]) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files }),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),
+  cancelRoute: (id: string, index: number) => post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/cancel`),
   dismissRoute: (id: string, index: number) => post<{ item: TranscriptItem }>(`/api/chats/${id}/routes/${index}/dismiss`),
   chats: () => get<{ chats: ChatListItem[] }>('/api/chats'),
   chat: (id: string) => get<Chat>(`/api/chats/${id}`),

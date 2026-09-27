@@ -6,7 +6,7 @@ import { MODES } from '../modes'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp } from '../store'
-import { BusyNote } from './shared'
+import { BusyNote, queuedMessage } from './shared'
 
 type Kind = 'literature' | 'referee'
 
@@ -18,8 +18,8 @@ const COPY: Record<Kind, { title: string; lede: string; placeholder: string; pin
     pinHint: 'Optional. Pinned notes or papers are read locally and never uploaded.',
   },
   referee: {
-    title: 'Write a referee report',
-    lede: 'Pin the manuscript. The harness maps its main claims, checks the consequential steps with line-level citations, and drafts a report that separates demonstrated errors, missing justifications and unresolved concerns.',
+    title: 'Review a manuscript',
+    lede: 'Pin the manuscript. The harness maps its main claims, checks the consequential steps with line-level citations, and drafts a review that separates demonstrated errors, missing justifications and unresolved concerns.',
     placeholder: 'Assess the main theorem and its proof. Identify the first unjustified step and check related literature where available.',
     pinHint: 'Pin the manuscript (TeX, Markdown, text or PDF). Its snapshot stays fixed for the whole job.',
   },
@@ -31,36 +31,22 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   const d = status?.defaults
   const [goal, setGoal] = useState('')
   const [files, setFiles] = useState<string[]>([])
-  const [rounds, setRounds] = useState(6)
-  const [tokens, setTokens] = useState(24000)
+  const [rounds, setRounds] = useState(3)
+  const [tokens, setTokens] = useState(60000)
   const [minutes, setMinutes] = useState(15)
-  const [inputTokens, setInputTokens] = useState(100000)
+  const [inputTokens, setInputTokens] = useState(240000)
   const [requests, setRequests] = useState(12)
   const [chars, setChars] = useState(30000)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [online, setOnline] = useState(false)
+  const [queuedNote, setQueuedNote] = useState('')
+  const [online, setOnline] = useState(true)
   const [level, setLevel] = useState<EffortLevel>('medium')
 
   useDropTarget(kind === 'referee' ? 'Pinned as the manuscript' : 'Pinned as sources for the report',
     (paths) => setFiles((items) => [...new Set([...items, ...paths])]))
 
-  useEffect(() => {
-    if (!d) return
-    setRounds(d.research_rounds)
-    setTokens(d.research_tokens)
-    setMinutes(Math.max(1, Math.round(d.research_seconds / 60)))
-    setInputTokens(d.research_input_tokens)
-    setRequests(d.research_requests)
-    setChars(d.research_chars)
-    setOnline(!!status?.online)
-  }, [d, status?.online])
-
-  const preset = d ? effortLimits('research', d, level) : null
-  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60))
-    || inputTokens !== preset.input_tokens || requests !== preset.requests || chars !== preset.chars)
-  const chooseLevel = (next: EffortLevel) => {
-    setLevel(next)
+  const applyLevel = (next: EffortLevel) => {
     if (!d) return
     const limits = effortLimits('research', d, next)
     setRounds(limits.rounds!)
@@ -70,20 +56,42 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     setRequests(limits.requests!)
     setChars(limits.chars!)
   }
+  useEffect(() => {
+    if (!d) return
+    applyLevel(level)
+    // Only when the launch defaults arrive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d])
+  // Online search is on unless the interface was launched with --offline.
+  useEffect(() => { setOnline(!!status?.online) }, [status?.online])
+
+  const preset = d ? effortLimits('research', d, level) : null
+  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60))
+    || inputTokens !== preset.input_tokens || requests !== preset.requests || chars !== preset.chars)
+  const chooseLevel = (next: EffortLevel) => {
+    setLevel(next)
+    applyLevel(next)
+  }
   const searching = online && !status?.online_locked
 
-  const running = snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const running = !!snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const noun = kind === 'referee' ? 'review' : 'literature report'
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true)
     setError('')
+    setQueuedNote('')
     try {
       const result = await api.startResearch({
         kind, goal, source_files: files, rounds, tokens, seconds: minutes * 60,
-        input_tokens: inputTokens, requests, chars, online: status?.online_locked ? undefined : online,
+        input_tokens: inputTokens, requests, chars, online: status?.online_locked ? undefined : online, queue: true,
       })
-      if (result.id) go(kind, result.id)
-      else setError(result.task.error || 'The report did not start.')
+      if (result.task.state === 'queued') {
+        setQueuedNote(queuedMessage(result.task.title))
+        setGoal('')
+        setFiles([])
+      } else if (result.id) go(kind, result.id)
+      else setError(result.task.error || `The ${noun} did not start.`)
     } catch (reason) {
       setError((reason as Error).message)
     } finally {
@@ -101,8 +109,8 @@ export function ResearchNew({ kind }: { kind: Kind }) {
             <p className="lede">{copy.lede}</p>
             <p className={'network-note' + (searching ? ' network-online' : '')}>
               {searching
-                ? 'Online search is on for this report: search queries and paper downloads leave this computer. Search uses short public topic queries; manuscript text stays local.'
-                : 'Online search is off: the report uses pinned files and papers already cached in this workspace, and will say that its coverage is limited.'}
+                ? `Online search is on for this ${noun}: search queries and paper downloads leave this computer. Search uses short public topic queries; manuscript text stays local. Untick Search online below to keep it offline.`
+                : `Online search is off: the ${noun} uses pinned files and papers already cached in this workspace, and will say that its coverage is limited.`}
             </p>
           </div>
         </div>
@@ -143,9 +151,10 @@ export function ResearchNew({ kind }: { kind: Kind }) {
           <span className="in-margin" />
           <div className="form-actions">
             <ErrorNote>{error}</ErrorNote>
-            {running && <BusyNote />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !goal.trim() || !!running || (kind === 'referee' && !files.length && !/\.(tex|md|txt|pdf)\b/.test(goal))}>
-              {busy ? 'Starting…' : kind === 'referee' ? 'Start referee report' : 'Start literature report'}
+            {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
+            {running && <BusyNote queue />}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !goal.trim() || (kind === 'referee' && !files.length && !/\.(tex|md|txt|pdf)\b/.test(goal))}>
+              {busy ? 'Starting…' : running ? `Add ${noun} to the queue` : `Start ${noun}`}
             </button>
             {kind === 'referee' && !files.length && <p className="field-hint">Pin the manuscript, or name its file in the request.</p>}
           </div>

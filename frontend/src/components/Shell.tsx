@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react'
 import { api, type TaskSummary } from '../api'
 import { ago, duration } from '../format'
 import { MODES } from '../modes'
-import { href, MODE_ORDER, type Mode, type Route } from '../router'
+import { setPanelHidden } from '../panels'
+import { href, notebook, RAIL, type Mode, type Route } from '../router'
 import { applyTheme, readTheme, useApp, type AppState, type Theme } from '../store'
 import { Modal } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline } from './Markdown'
-import { AutoIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 
 export function BrandMark({ size = 32 }: { size?: number }) {
@@ -27,26 +28,29 @@ export function taskMode(task: TaskSummary | null, app: AppState): Mode | null {
   if (task.kind === 'proof') return 'prove'
   if (task.kind === 'research') {
     const job = app.research?.find((item) => item.id === task.target)
-    return job ? job.kind : task.label.startsWith('Referee') ? 'referee' : task.label.startsWith('Write') ? 'writeup' : 'literature'
+    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Write') ? 'writeup' : 'literature'
   }
   const chat = app.chats?.find((item) => item.id === task.target)
   return chat ? chat.kind : null
 }
 
 export function taskHref(task: TaskSummary, app: AppState) {
-  const mode = taskMode(task, app) || (task.kind === 'proof' ? 'prove' : 'critic')
+  const mode = taskMode(task, app) || (task.kind === 'proof' ? 'prove' : 'free')
   return href(mode, task.target)
 }
 
 export function Rail({ route }: { route: Route }) {
   const app = useApp()
-  const busy = taskMode(app.snapshot.task, app)
+  const running = taskMode(app.snapshot.task, app)
+  const busy = running && notebook(running)
+  const about = route.page === 'about'
   return (
     <nav className="rail" aria-label="Modes">
-      <a className="rail-brand" href="#/prove" title="Square Harness"><BrandMark size={40} /></a>
-      {MODE_ORDER.map((mode) => {
+      <a className={'rail-brand' + (about ? ' rail-brand-active' : '')} href="#/about" title="About Square Harness"
+        aria-label="About Square Harness" aria-current={about ? 'page' : undefined}><BrandMark size={40} /></a>
+      {RAIL.map((mode) => {
         const info = MODES[mode]
-        const active = route.mode === mode
+        const active = !about && notebook(route.mode) === mode
         return (
           <a key={mode} href={href(mode)} className={'mode' + (active ? ' mode-active' : '')}
             aria-current={active ? 'page' : undefined} title={info.summary}>
@@ -93,25 +97,48 @@ function ReviewTally({ reviews }: { reviews: Partial<Record<string, number>> }) 
 
 export function Sidebar({ route }: { route: Route }) {
   const app = useApp()
-  const info = MODES[route.mode]
+  const info = MODES[notebook(route.mode)]
   return (
     <aside className="sidebar" aria-label={info.label}>
-      <header className="side-head">
-        <h1 className="side-title">{info.label}</h1>
-        <p className="side-summary">{info.summary}</p>
-        <a className="btn btn-primary btn-block" href={href(route.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
-      </header>
-      <div className="side-list">
-        <SideList route={route} app={app} />
+      <div className="sidebar-inner">
+        <header className="side-head">
+          <div className="side-title-row">
+            <h1 className="side-title">{info.label}</h1>
+            <button type="button" className="icon-btn side-hide" title="Hide this list" aria-label="Hide this list"
+              onClick={() => setPanelHidden('sidebar', true)}>
+              <PanelLeftIcon />
+            </button>
+          </div>
+          <p className="side-summary">{info.summary}</p>
+          <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
+        </header>
+        <div className="side-list">
+          <SideList route={route} app={app} />
+        </div>
+        <TaskPanel />
+        <WorkspacePanel />
       </div>
-      <TaskPanel />
-      <WorkspacePanel />
     </aside>
   )
 }
 
+/** What is left of the list once it slides away: the notebook's spine, to pull it back. */
+export function SideSpine({ route }: { route: Route }) {
+  const app = useApp()
+  const info = MODES[notebook(route.mode)]
+  const running = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  return (
+    <button type="button" className="spine side-spine" onClick={() => setPanelHidden('sidebar', false)}
+      title={`Show the ${info.label} list`} aria-label={`Show the ${info.label} list`}>
+      <ChevronIcon size={16} />
+      <span className="spine-text">{info.label}</span>
+      {running && <Square variant="running" size={12} label="The model is working" />}
+    </button>
+  )
+}
+
 function SideList({ route, app }: { route: Route; app: AppState }) {
-  const info = MODES[route.mode]
+  const info = MODES[notebook(route.mode)]
   if (info.kind === 'proof') {
     if (!app.proofs) return <p className="side-empty muted">Loading…</p>
     if (!app.proofs.length) return <p className="side-empty muted">{info.empty}</p>
@@ -140,15 +167,17 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
   }
   if (info.kind === 'chat' || info.kind === 'free') {
     if (!app.chats) return <p className="side-empty muted">Loading…</p>
-    const chats = app.chats.filter((chat) => chat.kind === route.mode)
+    // Every conversation lives here, including critiques and explorations from earlier versions.
+    const chats = app.chats
     if (!chats.length) return <p className="side-empty muted">{info.empty}</p>
     return (
       <>
         {chats.map((chat) => (
-          <a key={chat.id} href={href(route.mode, chat.id)} className={'side-item side-item-chat' + (route.id === chat.id ? ' side-item-active' : '')}>
+          <a key={chat.id} href={href(chat.kind, chat.id)} className={'side-item side-item-chat' + (route.id === chat.id ? ' side-item-active' : '')}>
             <span className="side-body">
               <span className="side-name"><Inline limit={110}>{chat.title}</Inline></span>
               <span className="side-meta">
+                {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
                 <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
                 <span className="side-time">{ago(chat.updated_at)}</span>
               </span>
@@ -159,14 +188,14 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
     )
   }
   if (!app.research) return <p className="side-empty muted">Loading…</p>
-  const jobs = app.research.filter((job) => job.kind === route.mode)
+  const jobs = app.research.filter((job) => job.kind === info.mode)
   if (!jobs.length) return <p className="side-empty muted">{info.empty}</p>
   return (
     <>
       {jobs.map((job) => {
         const look = researchLook(job.status, job.running)
         return (
-          <a key={job.id} href={href(route.mode, job.id)} className={'side-item' + (route.id === job.id ? ' side-item-active' : '')}>
+          <a key={job.id} href={href(info.mode, job.id)} className={'side-item' + (route.id === job.id ? ' side-item-active' : '')}>
             <Square variant={look.variant} label={look.label} />
             <span className="side-body">
               <span className="side-name"><Inline limit={110}>{job.title}</Inline></span>

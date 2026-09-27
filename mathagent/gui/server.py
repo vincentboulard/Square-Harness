@@ -121,12 +121,15 @@ def status(h, body):
     hub, args = h.server.hub, h.server.hub.args
     out = {'version': VERSION, 'instance': hub.bus.instance, 'seq': hub.bus.seq,
            'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
-           'online': bool(args.online) and not hub.online_locked, 'online_locked': hub.online_locked,
+           # The default for new work in the interface: online unless launched --offline.
+           'online': hub.online(), 'online_locked': hub.online_locked,
            'allow_python': bool(args.allow_python), 'lan': not h.server.loopback,
            'defaults': {'ctx': args.ctx, 'predict': args.predict, 'think': not args.no_think,
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,
                         'proof_verify_tokens': args.proof_verify_tokens,
+                        'proof_repair_tokens': args.proof_repair_tokens,
+                        'proof_min_solve_tokens': args.proof_min_solve_tokens,
                         'research_rounds': args.research_rounds, 'research_tokens': args.research_tokens,
                         'research_input_tokens': args.research_input_tokens,
                         'research_seconds': args.research_seconds, 'research_requests': args.research_requests,
@@ -227,7 +230,8 @@ def proof_start(h, body):
         _text(body, 'goal', 60000), source_files=_files(body),
         rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 512),
         seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, 1_000_000),
-        verify_tokens=_int(body, 'verify_tokens', 128, 1_000_000), ctx=_int(body, 'ctx', 2048))
+        verify_tokens=_int(body, 'verify_tokens', 128, 1_000_000), ctx=_int(body, 'ctx', 2048),
+        queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
 
@@ -238,7 +242,7 @@ def proof(h, body, id):
 
 @route('POST', '/api/proofs/' + UUID + '/resume')
 def proof_resume(h, body, id):
-    return {'task': h.server.hub.resume_proof(id).summary(), 'id': id}
+    return {'task': h.server.hub.resume_proof(id, queue=bool(_flag(body, 'queue'))).summary(), 'id': id}
 
 
 @route('GET', '/api/proofs/' + UUID + '/report')
@@ -273,7 +277,7 @@ def research_start(h, body):
         rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         requests=_int(body, 'requests', 0, 100), chars=_int(body, 'chars', 1000, 1_000_000),
-        online=_flag(body, 'online'))
+        online=_flag(body, 'online'), queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
 
@@ -284,7 +288,7 @@ def research(h, body, id):
 
 @route('POST', '/api/research/' + UUID + '/resume')
 def research_resume(h, body, id):
-    return {'task': h.server.hub.resume_research(id).summary(), 'id': id}
+    return {'task': h.server.hub.resume_research(id, queue=bool(_flag(body, 'queue'))).summary(), 'id': id}
 
 
 @route('GET', '/api/research/' + UUID + '/sources')
@@ -351,11 +355,18 @@ def route_start(h, body, id, index):
         raise ValueError('limits must be an object')
     limits = {key: value for key, value in (
         ('rounds', _int(raw, 'rounds', 1, 100)), ('tokens', _int(raw, 'tokens', 512)),
+        ('solve_tokens', _int(raw, 'solve_tokens', 128, 1_000_000)),
+        ('verify_tokens', _int(raw, 'verify_tokens', 128, 1_000_000)),
         ('input_tokens', _int(raw, 'input_tokens', 2048)), ('seconds', _seconds(raw, 'seconds')),
         ('requests', _int(raw, 'requests', 0, 100)), ('chars', _int(raw, 'chars', 1000, 1_000_000))) if value is not None}
     task = h.server.hub.start_route(id, int(index), body.get('mode'), _text(body, 'request', 60000),
                                     _files(body, 'files'), limits)
     return {'task': task.summary()}
+
+
+@route('POST', '/api/chats/' + UUID + r'/routes/(?P<index>\d{1,6})/cancel')
+def route_cancel(h, body, id, index):
+    return {'task': h.server.hub.cancel_route(id, int(index)).summary()}
 
 
 @route('POST', '/api/chats/' + UUID + r'/routes/(?P<index>\d{1,6})/dismiss')
@@ -427,7 +438,8 @@ def writeup_start(h, body):
         save_template=save_as if isinstance(save_as, str) and save_as.strip() else None,
         notes=notes, output=body.get('output') or '',
         rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
-        input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'))
+        input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
+        queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
 
 
@@ -753,7 +765,8 @@ def serve(args):
     lines = [f'╭─ SQUARE HARNESS · v{VERSION} · visual interface',
              f'│ {args.model} · {args.backend} at {args.host}',
              f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else ''),
-             f'│ Research: {"online" if args.online else "offline (local/cache only)"} · proof: solve → verify → repair',
+             f'│ Research: {"offline, locked by --offline (local/cache only)" if hub.online_locked else "online by default, switchable per job"}'
+             ' · proof: solve → verify → repair',
              f'│ Open: {local}{query}']
     for url in server.urls:
         lines.append(f'│ Phone / other device: {url}{query}')

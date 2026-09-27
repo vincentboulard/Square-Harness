@@ -12,7 +12,7 @@ checking remains necessary.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/interface-dark.png">
-  <img alt="The Square Harness visual interface on its default page: the Free notebook, with the Prove, Critic, Explore, Literature, Referee and Write-up modes in the left rail" src="docs/images/interface-light.png">
+  <img alt="The Square Harness visual interface on its default page: the Default notebook, with the Prove, Literature, Review and Write-up notebooks in the left rail" src="docs/images/interface-light.png">
 </picture>
 
 ## Quick start
@@ -60,11 +60,12 @@ square-harness --gui --workspace ~/research/square-workspace
 ```
 
 Your browser opens on `http://127.0.0.1:8765`. Each mode is a notebook in the left
-rail, and the Free notebook suggests the right one for each request. Proofs,
-critiques, reports and write-ups appear as the model writes them, with typeset
-LaTeX, each proof attempt with its review, budgets, citation checks and approval
-dialogs for file writes. Drop files onto the window and switch folders from the
-sidebar. It uses the same engine, settings and saved jobs as the terminal, including
+rail, and the Default notebook picks and starts the right job for each request,
+with an effort level, or answers the question itself. Proofs, answers, reports, reviews
+and write-ups appear as the model writes them, with typeset LaTeX, each proof
+attempt with its review, budgets, citation checks and approval dialogs for file
+writes. Jobs started while the model is busy wait in a queue. Drop files onto the
+window and switch folders from the sidebar. It uses the same engine, settings and saved jobs as the terminal, including
 jobs started there, and works in phone browsers too: see the
 [usage guide](docs/usage.md#visual-interface) before exposing it to your network.
 

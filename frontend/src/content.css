@@ -75,11 +75,20 @@
 .small .link-btn { font-size: 13px; }
 
 /* Job pages */
-.job { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+.job { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; transition: grid-template-columns 0.22s ease; }
 .job-main { min-width: 0; }
-.job-aside { min-height: 0; overflow-y: auto; padding: 22px 18px 48px; background: var(--paper-2); border-left: 1px solid var(--line); }
+.job-aside { min-height: 0; min-width: 0; overflow: hidden; display: flex; background: var(--paper-2); border-left: 1px solid var(--line); }
+/* A fixed-width page inside, so the overview slides away instead of squeezing. */
+.aside-inner { flex: none; width: 360px; min-height: 0; overflow-y: auto; padding: 14px 18px 48px; }
+.aside-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 -8px 8px 0; }
+.aside-name { font-size: 12.5px; font-weight: 700; color: var(--text-3); }
+.aside-bar .icon-btn { width: 32px; height: 32px; color: var(--text-3); }
+.job-aside-hidden { grid-template-columns: minmax(0, 1fr) 30px; }
+.aside-spine { flex: 1; width: 30px; }
+/* With the overview away, its content is a tab of the page, as on narrow screens. */
+.job-aside-hidden .tab-narrow { display: inline-flex; }
 @media (max-width: 1179px) {
-  .job { grid-template-columns: minmax(0, 1fr); }
+  .job, .job-aside-hidden { grid-template-columns: minmax(0, 1fr); }
   .job-aside { display: none; }
 }
 .job-head { margin-bottom: 18px; }
@@ -409,3 +418,57 @@
   :root:not([data-theme='light']) .effort-brezis .effort-now, :root:not([data-theme='light']) .effort-stop-brezis .effort-label { color: #f0c85a; }
 }
 .output-field { margin-bottom: 14px; max-width: 420px; }
+.queued-note { margin: 8px 0; padding: 8px 12px; font-size: 14px; background: var(--ink-soft); border-left: 2px solid var(--ink); border-radius: 0 6px 6px 0; }
+.effort-suggested { font-weight: 400; color: var(--text-3); font-size: 12.5px; }
+.effort-summary-compact { margin-top: 6px; }
+
+/* About: the notebook's title page, with its label (the étiquette of a school notebook). */
+.about .entry { margin-bottom: 16px; }
+.notebook-label {
+  max-width: 540px; margin: 16px 0 30px; padding: 22px 28px 18px; background: var(--sheet);
+  border: 2px solid var(--ink); border-radius: 18px;
+  box-shadow: inset 0 0 0 4px var(--sheet), inset 0 0 0 5px var(--ink-soft-strong), var(--shadow-sm);
+}
+.label-title { margin: 0; font: 700 34px/1.1 var(--font-text); color: var(--ink); }
+.label-subtitle { margin: 6px 0 14px; font: italic 17px/1.4 var(--font-text); color: var(--text-2); }
+.label-lines { margin: 0; }
+.label-lines > div {
+  display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: baseline; gap: 12px;
+  padding: 8px 0 3px; border-bottom: 1px dotted var(--line-strong);
+}
+.label-lines dt { font-size: 12.5px; font-weight: 700; color: var(--text-3); }
+.label-lines dd { margin: 0; font: 17px/1.3 var(--font-text); overflow-wrap: anywhere; }
+.about-prose { max-width: 62ch; }
+.about-prose p { font-size: 17.5px; line-height: 1.6; }
+.about-prose .signature { margin-top: 18px; text-align: right; font-style: italic; font-size: 21px; color: var(--ink); }
+.about-heading { margin: 14px 0 0; }
+.about .about-notebook { align-items: center; margin-bottom: 10px; }
+.about-notebook p { margin: 0; max-width: 64ch; font: 16.5px/1.5 var(--font-text); color: var(--text-2); }
+.about-name { margin-right: 3px; font-weight: 700; color: var(--text); text-decoration: none; }
+.about-name:hover { color: var(--ink); text-decoration: underline; }
+.about-cover {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; color: #fff;
+  font: 17px/1 var(--font-math); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.16);
+}
+.about-cover.mode-literature { font: 700 12px/1 var(--font-text); }
+.about-cover.mode-writeup { font: 700 16px/1 var(--font-text); }
+.about-list { margin: 0; padding-left: 18px; max-width: 64ch; font: 16.5px/1.55 var(--font-text); color: var(--text-2); }
+.about-list li { margin-bottom: 6px; }
+.about-list code { font-size: 0.9em; }
+.about-links { margin: 6px 0 0; max-width: 64ch; font-size: 14px; line-height: 1.6; color: var(--text-3); }
+@media (max-width: 760px) {
+  .notebook-label { padding: 18px 18px 14px; margin-top: 6px; }
+  .label-title { font-size: 28px; }
+}
+
+/* Default mode: what the model started, at which effort. */
+.route-auto { padding: 10px 14px 10px; }
+.route-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.route-line .route-title { margin: 0; }
+.route-effort { padding: 1px 8px; border: 1px solid var(--ink-soft-strong); border-radius: 999px; font-size: 12.5px; font-weight: 700; color: var(--ink); }
+
+.route-auto .route-actions { margin-top: 8px; gap: 8px; }
+.route-details { margin: 0; flex-basis: 100%; }
+.route-details > summary { font-size: 12.5px; }
+.route-details .route-summary { font-size: 14px; color: var(--text-2); }
+.route-clarify .route-card { border-color: var(--ink-soft-strong); }

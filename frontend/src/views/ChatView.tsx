@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Keyb
 import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
 import { Collapse, ErrorNote, Loading, Toggle, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, PauseIcon, SendIcon } from '../components/Icons'
-import { EffortSlider, effortLimits, type EffortKind, type EffortLevel } from '../components/Effort'
+import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -17,10 +17,10 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Describe the task in your own words. The model suggests a workflow (a proof, a critique, a literature or referee report, a write-up) and rewrites your request; nothing runs until you press Start. One conversation can hold several jobs.',
+    text: 'Describe the task in your own words. The model picks the workflow (a proof, a literature report, a review of a manuscript, a write-up, or an answer right here) and its effort, and starts at once; you can cancel it from its card. One message can ask for several jobs: they run one after another.',
     examples: [
       'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
-      'Referee manuscript.tex and check the step from weak to strong convergence.',
+      'Review manuscript.tex, and find the literature on compact Sobolev embeddings it should cite.',
       'Turn my notes in notes.md into a clean LaTeX section using my macros.',
     ],
   },
@@ -42,15 +42,19 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
   },
 }
 
-const ROUTE_LABELS: Record<RouteMode, { noun: string; label: string }> = {
-  prove: { noun: 'a proof', label: 'Proof' },
-  critic: { noun: 'a critique', label: 'Critique' },
-  explore: { noun: 'an exploration', label: 'Exploration' },
-  literature: { noun: 'a literature report', label: 'Literature report' },
-  referee: { noun: 'a referee report', label: 'Referee report' },
-  writeup: { noun: 'a write-up', label: 'Write-up' },
+// How a card names what the model started. Critic and explore are both an answer here.
+type Kind = 'answer' | 'prove' | 'literature' | 'referee' | 'writeup'
+const KINDS: Record<Kind, { noun: string; label: string; glyph: string; cover: string }> = {
+  answer: { noun: 'an answer', label: 'Answer', glyph: MODES.free.glyph, cover: 'free' },
+  prove: { noun: 'a proof', label: 'Proof', glyph: MODES.prove.glyph, cover: 'prove' },
+  literature: { noun: 'a literature report', label: 'Literature report', glyph: MODES.literature.glyph, cover: 'literature' },
+  referee: { noun: 'a review', label: 'Review', glyph: MODES.referee.glyph, cover: 'referee' },
+  writeup: { noun: 'a write-up', label: 'Write-up', glyph: MODES.writeup.glyph, cover: 'writeup' },
 }
-const JOB_ROUTES: RouteMode[] = ['prove', 'literature', 'referee', 'writeup']
+const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
+const effortKind = (mode: RouteMode): EffortKind | null =>
+  mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : mode === 'literature' || mode === 'referee' ? 'research' : null
+const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
@@ -75,7 +79,8 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const [sendError, setSendError] = useState('')
   const [sending, setSending] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
-  const [online, setOnline] = useState<boolean>(!!app.status?.online)
+  // Online search is on for new conversations unless the interface was launched --offline.
+  const [online, setOnline] = useState<boolean>(app.status ? app.status.online : true)
   const locked = !!app.status?.online_locked
   const scroller = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
@@ -258,10 +263,9 @@ function UserMessage({ item }: { item: TranscriptItem }) {
 function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; chatId: string }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
-  // Free mode mixes workflows: draw each answer with the one that produced it.
-  const fallback = mode === 'free' ? 'critic' : mode
-  let glyph: 'critic' | 'explore' = fallback
-  let routed: 'critic' | 'explore' | null = null  // older answers: take the card above them
+  // A Default conversation answers with one voice, whichever engine mode wrote it;
+  // older critique and exploration chats keep their own mark.
+  const glyph: ChatMode = mode
   const flush = (key: number) => {
     if (!blocks.length) return
     out.push(
@@ -274,13 +278,6 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
   }
   for (let i = 0; i < steps.length; i++) {
     const { item, index } = steps[i]
-    if (item.role === 'route') routed = item.mode === 'critic' || item.mode === 'explore' ? item.mode : null
-    const answeredBy = item.mode === 'critic' || item.mode === 'explore' ? item.mode
-      : item.role === 'review' ? 'critic' : routed || fallback
-    if (item.role !== 'route' && item.role !== 'notice' && answeredBy !== glyph) {
-      flush(index)
-      glyph = answeredBy
-    }
     if (item.role === 'route') {
       flush(index)
       out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
@@ -322,132 +319,106 @@ function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; ch
   return <>{out}</>
 }
 
+/** What the model started for a message, at which effort, with a way to cancel it. */
 function RouteCard({ chatId, index, item }: { chatId: string; index: number; item: TranscriptItem }) {
   const app = useApp()
-  const proposed = (item.mode === 'clarify' || !item.mode ? 'explore' : item.mode) as RouteMode
-  const [mode, setMode] = useState<RouteMode>(proposed)
-  const [request, setRequest] = useState(item.request || '')
-  const [files, setFiles] = useState<string[]>(item.files || [])
-  const [error, setError] = useState(item.error || '')
-  const [starting, setStarting] = useState(false)
-  const editable = ['proposed', 'failed', 'cancelled'].includes(item.status || '')
-  const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
-  const [level, setLevel] = useState<EffortLevel>('medium')
-  const effortKind: EffortKind | null = mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : mode === 'literature' || mode === 'referee' ? 'research' : null
+  const [error, setError] = useState('')
+  const [acting, setActing] = useState(false)
   useEffect(() => { setError(item.error || '') }, [item.error])
-  const start = async () => {
-    setStarting(true)
-    setError('')
-    try {
-      const defaults = app.status?.defaults
-      const limits = effortKind && defaults ? effortLimits(effortKind, defaults, level) : undefined
-      await api.startRoute(chatId, index, { mode, request, files, limits: limits as Record<string, number> | undefined })
-    } catch (reason) {
-      setError((reason as Error).message)
-    } finally {
-      setStarting(false)
-    }
-  }
   if (item.status === 'dismissed') {
     return <div className="entry route-dismissed"><span className="in-margin" /><span className="muted small">Suggestion dismissed.</span></div>
   }
-  const shown = editable ? mode : proposed
-  return (
-    <div className={'entry route route-' + (item.status || 'proposed')}>
-      <span className={`in-margin speaker speaker-model mode-${shown}`} title={ROUTE_LABELS[shown].label}>{MODES[shown].glyph}</span>
-      <div className="route-card">
-        {editable && item.mode === 'clarify' && (
-          <>
-            <p className="route-title">One detail first</p>
-            <Markdown className="route-question">{item.question || ''}</Markdown>
-            <p className="muted small">Answer in the message box, or choose a workflow yourself below.</p>
-          </>
-        )}
-        {editable && item.mode !== 'clarify' && (
-          <>
-            <p className="route-title">Looks like {ROUTE_LABELS[proposed].noun}</p>
-            {item.reason && <p className="muted small route-reason">{item.reason}</p>}
-          </>
-        )}
-        {editable ? (
-          <>
-            <div className="route-modes" role="radiogroup" aria-label="Workflow">
-              {(Object.keys(ROUTE_LABELS) as RouteMode[]).map((key) => (
-                <button key={key} type="button" role="radio" aria-checked={mode === key}
-                  className={'route-mode' + (mode === key ? ' route-mode-active' : '')} onClick={() => setMode(key)}>
-                  <span className={`route-cover mode-${key}`}>{MODES[key].glyph}</span>{ROUTE_LABELS[key].label}
-                </button>
-              ))}
-            </div>
-            <label className="field">
-              <span className="field-label">Request, as the {ROUTE_LABELS[mode].label.toLowerCase()} will see it</span>
-              <textarea className="route-request" rows={Math.min(10, Math.max(3, request.split('\n').length + 1))} value={request}
-                onChange={(event) => setRequest(event.target.value)} />
-              <span className="field-hint">{JOB_ROUTES.includes(mode)
-                ? 'Jobs do not see this conversation, so the request must contain every hypothesis they need.'
-                : 'Answered in this conversation, with its earlier turns as context.'}</span>
-            </label>
-            {files.length > 0 && (
-              <div className="attachments">
-                {files.map((path) => (
-                  <span key={path} className="chip"><FileIcon size={14} /><span>{path}</span>
-                    <button type="button" className="chip-remove" aria-label={`Remove ${path}`} onClick={() => setFiles(files.filter((f) => f !== path))}><CloseIcon size={13} /></button>
-                  </span>
-                ))}
-              </div>
-            )}
-            {item.missing && item.missing.length > 0 && <p className="muted small">Not found in this folder: {item.missing.join(', ')}.</p>}
-            {effortKind && app.status && (
-              <EffortSlider kind={effortKind} defaults={app.status.defaults} level={level} onLevel={setLevel} compact />
-            )}
-            {(mode === 'literature' || mode === 'referee') && (
-              <p className="muted small">Online search follows this conversation's switch below the message box.</p>
-            )}
-            <div className="route-actions">
-              <button type="button" className="btn btn-primary" disabled={starting || !request.trim()} onClick={start}>
-                {starting ? 'Starting…' : `Start ${ROUTE_LABELS[mode].label.toLowerCase()}`}
-              </button>
-              <button type="button" className="btn btn-quiet" onClick={() => api.dismissRoute(chatId, index).catch((reason: Error) => setError(reason.message))}>Dismiss</button>
-              {busy && JOB_ROUTES.includes(mode) && <span className="muted small">The model is busy; this job will wait its turn.</span>}
-              {busy && !JOB_ROUTES.includes(mode) && <span className="muted small">Pause the running job first: answers need the model now.</span>}
-            </div>
-          </>
-        ) : (
-          <StartedRoute item={item} />
-        )}
-        <ErrorNote>{error}</ErrorNote>
+  if (item.mode === 'clarify' || !item.mode) {
+    return (
+      <div className="entry route route-clarify">
+        <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
+        <div className="route-card">
+          <p className="route-title">One detail first</p>
+          <Markdown className="route-question">{item.question || ''}</Markdown>
+          <p className="muted small">Answer in the message box; the work starts as soon as the request is clear.</p>
+        </div>
       </div>
-    </div>
-  )
-}
-
-function StartedRoute({ item }: { item: TranscriptItem }) {
-  const app = useApp()
+    )
+  }
   const mode = item.mode as RouteMode
-  const label = ROUTE_LABELS[mode]?.label || 'Job'
-  let status = item.status === 'queued' ? 'Waiting for the model' : item.status === 'starting' ? 'Starting' : ''
-  let variant: Variant = item.status === 'queued' ? 'ready' : 'running'
+  const kind = kindOf(mode)
+  const info = KINDS[kind]
+  const effort = kind === 'answer' ? '' : `${effortLabel(item.effort)} effort`
+  const act = async (action: () => Promise<unknown>) => {
+    setActing(true)
+    setError('')
+    try { await action() } catch (reason) { setError((reason as Error).message) } finally { setActing(false) }
+  }
+  // Suggestions saved before jobs started on their own, and jobs that failed or were
+  // cancelled before running, can be started (again) as the model chose them.
+  const start = () => act(() => {
+    const limits = effortKind(mode) && app.status ? effortLimits(effortKind(mode)!, app.status.defaults, isLevel(item.effort) ? item.effort : 'medium') : undefined
+    return api.startRoute(chatId, index, { mode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
+  })
+
+  const task = app.snapshot.task
+  const queued = !!item.task && app.snapshot.queue.some((waiting) => waiting.id === item.task)
+  const running = !!item.task && task?.id === item.task && ['starting', 'running', 'pausing'].includes(task.state)
+  let status = ''
+  let variant: Variant = 'running'
   if (item.job_id && mode === 'prove') {
     const job = app.proofs?.find((proof) => proof.id === item.job_id)
     if (job) ({ variant, label: status } = proofLook(job.status, job.running))
   } else if (item.job_id) {
     const job = app.research?.find((report) => report.id === item.job_id)
     if (job) ({ variant, label: status } = researchLook(job.status, job.running))
-  } else if (!JOB_ROUTES.includes(mode) && item.status === 'started') {
-    status = 'Answered below'
-    variant = 'complete'
   }
+  let headline: string
+  if (item.status === 'proposed') { headline = `${info.label} suggested`; status = 'Not started'; variant = 'ready' }
+  else if (item.status === 'failed') { headline = `Could not start ${info.noun}`; variant = 'error' }
+  else if (item.status === 'cancelled') { headline = `${info.label} cancelled`; status = 'Removed from the queue'; variant = 'spent' }
+  else if (queued) { headline = `${info.label} queued`; status = 'Starts when the model is free'; variant = 'ready' }
+  else if (running && task?.state === 'pausing') { headline = `Stopping ${info.noun}`; status = 'At the next checkpoint' }
+  else if (running) { headline = kind === 'answer' ? 'Answering here' : `${item.job_id ? 'Running' : 'Starting'} ${info.noun}`; status = '' }
+  else if (item.status === 'stopped') { headline = kind === 'answer' ? 'The answer was stopped' : `${info.label} stopped`; status = status || 'Paused' }
+  else if (kind === 'answer') { headline = 'Answered below'; status = ''; variant = 'complete' }
+  else { headline = info.label }
   return (
-    <div className="route-started">
-      <p className="route-title"><Square variant={variant} size={14} /> {label}{status && <span className="route-status">{status}</span>}</p>
-      <div className="route-summary"><Inline limit={260}>{item.request || ''}</Inline></div>
-      {item.job_id && <a className="btn btn-small" href={href(mode, item.job_id)}>Open the {label.toLowerCase()}</a>}
+    <div className={'entry route route-' + (item.status || 'proposed')}>
+      <span className={`in-margin speaker speaker-model mode-${info.cover}`} title={info.label}>{info.glyph}</span>
+      <div className="route-card route-auto">
+        <div className="route-line">
+          <Square variant={variant} size={14} />
+          <p className="route-title">{headline}</p>
+          {effort && <span className="route-effort">{effort}</span>}
+          {status && <span className="route-status">{status}</span>}
+        </div>
+        <div className="route-actions">
+          {(queued || running) && (
+            <button type="button" className="btn btn-small" disabled={acting || task?.state === 'pausing'}
+              title={queued ? 'Take it out of the queue' : 'Stop at the next checkpoint; the job is kept and can be resumed from its page'}
+              onClick={() => act(() => api.cancelRoute(chatId, index))}>
+              <CloseIcon size={14} /> Cancel
+            </button>
+          )}
+          {item.job_id && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id)}>Open the {info.label.toLowerCase()}</a>}
+          {['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
+            <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
+              {item.status === 'proposed' ? 'Start' : 'Start again'}
+            </button>
+          )}
+          <Collapse className="route-details" summary={kind === 'answer' ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
+            <div className="route-summary"><Inline limit={1200}>{item.request || ''}</Inline></div>
+            {item.files && item.files.length > 0 && (
+              <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
+            )}
+            {item.missing && item.missing.length > 0 && <p className="muted small">Not found in this folder: {item.missing.join(', ')}.</p>}
+            {item.reason && <p className="muted small">Why: {item.reason}</p>}
+          </Collapse>
+        </div>
+        <ErrorNote>{error}</ErrorNote>
+      </div>
     </div>
   )
 }
 
 function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
-  const glyph = live.mode || (mode === 'free' ? 'critic' : mode)
+  const glyph: ChatMode = mode
   return (
     <div className="turn turn-live">
       {live.kind === 'message' && live.user && <UserMessage item={{ role: 'user', content: live.user, time: '' }} />}

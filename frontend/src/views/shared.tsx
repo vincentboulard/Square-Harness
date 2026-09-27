@@ -1,22 +1,70 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, type Artifact, type Review, type ToolCall } from '../api'
 import { Collapse, ErrorNote, Loading, Modal } from '../components/common'
+import { BackIcon, PanelRightIcon } from '../components/Icons'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { taskHref } from '../components/Shell'
 import { issueLook, Square } from '../components/Square'
 import { bytes, count, firstLine } from '../format'
+import { setPanelHidden, usePanelHidden } from '../panels'
 import { onStream, useApp } from '../store'
 
-export function BusyNote() {
+/** Says what the model is doing; `queue` explains that new work waits its turn. */
+export function BusyNote({ queue = false }: { queue?: boolean }) {
   const app = useApp()
   const task = app.snapshot.task
   if (!task) return null
+  const waiting = app.snapshot.queue.length
   return (
     <p className="busy-note">
-      The model is working on a {task.label.toLowerCase()}: <a href={taskHref(task, app)}><Inline limit={70}>{task.title}</Inline></a>.
-      Pause it first: the model serves one task at a time, and time budgets count wall-clock time.
+      The model is working on a {task.label.toLowerCase()}: <a href={taskHref(task, app)}><Inline limit={70}>{withoutStop(task.title)}</Inline></a>.
+      {queue
+        ? ` This one will wait in the queue${waiting ? `, after ${waiting} other ${waiting === 1 ? 'job' : 'jobs'}` : ''}, and start when the model is free.`
+        : ' Pause it first: the model serves one task at a time, and time budgets count wall-clock time.'}
     </p>
   )
+}
+
+/** A title quoted inside a sentence, without its own final full stop. */
+const withoutStop = (title: string) => title.trim().replace(/[.。]+$/, '')
+
+export function queuedMessage(title: string) {
+  return `Added to the queue: “${firstLine(withoutStop(title), 80)}”. It starts when the model is free. The queue is listed under the running job, where you can cancel it.`
+}
+
+/** The job's overview column (budget, candidates, checks); it slides away to a spine. */
+export function JobAside({ label, children }: { label: string; children: ReactNode }) {
+  const hidden = usePanelHidden('aside')
+  if (hidden) {
+    return (
+      <aside className="job-aside" aria-label={label}>
+        <button type="button" className="spine aside-spine" onClick={() => setPanelHidden('aside', false)}
+          title={`Show the ${label.toLowerCase()}`} aria-label={`Show the ${label.toLowerCase()}`}>
+          <BackIcon size={16} />
+          <span className="spine-text">{label}</span>
+        </button>
+      </aside>
+    )
+  }
+  return (
+    <aside className="job-aside" aria-label={label}>
+      <div className="aside-inner">
+        <div className="aside-bar">
+          <span className="aside-name">{label}</span>
+          <button type="button" className="icon-btn" title="Hide this panel" aria-label={`Hide the ${label.toLowerCase()}`}
+            onClick={() => setPanelHidden('aside', true)}>
+            <PanelRightIcon />
+          </button>
+        </div>
+        {children}
+      </div>
+    </aside>
+  )
+}
+
+/** Class for a job page, so its grid gives the overview column its full width or a spine. */
+export function useJobClass() {
+  return 'job' + (usePanelHidden('aside') ? ' job-aside-hidden' : '')
 }
 
 export const ROLES: Record<string, { active: string; name: string; structured?: boolean }> = {

@@ -7,7 +7,7 @@ import { candidateLook, proofLook, proofResumable, Square, type Variant } from '
 import { ago, bytes, count, duration, plural } from '../format'
 import { go } from '../router'
 import { useApp, useTick } from '../store'
-import { ActivityLog, ArtifactViewer, BusyNote, ReviewBody, ROLES, StreamBody, useLiveStream } from './shared'
+import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ReviewBody, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
 
 const KINDS: Record<string, string> = {
   initial: 'initial solve', repair: 'repair', continue: 'continuation', retry: 'fresh solve',
@@ -40,6 +40,7 @@ export function ProofView({ id, tab }: { id: string; tab: string | null }) {
   const { data, error } = useLoad(() => api.proof(id), [id, tick])
   const [artifact, setArtifact] = useState<string | null>(null)
   const active = tab || 'work'
+  const jobClass = useJobClass()
   const task = app.snapshot.task
   const ours = !!task && task.kind === 'proof' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
 
@@ -52,7 +53,7 @@ export function ProofView({ id, tab }: { id: string; tab: string | null }) {
     return <div className="sheet paper"><div className="sheet-inner">{error ? <ErrorNote>{error}</ErrorNote> : <Loading />}</div></div>
   }
   return (
-    <div className="job">
+    <div className={jobClass}>
       <div className="job-main sheet paper">
         <div className="sheet-inner">
           <ProofHeader data={data} ours={ours} pausing={task?.state === 'pausing'} />
@@ -70,9 +71,9 @@ export function ProofView({ id, tab }: { id: string; tab: string | null }) {
           {active === 'files' && <Files names={data.artifacts} onOpen={setArtifact} />}
         </div>
       </div>
-      <aside className="job-aside" aria-label="Overview">
+      <JobAside label="Overview">
         <Overview data={data} onAttempt={focusAttempt} />
-      </aside>
+      </JobAside>
       {artifact && <ArtifactViewer job="proof" id={id} name={artifact} onClose={() => setArtifact(null)} />}
     </div>
   )
@@ -84,6 +85,7 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
   const [expanded, setExpanded] = useState(false)
   const app = useApp()
   const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const long = data.goal.length > 420
   const resumable = proofResumable(data.status, data.version)
   const settings = data.settings
@@ -121,13 +123,13 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
             <PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}
           </button>
         ) : resumable ? (
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => act(api.resumeProof(data.id))}>
-            <PlayIcon size={16} /> Resume with the remaining budget
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeProof(data.id, busy))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Resume when the model is free' : 'Resume with the remaining budget'}
           </button>
         ) : null}
         {data.running && !ours && <span className="muted">Running in another process, such as a terminal.</span>}
       </div>
-      {!ours && busy && resumable && <BusyNote />}
+      {!ours && busy && resumable && !queued && <BusyNote queue />}
       <ErrorNote>{error}</ErrorNote>
     </header>
   )

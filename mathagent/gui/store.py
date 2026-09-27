@@ -21,8 +21,10 @@ from ..tools import READ_GROUPS, SKIP, TEXT
 from ..writeup import TEMPLATE_SUFFIXES
 
 CHAT_MODES = ('critic', 'explore', 'free')
-ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Critique', 'explore': 'Exploration', 'literature': 'Literature report',
-               'referee': 'Referee report', 'writeup': 'Write-up', 'clarify': 'Question'}
+# How the interface names a suggestion in chat previews: critic and explore answers
+# are both answers in the conversation, and the referee workflow is called Review.
+ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
+               'referee': 'Review', 'writeup': 'Write-up', 'clarify': 'Question'}
 UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py'}
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -496,10 +498,10 @@ def commit_turn(root, chat_id, history, calls, notices, echo_user=True, mode=Non
     stamp, index, items = _now(), 0, []
     for message in history[start:]:
         if message['role'] == 'user' and not echo_user:
-            continue  # Free mode already shows the message and its route card
+            continue  # Default mode already shows the message and its route card
         item = {'role': message['role'], 'content': message.get('content', ''), 'time': stamp}
         if mode and message['role'] != 'user':
-            item['mode'] = mode  # which workflow answered (Free mode mixes them)
+            item['mode'] = mode  # which workflow answered (Default mode mixes them)
         if message['role'] == 'assistant':
             if message.get('tool_calls'):
                 item['tool_calls'] = message['tool_calls']
@@ -550,7 +552,7 @@ def record_discarded(root, chat_id, content, reason):
 
 @_locked_chat
 def append_items(root, chat_id, items):
-    """Append display items (Free mode messages and route cards); returns the first index."""
+    """Append display items (Default mode messages and route cards); returns the first index."""
     chat = load_chat(root, chat_id)
     index = len(chat['transcript'])
     chat['transcript'].extend(items)

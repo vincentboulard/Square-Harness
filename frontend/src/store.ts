@@ -160,11 +160,15 @@ function handle(event: ServerEvent) {
     case 'task': {
       const current = state.snapshot.task
       const fresh = !current || current.id !== event.task.id
-      set((s) => ({
-        snapshot: fresh
-          ? { ...s.snapshot, seq: event.seq, task: event.task, activity: [], live: null }
-          : { ...s.snapshot, seq: event.seq, task: event.task },
-      }))
+      // A job joining or leaving the queue is not the model's task: keep the running one shown.
+      const waiting = event.task.state === 'queued' || event.task.state === 'cancelled'
+      if (!(fresh && waiting)) {
+        set((s) => ({
+          snapshot: fresh
+            ? { ...s.snapshot, seq: event.seq, task: event.task, activity: [], live: null }
+            : { ...s.snapshot, seq: event.seq, task: event.task },
+        }))
+      }
       if (fresh && event.task.state === 'running') refreshSnapshot()
       if (['done', 'paused', 'error'].includes(event.task.state)) {
         refreshLists(150)

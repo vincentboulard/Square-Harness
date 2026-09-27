@@ -14,24 +14,25 @@ export type ModeInfo = {
 // ∃ search for existence, [1] a citation, ¶ an edited manuscript, § a written section.
 export const MODES: Record<Mode, ModeInfo> = {
   free: {
-    mode: 'free', label: 'Free', glyph: '∀', kind: 'free',
-    summary: 'Ask anything. The model suggests the right workflow; you confirm before it runs.',
-    newLabel: 'New conversation', empty: 'No free conversations yet.',
+    mode: 'free', label: 'Default', glyph: '∀', kind: 'free',
+    summary: 'Ask anything. The model picks the workflow and its effort and starts at once; cancel it if needed.',
+    newLabel: 'New conversation', empty: 'No conversations yet.',
   },
   prove: {
     mode: 'prove', label: 'Prove', glyph: '⊢', kind: 'proof',
     summary: 'Solve the whole problem, review the written proof, repair a concrete objection.',
     newLabel: 'New proof', empty: 'No proofs yet in this workspace.',
   },
+  // Not in the rail: the Default notebook answers with these, and older chats stay readable.
   critic: {
-    mode: 'critic', label: 'Critic', glyph: '⊥', kind: 'chat',
+    mode: 'critic', label: 'Critique', glyph: '⊥', kind: 'chat',
     summary: 'Look for the first unjustified step and try counterexamples.',
-    newLabel: 'New critique', empty: 'No critiques yet.',
+    newLabel: 'New conversation', empty: 'No conversations yet.',
   },
   explore: {
-    mode: 'explore', label: 'Explore', glyph: '∃', kind: 'chat',
+    mode: 'explore', label: 'Exploration', glyph: '∃', kind: 'chat',
     summary: 'Explore approaches and connections, with heuristics labelled.',
-    newLabel: 'New exploration', empty: 'No explorations yet.',
+    newLabel: 'New conversation', empty: 'No conversations yet.',
   },
   literature: {
     mode: 'literature', label: 'Literature', glyph: '[1]', kind: 'research',
@@ -39,9 +40,9 @@ export const MODES: Record<Mode, ModeInfo> = {
     newLabel: 'New literature report', empty: 'No literature reports yet.',
   },
   referee: {
-    mode: 'referee', label: 'Referee', glyph: '¶', kind: 'research',
-    summary: 'Referee report on a pinned manuscript, with line-level citations.',
-    newLabel: 'New referee report', empty: 'No referee reports yet.',
+    mode: 'referee', label: 'Review', glyph: '¶', kind: 'research',
+    summary: 'Review a manuscript: a report with line-level citations.',
+    newLabel: 'New review', empty: 'No reviews yet.',
   },
   writeup: {
     mode: 'writeup', label: 'Write-up', glyph: '§', kind: 'writeup',

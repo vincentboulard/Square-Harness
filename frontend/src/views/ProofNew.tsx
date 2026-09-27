@@ -6,7 +6,7 @@ import { Markdown } from '../components/Markdown'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp, useTick } from '../store'
-import { BusyNote } from './shared'
+import { BusyNote, queuedMessage } from './shared'
 
 // File names in the statement, as the terminal notices them (proof jobs have no file tools).
 const MENTIONED = /(?<![\w/])[\w./-]+\.(?:tex|md|txt)\b/g
@@ -17,14 +17,15 @@ export function ProofNew() {
   const [goal, setGoal] = useState('')
   const [files, setFiles] = useState<string[]>([])
   const [rounds, setRounds] = useState(3)
-  const [tokens, setTokens] = useState(120000)
-  const [minutes, setMinutes] = useState(30)
+  const [tokens, setTokens] = useState(60000)
+  const [minutes, setMinutes] = useState(15)
   const [solveTokens, setSolveTokens] = useState(32768)
   const [verifyTokens, setVerifyTokens] = useState(16384)
   const [ctx, setCtx] = useState(40960)
   const [level, setLevel] = useState<EffortLevel>('medium')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [queuedNote, setQueuedNote] = useState('')
   const [workspace, setWorkspace] = useState<WorkspaceFile[]>([])
   const changed = useTick('files')
 
@@ -34,14 +35,22 @@ export function ProofNew() {
     if (text.length < paths.length) setError('Proofs pin text sources only; the PDF was saved in the folder but not pinned.')
   })
 
+  // The form opens on the Medium effort; the context is the launch context.
+  const applyLevel = (next: EffortLevel) => {
+    if (!defaults) return
+    const limits = effortLimits('proof', defaults, next)
+    setRounds(limits.rounds!)
+    setTokens(limits.tokens)
+    setMinutes(Math.round(limits.seconds / 60))
+    setSolveTokens(limits.solve_tokens!)
+    setVerifyTokens(limits.verify_tokens!)
+  }
   useEffect(() => {
     if (!defaults) return
-    setRounds(defaults.proof_rounds)
-    setTokens(defaults.proof_tokens)
-    setMinutes(Math.round(defaults.proof_seconds / 60))
-    setSolveTokens(defaults.proof_solve_tokens)
-    setVerifyTokens(defaults.proof_verify_tokens)
+    applyLevel(level)
     setCtx(defaults.ctx)
+    // Only when the launch defaults arrive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaults])
 
   useEffect(() => {
@@ -54,27 +63,31 @@ export function ProofNew() {
   }, [goal, files, workspace])
 
   const preset = defaults ? effortLimits('proof', defaults, level) : null
-  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== Math.round(preset.seconds / 60))
+  const custom = !!preset && (rounds !== preset.rounds || tokens !== preset.tokens || minutes !== Math.round(preset.seconds / 60)
+    || solveTokens !== preset.solve_tokens || verifyTokens !== preset.verify_tokens)
   const chooseLevel = (next: EffortLevel) => {
     setLevel(next)
-    if (!defaults) return
-    const limits = effortLimits('proof', defaults, next)
-    setRounds(limits.rounds!)
-    setTokens(limits.tokens)
-    setMinutes(Math.round(limits.seconds / 60))
+    applyLevel(next)
   }
 
-  const running = snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const running = !!snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true)
     setError('')
+    setQueuedNote('')
     try {
       const result = await api.startProof({
         goal, source_files: files, rounds, tokens, seconds: minutes * 60,
         solve_tokens: solveTokens, verify_tokens: verifyTokens, ctx: ctx !== defaults?.ctx ? ctx : undefined,
+        queue: true,
       })
-      if (result.id) go('prove', result.id)
+      if (result.task.state === 'queued') {
+        // Waiting for the model: clear the form for the next job.
+        setQueuedNote(queuedMessage(result.task.title))
+        setGoal('')
+        setFiles([])
+      } else if (result.id) go('prove', result.id)
       else setError(result.task.error || 'The proof did not start.')
     } catch (reason) {
       setError((reason as Error).message)
@@ -159,9 +172,10 @@ export function ProofNew() {
           <span className="in-margin" />
           <div className="form-actions">
             <ErrorNote>{error}</ErrorNote>
-            {running && <BusyNote />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !goal.trim() || !!running}>
-              {busy ? 'Starting…' : 'Start proof'}
+            {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
+            {running && <BusyNote queue />}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !goal.trim()}>
+              {busy ? 'Starting…' : running ? 'Add proof to the queue' : 'Start proof'}
             </button>
           </div>
         </div>

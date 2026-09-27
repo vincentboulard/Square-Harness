@@ -5,7 +5,7 @@ import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effo
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp } from '../store'
-import { BusyNote } from './shared'
+import { BusyNote, queuedMessage } from './shared'
 
 const TEMPLATE = ['.sty', '.cls', '.tex', '.bib']
 
@@ -20,28 +20,32 @@ export function WriteupNew() {
   const [saved, setSaved] = useState('')
   const [remember, setRemember] = useState('')
   const [output, setOutput] = useState('')
-  const [tokens, setTokens] = useState(24000)
+  const [tokens, setTokens] = useState(60000)
   const [minutes, setMinutes] = useState(15)
-  const [inputTokens, setInputTokens] = useState(100000)
+  const [inputTokens, setInputTokens] = useState(240000)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [queuedNote, setQueuedNote] = useState('')
   const [level, setLevel] = useState<EffortLevel>('medium')
 
-  useEffect(() => {
-    if (!d) return
-    setTokens(d.research_tokens)
-    setMinutes(Math.max(1, Math.round(d.research_seconds / 60)))
-    setInputTokens(d.research_input_tokens)
-  }, [d])
-  const preset = d ? effortLimits('writeup', d, level) : null
-  const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
-  const chooseLevel = (next: EffortLevel) => {
-    setLevel(next)
+  const applyLevel = (next: EffortLevel) => {
     if (!d) return
     const limits = effortLimits('writeup', d, next)
     setTokens(limits.tokens)
     setMinutes(Math.max(1, Math.round(limits.seconds / 60)))
     setInputTokens(limits.input_tokens!)
+  }
+  useEffect(() => {
+    if (!d) return
+    applyLevel(level)
+    // Only when the launch defaults arrive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d])
+  const preset = d ? effortLimits('writeup', d, level) : null
+  const custom = !!preset && (tokens !== preset.tokens || minutes !== Math.max(1, Math.round(preset.seconds / 60)) || inputTokens !== preset.input_tokens)
+  const chooseLevel = (next: EffortLevel) => {
+    setLevel(next)
+    applyLevel(next)
   }
   useEffect(() => { api.templates().then((result) => setTemplates(result.templates), () => undefined) }, [])
   useDropTarget('Notes go to the sources; .sty and .cls files go to the template', (paths) => {
@@ -50,20 +54,26 @@ export function WriteupNew() {
     setSources((items) => [...new Set([...items, ...paths.filter((path) => !style.includes(path))])])
   })
 
-  const running = snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const running = !!snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
   const hasMaterial = sources.length > 0 || notes.trim().length > 0
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true)
     setError('')
+    setQueuedNote('')
     try {
       const result = await api.startWriteup({
         goal: goal.trim() || 'Write up the pinned notes as a clean LaTeX document.',
         source_files: sources, notes, template_files: templateFiles, template: saved || undefined,
         save_template: remember.trim() || undefined, output: output.trim() || undefined,
-        tokens, seconds: minutes * 60, input_tokens: inputTokens,
+        tokens, seconds: minutes * 60, input_tokens: inputTokens, queue: true,
       })
-      if (result.id) go('writeup', result.id)
+      if (result.task.state === 'queued') {
+        setQueuedNote(queuedMessage(result.task.title))
+        setGoal('')
+        setSources([])
+        setNotes('')
+      } else if (result.id) go('writeup', result.id)
       else setError(result.task.error || 'The write-up did not start.')
     } catch (reason) {
       setError((reason as Error).message)
@@ -168,10 +178,10 @@ export function WriteupNew() {
           <span className="in-margin" />
           <div className="form-actions">
             <ErrorNote>{error}</ErrorNote>
-            {running && <p className="muted small">The model is busy; you can start after it finishes or pause it.</p>}
-            {running && <BusyNote />}
-            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !hasMaterial || !!running}>
-              {busy ? 'Starting…' : 'Start write-up'}
+            {queuedNote && <p className="queued-note" role="status">{queuedNote}</p>}
+            {running && <BusyNote queue />}
+            <button type="submit" className="btn btn-primary btn-large" disabled={busy || !hasMaterial}>
+              {busy ? 'Starting…' : running ? 'Add write-up to the queue' : 'Start write-up'}
             </button>
             {!hasMaterial && <p className="field-hint">Pin or drop notes, or type them above.</p>}
           </div>

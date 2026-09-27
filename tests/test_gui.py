@@ -165,7 +165,7 @@ class SecurityTests(GuiCase):
         status, value, headers = self.request('GET', '/api/status')
         self.assertEqual(status, 200)
         self.assertEqual(value['model'], MODEL)
-        self.assertFalse(value['online'])
+        self.assertTrue(value['online'])  # new work in the interface searches online unless unticked
         self.assertTrue(value['ollama']['reachable'])
         self.assertNotIn('pair_urls', value)
         self.assertEqual(headers['Cache-Control'], 'no-store')
@@ -470,9 +470,9 @@ class ResearchTests(GuiCase):
             text('The cited passage supports the description.'), text(draft)]
         started = self.ok('POST', '/api/research', {'kind': 'referee', 'goal': 'Review this manuscript.',
                                                     'source_files': ['manuscript.tex'], 'rounds': 2, 'tokens': 16000,
-                                                    'input_tokens': 50000, 'requests': 0, 'seconds': 60})
+                                                    'input_tokens': 50000, 'requests': 0, 'seconds': 60, 'online': False})
         job_id = started['id']
-        self.assertEqual(started['task']['label'], 'Referee report')
+        self.assertEqual(started['task']['label'], 'Review')
         self.assertEqual(self.wait_task(timeout=30)['state'], 'done')
         detail = self.ok('GET', f'/api/research/{job_id}')
         self.assertEqual(detail['status'], 'reviewed', detail['citation_issues'])
