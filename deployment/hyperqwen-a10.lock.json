@@ -7,9 +7,9 @@
   "dtype": "W4A16-AutoRound-fast;INT4-head;FP16-recurrent;BF16-KV",
   "host": "http://127.0.0.1:18020",
   "context": 40960,
-  "harness_tokens": 120000,
+  "harness_tokens": 80000,
   "solver_predict": 32768,
-  "rounds": 3,
+  "rounds": 2,
   "raw_seconds": 1800,
   "harness_seconds": 1800,
   "request_timeout": 1800,
@@ -31,6 +31,7 @@
     "EXTRA_ARGS": "--generation-config vllm --no-enable-prefix-caching"
   },
   "verify_tokens": 16384,
-  "min_solve_tokens": 16384,
+  "min_solve_tokens": 14000,
+  "repair_tokens": 14000,
   "verify_temperature": 0.6
 }

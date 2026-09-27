@@ -90,6 +90,8 @@ def parser():
     p.add_argument('--ctx', type=int, default=40960)
     p.add_argument('--predict', type=int, default=32768, help='Identical solver output ceiling in both arms')
     p.add_argument('--verify-tokens', type=int, default=16384, help='Output ceiling per proof verifier call, including thinking')
+    p.add_argument('--repair-tokens', type=int, default=None,
+                   help='Output ceiling for each repair/later proof attempt (default: predict)')
     p.add_argument('--min-solve-tokens', type=int, default=None,
                    help='Smallest context-fitted repair/continuation allowance (default: min(16384, predict))')
     p.add_argument('--verify-temperature', type=float, default=None, help='Verifier sampling temperature (default: --temperature)')
@@ -141,10 +143,14 @@ def preflight(args):
             raise ValueError(f'{name} must be finite and positive')
     if not math.isfinite(args.temperature) or not 0 <= args.temperature <= 2 or not math.isfinite(args.top_p) or not 0 < args.top_p <= 1:
         raise ValueError('Invalid sampling parameters')
+    if args.repair_tokens is None:
+        args.repair_tokens = args.predict
+    if not 128 <= args.repair_tokens <= args.predict:
+        raise ValueError('repair-tokens must be between 128 and predict')
     if args.min_solve_tokens is None:
-        args.min_solve_tokens = min(16384, args.predict)
-    if not 128 <= args.min_solve_tokens <= args.predict:
-        raise ValueError('min-solve-tokens must be between 128 and predict')
+        args.min_solve_tokens = min(16384, args.repair_tokens)
+    if not 128 <= args.min_solve_tokens <= args.repair_tokens:
+        raise ValueError('min-solve-tokens must be between 128 and repair-tokens')
     if args.verify_temperature is None:
         args.verify_temperature = args.temperature
     if not math.isfinite(args.verify_temperature) or not 0 <= args.verify_temperature <= 2:
@@ -311,7 +317,7 @@ def _proof(agent, goal, path, args):
     result = ProofRunner(agent).start(goal, max_rounds=args.rounds, max_tokens=args.tokens,
         max_seconds=args.seconds, source_files=(), max_predict=args.predict,
         verify_tokens=args.verify_tokens, min_solve_tokens=args.min_solve_tokens,
-        verify_temperature=args.verify_temperature)
+        verify_temperature=args.verify_temperature, repair_tokens=args.repair_tokens)
     usage, states = _proof_usage(agent.workspace.root)
     answer_path = path / 'answer.md'
     answer_path.write_text(result['answer'], encoding='utf-8')

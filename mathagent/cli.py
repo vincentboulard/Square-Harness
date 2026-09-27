@@ -148,6 +148,8 @@ def parser():
                    help='Output ceiling for each full solve or revision, including thinking')
     p.add_argument('--proof-verify-tokens', type=int, default=16384,
                    help='Output ceiling for each whole-proof review, including thinking')
+    p.add_argument('--proof-repair-tokens', type=int, default=None,
+                   help='Output ceiling for each repair/later attempt, including thinking (default: solve tokens)')
     p.add_argument('--proof-min-solve-tokens', type=int, default=None,
                    help='Smallest output allowance for a repair/continuation fitted to the context (default: min(16384, solve tokens))')
     p.add_argument('--proof-verify-temperature', type=float, default=None,
@@ -215,8 +217,10 @@ def main():
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
         p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
-    if args.proof_min_solve_tokens is not None and not 128 <= args.proof_min_solve_tokens <= args.proof_solve_tokens:
-        p.error('--proof-min-solve-tokens must be between 128 and --proof-solve-tokens')
+    if args.proof_repair_tokens is not None and not 128 <= args.proof_repair_tokens <= args.proof_solve_tokens:
+        p.error('--proof-repair-tokens must be between 128 and --proof-solve-tokens')
+    if args.proof_min_solve_tokens is not None and not 128 <= args.proof_min_solve_tokens <= (args.proof_repair_tokens or args.proof_solve_tokens):
+        p.error('--proof-min-solve-tokens must be between 128 and the repair allowance')
     if args.proof_verify_temperature is not None and (not math.isfinite(args.proof_verify_temperature)
                                                       or not 0 <= args.proof_verify_temperature <= 2):
         p.error('--proof-verify-temperature must be between 0 and 2')
@@ -352,7 +356,7 @@ def main():
             result = ProofRunner(agent, ui.emit).start(query, max_rounds=args.proof_rounds,
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                 max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
-                min_solve_tokens=args.proof_min_solve_tokens,
+                min_solve_tokens=args.proof_min_solve_tokens, repair_tokens=args.proof_repair_tokens,
                 verify_temperature=args.proof_verify_temperature, source_files=args.proof_file)
             proof_running = False
             proof_result(result)

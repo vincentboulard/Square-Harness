@@ -20,6 +20,9 @@ no extra reviews. One review still decides, and uncertainty still stops the job.
   instruction.
 - Default request timeout 1,800 s; another attempt starts only if the measured
   first cycle fits in the remaining time. CLI notice for unpinned files.
+- Separate repair allowance (`--proof-repair-tokens`). The HyperQwen A10 profile now
+  uses 80,000 tokens per job: a 32,768-token solve and 16,384-token review, then at
+  most one repair of 14,000 tokens plus its review. `run-hyperqwen-benchmark.py --arms`.
 
 ## 0.5.0 — 2026-09-27
 

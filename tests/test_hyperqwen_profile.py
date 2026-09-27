@@ -105,12 +105,18 @@ class HyperQwenProfileTests(unittest.TestCase):
         launch_path = self.root / 'launch.json'
         launch_path.write_text(json.dumps({'image': lock['image'], 'env': lock['server_env']}))
         args = argparse.Namespace(manifest=self.manifest, output=self.root/'output',
-                                  launch_record=launch_path, acceptance=None, dry_run=True)
+                                  launch_record=launch_path, acceptance=None, dry_run=True,
+                                  arms=['raw-single', 'proof'])
         with patch.object(profile, 'verify_live', side_effect=AssertionError('network')):
             _, _, _, _, plan = profile.prepare(args)
         self.assertEqual(plan['jobs'], 20)
-        self.assertEqual(plan['generated_token_ceiling'], 1527680)
+        self.assertEqual(plan['generated_token_ceiling'], 10 * 32768 + 10 * 80000)
         self.assertEqual(plan['nominal_job_time_ceiling_seconds'], 36000)
+        proof_only = argparse.Namespace(**{**vars(args), 'arms': ['proof'], 'output': self.root / 'proof-only'})
+        _, _, parsed, _, solo = profile.prepare(proof_only)
+        self.assertEqual((solo['jobs'], solo['generated_token_ceiling']), (10, 800000))
+        self.assertEqual(solo['nominal_job_time_ceiling_seconds'], 18000)
+        self.assertEqual((parsed.repair_tokens, parsed.min_solve_tokens, parsed.rounds), (14000, 14000, 2))
         accepted = {'ok': True, 'launch_sha256': profile.read(launch_path)[1],
                     'profile_lock_sha256': profile.read(ROOT / 'deployment/hyperqwen-a10.lock.json')[1],
                     'code_sha256': plan['code_sha256'],

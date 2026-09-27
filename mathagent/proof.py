@@ -121,7 +121,7 @@ class ProofRunner:
 
     def start(self, goal, *, max_rounds=3, max_tokens=120000, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
-              min_solve_tokens=None, verify_temperature=None):
+              min_solve_tokens=None, verify_temperature=None, repair_tokens=None):
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 60000:
             raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
         for name, value, lower, upper in (
@@ -130,10 +130,14 @@ class ProofRunner:
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError(f'{name} must be an integer between {lower} and {upper}')
+        if repair_tokens is None:
+            repair_tokens = max_predict
+        if type(repair_tokens) is not int or not 128 <= repair_tokens <= max_predict:
+            raise ValueError('repair_tokens must be an integer between 128 and max_predict')
         if min_solve_tokens is None:
-            min_solve_tokens = min(16384, max_predict)
-        if type(min_solve_tokens) is not int or not 128 <= min_solve_tokens <= max_predict:
-            raise ValueError('min_solve_tokens must be an integer between 128 and max_predict')
+            min_solve_tokens = min(16384, repair_tokens)
+        if type(min_solve_tokens) is not int or not 128 <= min_solve_tokens <= repair_tokens:
+            raise ValueError('min_solve_tokens must be an integer between 128 and repair_tokens')
         if verify_temperature is None:
             verify_temperature = self.agent.temperature
         if (isinstance(verify_temperature, bool) or not isinstance(verify_temperature, (int, float))
@@ -151,7 +155,8 @@ class ProofRunner:
             sources.append({'path': str(path), 'content': text, 'sha256': _digest(text)})
         settings = dict(self._provenance(), max_rounds=max_rounds, max_tokens=max_tokens,
                         max_seconds=max_seconds, max_predict=max_predict, verify_tokens=verify_tokens,
-                        min_solve_tokens=min_solve_tokens, verify_temperature=verify_temperature)
+                        min_solve_tokens=min_solve_tokens, verify_temperature=verify_temperature,
+                        repair_tokens=repair_tokens)
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources)
         self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
@@ -190,9 +195,13 @@ class ProofRunner:
     def _remaining(self):
         return self.state['settings']['max_tokens'] - self.state['tokens_charged']
 
-    def _reserve_attempt(self):
+    def _attempt_cap(self, kind):
         settings = self.state['settings']
-        needed = settings['max_predict'] + settings['verify_tokens']
+        return settings['max_predict'] if kind == 'initial' else settings.get('repair_tokens', settings['max_predict'])
+
+    def _reserve_attempt(self, kind='initial'):
+        settings = self.state['settings']
+        needed = self._attempt_cap(kind) + settings['verify_tokens']
         if self._remaining() < needed:
             raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
         if self._elapsed() >= settings['max_seconds']:
@@ -261,7 +270,7 @@ class ProofRunner:
         if self.state['rounds_started'] >= self.state['settings']['max_rounds']:
             self._stop('attempts_exhausted', 'Attempt limit reached; retained candidates and unresolved reviews remain available.')
             return
-        self._reserve_attempt()
+        self._reserve_attempt(kind)
         self.state['rounds_started'] += 1
         self.state['pending'] = {'phase': 'solve', 'kind': kind, 'parent': parent, 'review': review,
                                  'index': self.state['rounds_started'], 'review_attempt': 0}
@@ -303,9 +312,10 @@ class ProofRunner:
                 client.timeout = old_timeout
 
     def _solver_cap(self, messages, pending):
-        """The initial solve keeps the direct-call allowance; later calls fit the context."""
+        """The initial solve keeps the direct-call allowance; later calls use the repair
+        allowance, fitted to the context for repairs and continuations."""
         settings = self.state['settings']
-        cap = settings['max_predict']
+        cap = self._attempt_cap(pending['kind'])
         if pending['kind'] not in {'initial', 'retry'}:
             floor = settings.get('min_solve_tokens', cap)
             count = self._count(messages, floor)

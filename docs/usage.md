@@ -65,6 +65,7 @@ including agreement after repair, is not a formal proof certificate.
 | `--proof-tokens` | 120,000 | Generated-token ceiling for the entire job |
 | `--proof-rounds` | 3 | Maximum solver attempts, including the first |
 | `--proof-seconds` | 1,800 | Active job time allowance in seconds |
+| `--proof-repair-tokens` | solve tokens | Maximum generated tokens for each repair or later attempt |
 | `--proof-min-solve-tokens` | min(16,384, solve) | Smallest context-fitted repair/continuation allowance |
 | `--proof-verify-temperature` | `--temperature` | Verifier sampling temperature |
 | `--request-timeout` | 1,800 | Maximum seconds for a single request |

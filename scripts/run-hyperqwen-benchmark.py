@@ -28,11 +28,12 @@ def prepare(args):
     cli = ['--manifest', str(args.manifest), '--output', str(args.output),
            '--backend', 'openai', '--host', lock['host'], '--model', lock['model'],
            '--model-revision', lock['model_revision'], '--server-image', lock['image'],
-           '--dtype', lock['dtype'], '--arms', 'raw-single', 'proof',
+           '--dtype', lock['dtype'], '--arms', *args.arms,
            '--ctx', str(lock['context']),
            '--tokens', str(lock['harness_tokens']), '--predict', str(lock['solver_predict']),
            '--verify-tokens', str(lock['verify_tokens']), '--rounds', str(lock['rounds']),
            '--min-solve-tokens', str(lock['min_solve_tokens']),
+           '--repair-tokens', str(lock['repair_tokens']),
            '--verify-temperature', str(lock['verify_temperature']),
            '--raw-seconds', str(lock['raw_seconds']), '--seconds', str(lock['harness_seconds']),
            '--request-timeout', str(lock['request_timeout']), '--seed', str(lock['seed']),
@@ -51,9 +52,11 @@ def prepare(args):
     plan['serving'] = {'profile': lock['profile'], 'lock_sha256': lock_hash,
                        'launch_record_sha256': launch_hash, 'launch_record': launch,
                        'acceptance_sha256': acceptance_hash, 'acceptance': acceptance}
-    plan['resource_comparison'] = ('Both initial solves allow 32768 output tokens; proof allows 120000 total '
-        'including verification and repairs. Total budgets are not matched to direct. This v0.5 configuration has not been GPU-validated by the software tests.')
-    plan['nominal_job_time_ceiling_seconds'] = 10 * (lock['raw_seconds'] + lock['harness_seconds'])
+    plan['resource_comparison'] = (f"Initial solves allow {lock['solver_predict']} output tokens; proof allows "
+        f"{lock['harness_tokens']} total per job, with each repair limited to {lock['repair_tokens']} plus its "
+        f"{lock['verify_tokens']}-token verification. Total budgets are not matched to direct.")
+    plan['nominal_job_time_ceiling_seconds'] = 10 * sum(
+        lock['raw_seconds'] if arm == 'raw-single' else lock['harness_seconds'] for arm in args.arms)
     return lock, launch, parsed, data, plan
 
 
@@ -77,6 +80,8 @@ def main(argv=None):
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--launch-record', type=Path, required=True)
     p.add_argument('--acceptance', type=Path, help='Optional prior readiness record; if provided, its source/launch/policy hashes must match')
+    p.add_argument('--arms', nargs='+', choices=benchmark.ARMS, default=list(benchmark.ARMS),
+                   help='Benchmark arms to run (default: raw-single proof)')
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args(argv)
     lock, launch, parsed, data, plan = prepare(args)

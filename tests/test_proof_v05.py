@@ -531,5 +531,24 @@ class ProofV051RealSizeTests(unittest.TestCase):
         self.assertEqual((kwargs['min_solve_tokens'], kwargs['verify_temperature']), (16384, .6))
 
 
+    def test_repair_allowance_is_separate_and_gates_the_second_attempt(self):
+        client = ExactClient([[event(PROOF_7KB, count=20000)], [event(LONG_OBJECTION, count=9000)],
+                              [event('Repaired complete proof.', count=12000)], [event(approval(), count=8000)]])
+        runner, result = self.start(client, max_tokens=80000, repair_tokens=14000, min_solve_tokens=14000)
+        self.assertEqual([r['options']['num_predict'] for r in client.requests], [32768, 16384, 14000, 16384])
+        self.assertEqual(result['status'], 'candidate_complete')
+        self.assertEqual(result['answer'], 'Repaired complete proof.')
+        # A first cycle that used its full ceilings still leaves room for one bounded repair.
+        runner.state['tokens_charged'] = 32768 + 16384
+        runner._reserve_attempt('repair')
+        runner.state['tokens_charged'] = 80000 - 14000 - 16384 + 1
+        with self.assertRaisesRegex(ProofBudget, '30384 tokens must remain'):
+            runner._reserve_attempt('repair')
+
+    def test_minimum_allowance_cannot_exceed_repair_allowance(self):
+        with self.assertRaisesRegex(ValueError, 'min_solve_tokens'):
+            self.start(ExactClient([]), repair_tokens=14000, min_solve_tokens=16384)
+
+
 if __name__ == '__main__':
     unittest.main()
