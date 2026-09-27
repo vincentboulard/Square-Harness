@@ -94,14 +94,14 @@ class ResearchCliTests(unittest.TestCase):
             self.run_cli(['--research-requests', '-1', '--prompt', '/status'])
         self.client.models.assert_not_called()
 
-    def test_proof_literature_requires_separate_flag(self):
+    def test_proof_does_not_acquire_literature_tools_from_online_chat(self):
         proof = Mock()
         proof.start.return_value = dict(self.result, status='paused')
         with patch.object(cli, 'ProofRunner', return_value=proof):
             self.assertEqual(self.run_cli(['--online', '--prompt', 'Prove x=x.']), 0)
             self.assertNotIn('allow_literature', proof.start.call_args.kwargs)
-            self.assertEqual(self.run_cli(['--online', '--proof-literature', '--prompt', 'Prove x=x.']), 0)
-            self.assertTrue(proof.start.call_args.kwargs['allow_literature'])
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_cli(['--online', '--proof-literature', '--prompt', 'Prove x=x.'])
 
 
 if __name__ == '__main__':

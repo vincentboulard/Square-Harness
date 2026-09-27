@@ -1,6 +1,8 @@
 """Model transports with the harness's native message/event interface."""
 import copy
 import json
+import math
+import os
 import time
 from http.client import HTTPException
 from urllib.parse import urlsplit
@@ -8,6 +10,24 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler
 
 from .agent import AgentError, Ollama, _NoModelRedirects
+
+
+def openai_thinking_budget_policy():
+    """Opt-in vLLM extension, inherited by isolated workers and frozen in plans."""
+    policy = {}
+    for key, variable in [('ordinary', 'SQUARE_OPENAI_THINKING_FRACTION'),
+                          ('structured', 'SQUARE_OPENAI_STRUCTURED_THINKING_FRACTION')]:
+        raw = os.environ.get(variable)
+        if raw is None:
+            continue
+        try:
+            fraction = float(raw)
+        except ValueError as exc:
+            raise AgentError(variable + ' must be a fraction in [0, 1)') from exc
+        if not math.isfinite(fraction) or not 0 <= fraction < 1:
+            raise AgentError(variable + ' must be a fraction in [0, 1)')
+        policy[key] = fraction
+    return policy
 
 
 class TokenBudgetError(AgentError):
@@ -96,12 +116,14 @@ class OpenAICompatible:
             raise AgentError('Model host must be an HTTP(S) URL without credentials, query or fragment')
         self.base_url = self.host if parsed.path.rstrip('/').endswith('/v1') else self.host + '/v1'
         self.timeout = timeout
+        self.thinking_budget_policy = openai_thinking_budget_policy() if self.backend == 'openai' else {}
+        self._tokenize_supported = None
         self.opener = build_opener(ProxyHandler({}), _NoModelRedirects())
 
     def request(self, endpoint, data=None):
         return self._request_url(self.base_url + endpoint, data)
 
-    def _request_url(self, url, data=None):
+    def _request_url(self, url, data=None, *, optional=False):
         request = Request(url,
                           data=None if data is None else json.dumps(data, ensure_ascii=False).encode(),
                           headers={'Content-Type': 'application/json', 'Accept': 'text/event-stream' if data else 'application/json'})
@@ -110,6 +132,8 @@ class OpenAICompatible:
         except HTTPError as exc:
             with exc:
                 detail = exc.read(2000).decode(errors='replace')
+                if optional and exc.code in {404, 405}:
+                    return None
             raise AgentError(f'Model server HTTP {exc.code}: {detail}') from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise AgentError(f'Cannot reach model server at {self.host}: {exc}') from exc
@@ -124,6 +148,37 @@ class OpenAICompatible:
             return [item['id'] for item in models]
         except (ValueError, KeyError, TypeError, AttributeError, OSError, HTTPException) as exc:
             raise AgentError('Malformed model list from server') from exc
+
+    def count_input_tokens(self, payload):
+        """Use vLLM's chat-template tokenizer; other compatible hosts may lack it.
+
+        No generation is performed. None means the endpoint is unavailable,
+        not that an empty prompt was measured. Invalid successful replies and
+        server/network failures remain errors rather than bypassing the check.
+        """
+        if self._tokenize_supported is False:
+            return None
+        data = self._payload(payload)
+        request = {key: data[key] for key in ('model', 'messages', 'chat_template_kwargs', 'tools') if key in data}
+        request.update(add_generation_prompt=True, add_special_tokens=False)
+        root = self.base_url[:-3]  # base_url always ends in /v1, retain proxy path prefixes
+        response = self._request_url(root + '/tokenize', request, optional=True)
+        if response is None:
+            self._tokenize_supported = False
+            return None
+        self._tokenize_supported = True
+        try:
+            with response:
+                result = json.load(response)
+            count, context = result['count'], result['max_model_len']
+            if type(count) is not int or count < 0 or type(context) is not int or context <= 0:
+                raise ValueError('Invalid count or model context')
+        except (ValueError, KeyError, TypeError, OSError, HTTPException) as exc:
+            raise AgentError('Malformed tokenizer response from model server') from exc
+        requested = payload.get('options', {}).get('num_ctx')
+        if type(requested) is int and requested > context:
+            raise AgentError(f'Requested context {requested} exceeds server context {context}')
+        return count
 
     def _payload(self, payload):
         options = payload.get('options', {})
@@ -152,6 +207,11 @@ class OpenAICompatible:
             data['structured_outputs'] = {'json': copy.deepcopy(schema)}
         elif schema is not None:
             raise AgentError('Unsupported structured output format')
+        fraction = self.thinking_budget_policy.get('structured' if schema else 'ordinary')
+        if fraction is not None and payload.get('think', True):
+            if type(cap) is not int or cap <= 0:
+                raise AgentError('A thinking budget requires an explicit total output cap')
+            data['thinking_token_budget'] = int(cap * fraction)
         return data
 
     @staticmethod

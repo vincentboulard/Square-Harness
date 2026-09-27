@@ -140,18 +140,19 @@ def _number(value, name: str, *, positive: bool = False, integer: bool = False) 
 
 def _validate(state: dict, proof_id: str) -> None:
     if not isinstance(state, dict) or type(state.get("version")) is not int:
-        raise LedgerError("Missing proof ledger version (expected 1).")
-    if state["version"] != 1:
-        raise _VersionError("Unsupported proof ledger version (expected 1).")
+        raise LedgerError("Missing proof store version (expected 1 or 2).")
+    if state["version"] not in {1, 2}:
+        raise _VersionError("Unsupported proof store version (expected 1 or 2).")
     if state.get("id") != proof_id:
         raise LedgerError("Proof ledger ID does not match its directory.")
-    for key in ("goal", "status", "created_at", "updated_at", "next_task"):
+    for key in ("goal", "status", "created_at", "updated_at") + (("next_task",) if state["version"] == 1 else ()):
         if not isinstance(state.get(key), str) or (key != "next_task" and not state[key].strip()):
             raise LedgerError(f"Missing or invalid ledger field: {key}")
-    for key in ("revision", "rounds_started", "tokens_charged", "stagnant_rounds"):
+    for key in ("revision", "rounds_started", "tokens_charged") + (("stagnant_rounds",) if state["version"] == 1 else ()):
         _number(state.get(key), key, integer=True)
     _number(state.get("seconds_used"), "seconds_used")
-    for key in ("calls", "rounds", "claims", "sources"):
+    entries = ("calls", "rounds", "claims") if state["version"] == 1 else ("calls", "candidates", "reviews")
+    for key in entries + ("sources",):
         if not isinstance(state.get(key), list):
             raise LedgerError(f"Ledger field must be a list: {key}")
     for source in state["sources"]:
@@ -166,7 +167,7 @@ def _validate(state: dict, proof_id: str) -> None:
             digest = hashlib.sha256(_bytes(source["content"])).hexdigest()
             if source["sha256"] != digest:
                 raise LedgerError("Pinned source digest does not match its saved content.")
-    for key in ("calls", "rounds", "claims"):
+    for key in entries:
         if any(not isinstance(item, dict) for item in state[key]):
             raise LedgerError(f"Ledger entries must be objects: {key}")
     if not isinstance(state.get("settings"), dict):
@@ -174,13 +175,13 @@ def _validate(state: dict, proof_id: str) -> None:
     for key in ("max_rounds", "max_tokens", "max_seconds"):
         if key not in state["settings"]:
             raise LedgerError(f"Missing required proof budget: settings.{key}")
-    for key in ("max_rounds", "token_budget", "max_tokens", "time_budget", "max_seconds", "predict", "ctx", "max_predict"):
+    for key in ("max_rounds", "token_budget", "max_tokens", "time_budget", "max_seconds", "predict", "ctx", "max_predict", "verify_tokens"):
         if key in state["settings"]:
             _number(state["settings"][key], f"settings.{key}", positive=True,
-                    integer=key in {"max_rounds", "token_budget", "max_tokens", "predict", "ctx", "max_predict"})
+                    integer=key in {"max_rounds", "token_budget", "max_tokens", "predict", "ctx", "max_predict", "verify_tokens"})
     if "truncation_streak" in state:
         _number(state["truncation_streak"], "truncation_streak", integer=True)
-    for key in ("pending", "final_audit"):
+    for key in (("pending", "final_audit") if state["version"] == 1 else ("pending",)):
         if key not in state or (state[key] is not None and not isinstance(state[key], dict)):
             raise LedgerError(f"Ledger field must be an object or null: {key}")
 
@@ -216,12 +217,11 @@ class ProofStore:
         except (TypeError, ValueError) as exc:
             raise LedgerError(f"Proof settings and sources must be JSON serializable: {exc}") from exc
         state = {
-            "version": 1, "id": proof_id, "goal": goal, "settings": settings,
+            "version": 2, "id": proof_id, "goal": goal, "settings": settings,
             "sources": sources, "created_at": stamp, "updated_at": stamp, "revision": 0,
             "status": "ready", "rounds_started": 0, "tokens_charged": 0,
-            "seconds_used": 0, "calls": [], "rounds": [], "claims": [],
-            "next_task": "Explore a promising proof strategy and establish one useful intermediate claim.",
-            "stagnant_rounds": 0, "pending": None, "final_audit": None,
+            "seconds_used": 0, "calls": [], "candidates": [], "reviews": [],
+            "initial_candidate": None, "selected_candidate": None, "selection_history": [], "pending": None,
         }
         _validate(state, proof_id)
         base = workspace / ".mathagent"
@@ -300,8 +300,13 @@ class ProofStore:
         with self._file_lock("run.lock"):
             yield self
 
+    def _writable(self) -> None:
+        if self.state.get("version") == 1:
+            raise LedgerError("Legacy v1 proofs are read-only in v0.5; inspect their saved artifacts or start a new proof.")
+
     def save(self) -> None:
-        """Commit state atomically, rejecting another writer's newer revision."""
+        """Commit v2 state atomically; legacy v1 records are read-only."""
+        self._writable()
         with self._file_lock("state.lock"):
             main = self.directory / "state.json"
             backup = self.directory / "state.backup.json"
@@ -339,6 +344,7 @@ class ProofStore:
         return self._new_artifact(label, b"", "jsonl")
 
     def _new_artifact(self, label: str, data: bytes, extension: str) -> str:
+        self._writable()
         self._check_paths()
         if not isinstance(label, str) or not label.strip() or any(v in label for v in ("/", "\\", "..")):
             raise LedgerError("Artifact label must be a simple name without path components.")
@@ -379,6 +385,7 @@ class ProofStore:
 
     def append_stream(self, filename: str, event: dict) -> None:
         """Append and flush an event; a killed process may leave a partial last line."""
+        self._writable()
         self._check_paths()
         if (not isinstance(filename, str) or not _ARTIFACT.fullmatch(filename)
                 or ".." in filename or not filename.endswith(".jsonl")):
@@ -419,15 +426,18 @@ class ProofStore:
         return _read(self.directory / "artifacts" / filename)
 
     def write_report(self, text: str) -> None:
+        self._writable()
         self._check_paths()
         _atomic_write(self.directory / "report.md", _bytes(text))
 
     def write_ledger(self, text: str) -> None:
+        self._writable()
         self._check_paths()
         _atomic_write(self.directory / "ledger.md", _bytes(text))
 
     def write_proof(self, text: str) -> None:
-        """Export the exact audited candidate separately from its audit trail."""
+        """Export the exact selected candidate; report.md states its review status."""
+        self._writable()
         self._check_paths()
         _atomic_write(self.directory / "proof.md", _bytes(text))
 

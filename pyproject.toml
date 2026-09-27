@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "square-harness"
-version = "0.4.0"
-description = "An experimental local-first harness for mathematical research with Ollama, llama.cpp or vLLM"
+version = "0.5.0"
+description = "An experimental solve-verify-repair harness for mathematical proof work"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

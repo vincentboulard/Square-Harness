@@ -461,3 +461,43 @@ class LlamaCppBackendTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class VllmContextCountTests(unittest.TestCase):
+    def payload(self):
+        return {'model': 'square-qwen', 'messages': [{'role': 'user', 'content': 'Check α=α.'}],
+                'think': True, 'options': {'num_ctx': 40960, 'num_predict': 32768}}
+
+    def test_exact_chat_count_preserves_template_and_proxy_prefix(self):
+        response = json.dumps({'count': 21, 'max_model_len': 40960, 'tokens': [1] * 21}).encode()
+        with fixture(response) as (client, requests, paths):
+            client = OpenAICompatible(client.host + '/proxy/v1')
+            self.assertEqual(client.count_input_tokens(self.payload()), 21)
+            self.assertEqual(paths, ['/proxy/tokenize'])
+            self.assertEqual(requests[0]['messages'], self.payload()['messages'])
+            self.assertTrue(requests[0]['chat_template_kwargs']['enable_thinking'])
+            self.assertTrue(requests[0]['add_generation_prompt'])
+            self.assertFalse(requests[0]['add_special_tokens'])
+            self.assertNotIn('max_completion_tokens', requests[0])
+
+    def test_missing_endpoint_is_cached_as_unavailable_not_zero_tokens(self):
+        for status in (404, 405):
+            with self.subTest(status=status), fixture(b'not supported', status=status) as (client, requests, paths):
+                self.assertIsNone(client.count_input_tokens(self.payload()))
+                self.assertIsNone(client.count_input_tokens(self.payload()))
+                self.assertEqual(len(requests), 1)
+
+    def test_malformed_count_and_server_failure_do_not_bypass_context_guard(self):
+        for value in ({'count': True, 'max_model_len': 40960}, {'count': -1, 'max_model_len': 40960},
+                      {'count': 10}, {'count': 10, 'max_model_len': 0}):
+            with self.subTest(value=value), fixture(json.dumps(value).encode()) as (client, _, __):
+                with self.assertRaisesRegex(AgentError, 'Malformed tokenizer'):
+                    client.count_input_tokens(self.payload())
+        with fixture(b'failure', status=500) as (client, _, __):
+            with self.assertRaisesRegex(AgentError, 'HTTP 500'):
+                client.count_input_tokens(self.payload())
+
+    def test_server_context_must_cover_requested_context(self):
+        with fixture(json.dumps({'count': 10, 'max_model_len': 8192}).encode()) as (client, _, __):
+            with self.assertRaisesRegex(AgentError, 'exceeds server context'):
+                client.count_input_tokens(self.payload())

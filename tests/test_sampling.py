@@ -35,7 +35,7 @@ class SamplingTests(unittest.TestCase):
             client.stream = Mock(side_effect=TokenBudgetError(stats, 512))
             agent = Agent(client, Workspace(temporary), ctx=16384, predict=512)
             runner = ProofRunner(agent)
-            result = runner.start('Prove that x=x.', max_tokens=8000)
+            result = runner.start('Prove that x=x.', max_tokens=8000, max_predict=512, verify_tokens=512)
             self.assertEqual(result['status'], 'budget_violation')
             self.assertEqual(runner.state['tokens_charged'], 513)
             self.assertEqual(runner.state['calls'][0]['stats'], stats)
@@ -48,7 +48,7 @@ class SamplingTests(unittest.TestCase):
             agent = Agent(client, Workspace(temporary), ctx=16384, predict=512,
                           seed=42, temperature=0.4, top_p=0.9)
             runner = ProofRunner(agent)
-            result = runner.start('Prove that x=x for every real x.', max_tokens=8000)
+            result = runner.start('Prove that x=x for every real x.', max_tokens=8000, max_predict=512, verify_tokens=512)
             self.assertEqual(result['status'], 'paused')
             self.assertEqual(client.requests[0]['options']['seed'], 42)
             self.assertEqual(client.requests[0]['options']['temperature'], 0.4)
@@ -61,7 +61,7 @@ class SamplingTests(unittest.TestCase):
             self.assertGreaterEqual(resumed.state['tokens_charged'], charged)
             client.backend = 'ollama'
             count = len(client.requests)
-            with self.assertRaisesRegex(ValueError, 'original --backend'):
+            with self.assertRaisesRegex(ValueError, 'changed backend'):
                 ProofRunner(agent).resume(result['id'])
             self.assertEqual(len(client.requests), count)
 
@@ -87,22 +87,6 @@ class SamplingTests(unittest.TestCase):
                     cli.main()
             factory.assert_not_called()
 
-    def test_parallel_cli_does_not_advertise_a_missing_selected_answer(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            client, ui = Mock(), Mock()
-            client.models.return_value = ['square-qwen']
-            with patch('sys.argv', ['square-harness', '--backend', 'openai',
-                        '--workspace', temporary, '--ctx', '32768', '--proof-workers', '3',
-                        '--prompt', 'Prove that x=x.']), \
-                    patch.object(cli, 'UI', return_value=ui), \
-                    patch.object(cli, 'OpenAICompatible', return_value=client), \
-                    patch('mathagent.portfolio.run_proof_portfolio', return_value={
-                        'status': 'no_complete_candidate', 'answer_path': None}) as run:
-                self.assertEqual(cli.main(), 0)
-                self.assertEqual(run.call_args.kwargs['workers'], 3)
-                output = '\n'.join(str(call.args[0]) for call in ui.say.call_args_list)
-                self.assertIn('No candidate was selected', output)
-                self.assertNotIn('Selected answer:', output)
 
 
 if __name__ == '__main__':

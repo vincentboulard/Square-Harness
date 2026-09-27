@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import sys
-import uuid
 from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
@@ -19,6 +18,7 @@ from .ledger import ProofStore
 from .tools import Workspace
 from .literature import LiteratureTools
 from .research import ResearchRunner
+from . import __version__
 
 # Never let model/file content inject terminal escape sequences.
 def clean(text):
@@ -95,7 +95,7 @@ class UI:
 
 
 HELP = '''Commands
-  /prove [goal]                      Persistent, bounded proof search (default mode)
+  /prove [goal]                      Solve, verify, then repair if needed (default mode)
   /critic, /explore [query]            Ordinary conversational modes
   /literature [topic]                 Saved bibliographical research and Markdown report
   /referee [task or manuscript]       Saved manuscript review with literature checks
@@ -104,10 +104,10 @@ HELP = '''Commands
   /research-resume <id>               Resume a research job with its saved budgets
   /skills                            Show the built-in report skills
   /resume [proof-id]                  Resume a saved proof with its remaining budget
-  /ledger [proof-id]                  Read its saved debrief (works offline)
+  /proof-report [proof-id]            Read its saved report (works offline; /ledger alias)
   /proofs                            List saved proof jobs (works offline)
   /review                            Fresh-context critique of the last answer/debrief
-  /think on|off                      Toggle model reasoning
+  /think on|off                      Toggle chat reasoning; proof work always uses thinking
   /context N                         Change context allocation (e.g. 16384)
   /clear                             Clear conversation history
   /status                            Model, settings and latest token statistics
@@ -120,46 +120,39 @@ Python is opt-in (--allow-python), always approved per call, and NOT sandboxed.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
 Offline is the default: a loopback model server and cached/local sources only.
-External research requires --online. Proof tools require --proof-literature too.
+External research requires --online. Proof mode uses pinned text and no tools.
 Reports save automatically in .mathagent/research/; --output exports Markdown.
 '''
 
 
 def parser():
     p = argparse.ArgumentParser(description='Square Harness: a small local mathematics agent')
+    p.add_argument('--version', action='version', version='Square Harness ' + __version__)
     p.add_argument('--backend', choices=('ollama', 'openai', 'llamacpp'), default='ollama',
                    help='Model protocol: ollama, openai (vLLM), or llamacpp (with exact context checks)')
     p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for other servers)')
     p.add_argument('--workspace', type=Path, default=Path.cwd())
     p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
     p.add_argument('--request-timeout', type=float, default=600, help='Maximum seconds per model request')
-    p.add_argument('--proof-selection-seconds', type=float, default=300, help='Reserved review time for parallel proofs, at most one quarter of the job')
     p.add_argument('--seed', type=int, help='Base sampling seed; saved proof jobs retain their original seed')
     p.add_argument('--temperature', type=float, default=0.6, help='Solver/chat temperature; proof reviews remain at zero')
     p.add_argument('--top-p', type=float, default=0.95)
-    p.add_argument('--ctx', type=int, default=8192)
+    p.add_argument('--ctx', type=int, default=40960)
     p.add_argument('--predict', type=int, default=4096,
-                   help='Ordinary-chat output limit and initial proof solver allowance, including thinking')
+                   help='Ordinary-chat output limit, including thinking; proof has separate limits')
     p.add_argument('--max-rounds', type=int, default=8, help='Tool rounds per ordinary chat query (not proof rounds)')
-    p.add_argument('--proof-rounds', type=int, default=10, help='Maximum mathematical work rounds per new proof (1–100)')
-    p.add_argument('--proof-workers', type=int, default=1,
-                   help='Independent parallel proof branches; 1 keeps the sequential workflow (1–4)')
-    p.add_argument('--proof-strategy', choices=('independent', 'cooperative'), default='independent',
-                   help='Independent proof search (default), or advisor-planned cooperative subproblems')
-    p.add_argument('--cooperative-concurrency', type=int, default=3,
-                   help='Maximum active cooperative proof workers (1–3); does not set the number of tasks')
-    p.add_argument('--proof-branch-concurrency', type=int, default=None,
-                   help='Active proof branches at once; defaults to proof-workers, use 1 for a single inference slot')
-    p.add_argument('--proof-tokens', type=int, default=60000, help='Total generated-token budget per new proof, including review (minimum 512)')
+    p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
+    p.add_argument('--proof-tokens', type=int, default=120000, help='Total generated-token ceiling, including all thinking and verification')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
-    p.add_argument('--proof-max-predict', type=int, default=8192,
-                   help='Adaptive proof solver output ceiling; must be >= --predict for new proofs (default: %(default)s)')
+    p.add_argument('--proof-solve-tokens', type=int, default=32768,
+                   help='Output ceiling for each full solve or revision, including thinking')
+    p.add_argument('--proof-verify-tokens', type=int, default=16384,
+                   help='Output ceiling for each whole-proof review, including thinking')
     p.add_argument('--proof-file', action='append', default=[], metavar='PATH',
                    help='Pin a complete theorem source relative to workspace; repeat for multiple files')
     network = p.add_mutually_exclusive_group()
     network.add_argument('--online', action='store_true', help='Allow external literature/search requests; queries leave this computer')
     network.add_argument('--offline', action='store_true', help='Use a loopback model server and local/cached sources only (default)')
-    p.add_argument('--proof-literature', action='store_true', help='Opt a NEW proof into literature tools; separate from --online')
     p.add_argument('--research-file', action='append', default=[], metavar='PATH', help='Pin a local manuscript/source for a report; repeat for multiple files')
     p.add_argument('--research-rounds', type=int, default=6, help='Maximum investigation rounds per new report')
     p.add_argument('--research-tokens', type=int, default=24000, help='Total generated-token budget per new report')
@@ -210,30 +203,14 @@ def main():
             or not math.isfinite(args.top_p) or not 0 < args.top_p <= 1
             or args.seed is not None and not 0 <= args.seed < 2 ** 31):
         p.error('Use temperature 0–2, top-p in (0, 1], and seed in [0, 2**31)')
-    if (not math.isfinite(args.request_timeout) or args.request_timeout <= 0
-            or not math.isfinite(args.proof_selection_seconds) or args.proof_selection_seconds <= 0):
-        p.error('Request timeout and proof selection seconds must be finite and positive')
+    if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+        p.error('Request timeout must be finite and positive')
     if args.ctx < 2048 or not 0 < args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
         p.error('Use ctx >= 2048, 0 < predict < ctx - 1024, and 1 <= max-rounds <= 32')
     if (not 1 <= args.proof_rounds <= 100 or args.proof_tokens < 512
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
-            or args.proof_max_predict < 128):
-        p.error('Use 1 <= proof-rounds <= 100, proof-tokens >= 512, finite proof-seconds > 0, and proof-max-predict >= 128')
-    if not 1 <= args.proof_workers <= 4:
-        p.error('Use proof-workers in 1–4')
-    if not 1 <= args.cooperative_concurrency <= 3:
-        p.error('Use cooperative-concurrency in 1–3')
-    if args.proof_strategy == 'cooperative':
-        if args.proof_workers != 1 or args.proof_branch_concurrency is not None:
-            p.error('Cooperative strategy uses --cooperative-concurrency; do not combine it with independent proof-worker settings')
-        if args.proof_literature or args.resume is not None:
-            p.error('Cooperative parents start fresh and do not support proof literature or parent resume')
-        if args.proof_tokens < 8192:
-            p.error('Cooperative proof work requires proof-tokens >= 8192')
-    if args.proof_branch_concurrency is not None and not 1 <= args.proof_branch_concurrency <= args.proof_workers:
-        p.error('Use proof-branch-concurrency between 1 and proof-workers')
-    if args.proof_workers > 1 and (args.proof_literature or args.resume is not None):
-        p.error('Parallel portfolios start fresh and do not support proof literature or parent resume')
+            or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
+        p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
     if (not 1 <= args.research_rounds <= 50 or args.research_tokens < 1024
             or args.research_input_tokens < 2048 or not math.isfinite(args.research_seconds)
             or args.research_seconds <= 0 or not 0 <= args.research_requests <= 100
@@ -265,15 +242,14 @@ def main():
     except (AgentError, OSError, ValueError) as e:
         ui.say(str(e))
         return 2
-    ui.say(f'╭─ SQUARE HARNESS · v0.4\n│ {agent.model} · {args.host}\n'
+    ui.say(f'╭─ SQUARE HARNESS · v{__version__}\n│ {agent.model} · {args.host}\n'
            f'│ Workspace: {workspace.root}\n│ Context {agent.ctx} · max output {agent.predict} · mode {agent.mode}\n'
-           f'│ Research: {"online" if args.online else "offline (local/cache only)"} · proof literature: {"enabled for new jobs" if args.proof_literature else "disabled"}\n'
+           f'│ Research: {"online" if args.online else "offline (local/cache only)"} · proof: solve → verify → repair\n'
            '╰─ /help for commands · proof progress saved automatically · manuscript edits require approval')
     if args.allow_python:
         ui.say('Python enabled: each snippet requires approval and runs with your account permissions.')
     model_checked = False
     proof_running = False
-    cooperative_directory = None
     research_running = False
     last_proof_id = ''
     last_research_id = ''
@@ -301,17 +277,17 @@ def main():
         nonlocal last_proof_id
         last_proof_id = result['id']
         ui.say(f'\nProof {result["id"]} · {result["status"]}')
-        if result.get('proof') is not None and result['status'] == 'candidate_complete':
-            ui.say(result['proof'])
-            ui.say('Model-audited candidate; independent mathematical checking is still needed.')
-            ui.say(f'Proof text: {result["proof_path"]}')
-        else:
+        if result.get('answer'):
+            ui.say(result['answer'])
+            ui.say(f'Selected answer: {result["proof_path"]}')
+        if result.get('report'):
             ui.say(result['report'])
-        ui.say(f'Debrief: {Path(result["directory"]) / "report.md"}')
-        if result['status'] in {'ready', 'active', 'running', 'paused', 'interrupted', 'error', 'pending'}:
+        ui.say('A model review is not a mathematical certificate. See the report for unresolved issues.')
+        ui.say(f'Report: {Path(result["directory"]) / "report.md"}')
+        if result['status'] in {'ready', 'running', 'paused', 'interrupted', 'error'}:
             ui.say(f'Saved job: /resume {result["id"]} (uses the remaining original budget)')
         else:
-            ui.say(f'Inspect: /ledger {result["id"]}. A new /prove starts a separate job.')
+            ui.say(f'Inspect: /proof-report {result["id"]}. A new /prove starts a separate job.')
 
     def research_result(result):
         nonlocal last_research_id
@@ -336,68 +312,26 @@ def main():
             ui.say(f'Exported {dest}')
 
     def run_query(query):
-        nonlocal proof_running, last_proof_id, research_running, last_research_id, cooperative_directory
+        nonlocal proof_running, last_proof_id, research_running, last_research_id
         fresh_library()
         if agent.mode == 'prove':
             if args.output:
                 raise ValueError('--output is for literature/referee reports; proof reports save automatically')
-            if args.proof_max_predict < agent.predict:
-                raise ValueError('--proof-max-predict must be at least --predict for a new proof job')
+            if max(args.proof_solve_tokens, args.proof_verify_tokens) + 256 >= agent.ctx:
+                raise ValueError('Proof context must exceed each solve/verify output limit plus room for the input')
+            if args.proof_tokens < args.proof_solve_tokens + args.proof_verify_tokens:
+                raise ValueError('--proof-tokens must cover one full solve and verification; reduce their explicit limits or raise the total')
             ensure_model()
             last_proof_id = ''
-            if args.proof_strategy == 'cooperative':
-                from .cooperative import run_cooperative_proof
-                directory = workspace.root / '.mathagent' / 'cooperative' / str(uuid.uuid4())
-                cooperative_directory = directory
-                result = run_cooperative_proof(agent, query, output_dir=directory,
-                    max_rounds=args.proof_rounds, max_tokens=args.proof_tokens,
-                    max_seconds=args.proof_seconds, max_predict=args.proof_max_predict,
-                    source_files=args.proof_file, seed=args.seed if args.seed is not None else 0,
-                    concurrency=args.cooperative_concurrency, emit=ui.emit)
-                cooperative_directory = None
-                ui.say(f'Cooperative proof: {result["status"]}\nSaved work: {result["directory"]}')
-                if result.get('proof_path') and result['status'] == 'candidate_complete':
-                    ui.say(Path(result['proof_path']).read_text(encoding='utf-8'))
-                    ui.say('Model-audited candidate; independent mathematical checking is still needed.')
-                    ui.say(f'Proof text: {result["proof_path"]}')
-                else:
-                    ui.say(Path(result['report_path']).read_text(encoding='utf-8'))
-                    if result.get('answer_path'):
-                        ui.say(f'Unverified assembled candidate: {result["answer_path"]}')
-                ui.say(f'Debrief: {result["report_path"]}')
-                ui.say('Cooperative parents are one-shot jobs and cannot be resumed. Child proof ledgers remain inspectable.')
-                for error in result.get('execution_errors', []):
-                    ui.say('Workflow error: ' + str(error))
-                return
-            if args.proof_workers > 1:
-                from .portfolio import run_proof_portfolio
-                directory = workspace.root / '.mathagent' / 'portfolios' / str(uuid.uuid4())
-                result = run_proof_portfolio(agent, query, output_dir=directory,
-                    workers=args.proof_workers, max_rounds=args.proof_rounds,
-                    max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
-                    max_predict=args.proof_max_predict, source_files=args.proof_file,
-                    seed=args.seed if args.seed is not None else 0, selection_seconds=args.proof_selection_seconds,
-                    branch_concurrency=args.proof_branch_concurrency)
-                answer_notice = (f'Selected answer: {result["answer_path"]}' if result.get('answer_path')
-                                 else 'No candidate was selected; inspect the retained branch work.')
-                ui.say(f'Parallel proof portfolio: {result["status"]}\nSaved work: {directory}\n'
-                       f'{answer_notice}\n'
-                       'Selection is a model judgment, not formal verification. Parent portfolios are not automatically resumed.')
-                if result.get('error'):
-                    ui.say('Workflow error: ' + result['error'])
-                return
             proof_running = True
-            options = {}
-            if args.proof_literature:
-                literature.reset_budget(max_requests=args.research_requests, max_chars=args.research_chars)
-                options['allow_literature'] = True
             result = ProofRunner(agent, ui.emit).start(query, max_rounds=args.proof_rounds,
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
-                max_predict=args.proof_max_predict, source_files=args.proof_file, **options)
+                max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
+                source_files=args.proof_file)
             proof_running = False
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},
-                                  {'role': 'assistant', 'content': result['report']}])
+                                  {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
         elif agent.mode in {'literature', 'referee'}:
             if args.output and workspace.path(args.output).suffix.lower() != '.md':
                 raise ValueError('--output must be a workspace-relative .md file')
@@ -411,7 +345,7 @@ def main():
                 max_chars=args.research_chars)
             research_running = False
             research_result(result)
-            agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result['report']}])
+            agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
         else:
             if args.output:
                 raise ValueError('--output is for literature/referee reports')
@@ -472,11 +406,9 @@ def main():
                     for job in jobs:
                         goal = ' '.join(job['goal'].split())
                         ui.say(f'{job["id"]} · {job["status"]} · rounds {job.get("rounds_started", 0)} · {goal[:160]}')
-                elif command == '/ledger':
+                elif command in ('/proof-report', '/ledger'):
                     show_ledger(ui, select_proof(workspace.root, rest or last_proof_id))
                 elif command == '/resume':
-                    if args.proof_strategy == 'cooperative':
-                        raise ValueError('Cooperative parent resume is not supported. Inspect the saved report; use the default strategy and child workspace to resume a child as separate work.')
                     store = select_proof(workspace.root, rest or last_proof_id)
                     last_proof_id = store.state['id']
                     proof_running = True
@@ -488,10 +420,10 @@ def main():
                     model_checked = False
                     proof_result(result)
                     agent.history.extend([{'role': 'user', 'content': store.state['goal']},
-                                          {'role': 'assistant', 'content': result['report']}])
+                                          {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
                 elif command == '/think' and rest in ('on', 'off'):
                     agent.think = rest == 'on'
-                    ui.say('Thinking: ' + rest)
+                    ui.say('Chat thinking: ' + rest + '. Proof mode always keeps thinking enabled.')
                 elif command == '/context':
                     ctx = int(rest)
                     if ctx <= agent.predict + 1024:
@@ -502,9 +434,9 @@ def main():
                     ui.say(json.dumps({'model': agent.model, 'context': agent.ctx, 'predict': agent.predict,
                                        'backend': args.backend, 'seed': agent.seed,
                                        'temperature': agent.temperature, 'top_p': agent.top_p,
-                                       'new_proof_max_predict': args.proof_max_predict,
-                                       'proof_strategy': args.proof_strategy,
-                                       'cooperative_concurrency': args.cooperative_concurrency,
+                                       'proof_solve_tokens': args.proof_solve_tokens,
+                                       'proof_verify_tokens': args.proof_verify_tokens,
+                                       'proof_tokens': args.proof_tokens,
                                        'think': agent.think, 'mode': agent.mode,
                                        'online': literature.online, 'literature_usage': literature.stats,
                                        'last_request': agent.last_stats}, indent=2))
@@ -552,11 +484,7 @@ def main():
                 return 0
         except KeyboardInterrupt:
             ui.stop()
-            if cooperative_directory is not None:
-                ui.say(f'\nCooperative proof interrupted. Inspect saved parent state and child ledgers in: {cooperative_directory}')
-                ui.say('The cooperative parent cannot be resumed; a new /prove starts a separate job with a new budget.')
-                cooperative_directory = None
-            elif proof_running:
+            if proof_running:
                 ui.say('\nProof interrupted. Completed checkpoints and the original budget are saved.')
                 try:
                     store = select_proof(workspace.root, last_proof_id)
@@ -579,11 +507,8 @@ def main():
         except (AgentError, OSError, ValueError) as e:
             ui.stop()
             ui.say(f'Error: {e}')
-            if cooperative_directory is not None:
-                ui.say(f'Inspect any saved cooperative state in: {cooperative_directory}. Parent resume is not supported.')
-                cooperative_directory = None
             if proof_running:
-                ui.say('Saved proof checkpoints remain available through /proofs, /ledger and /resume.')
+                ui.say('Saved proof checkpoints remain available through /proofs, /proof-report and /resume.')
                 proof_running = False
             if research_running:
                 ui.say('Saved research evidence and partial reports remain available through /researches.')

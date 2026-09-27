@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run the matched-budget V100 pilot using verified serving provenance."""
+"""Run the legacy V100 serving preset with matched initial solves and extra proof verification."""
 import argparse
 import hashlib
 import json
 from pathlib import Path
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mathagent import benchmark
 from mathagent.agent import AgentError
 from mathagent.backends import create_client
@@ -52,18 +53,17 @@ def prepare(args):
     cli = ['--manifest', str(args.manifest), '--output', str(args.output),
            '--backend', 'llamacpp', '--host', launch['host'], '--model', launch['model_alias'],
            '--model-revision', 'sha256:' + launch['weights_sha256'], '--server-image', launch['image_id'],
-           '--dtype', 'q8_0', '--ctx', '32768', '--tokens', '60000',
-           '--predict', '8192', '--max-predict', '8192', '--branches', '3',
-           '--selection-tokens', '6144', '--replicates', str(args.replicates),
-           '--workers', '1', '--max-in-flight', '3', '--seed', str(args.seed),
+           '--dtype', 'q8_0', '--ctx', '32768', '--tokens', '90000',
+           '--predict', '16384', '--verify-tokens', '8192', '--rounds', '3',
+           '--arms', 'raw-single', 'proof', '--replicates', str(args.replicates),
+           '--workers', '1', '--max-in-flight', '1', '--seed', str(args.seed),
            '--temperature', '0.6', '--top-p', '0.95',
-           '--seconds', str(args.seconds), '--request-timeout', str(args.request_timeout),
-           '--selection-seconds', str(args.selection_seconds)]
+           '--seconds', str(args.seconds), '--request-timeout', str(args.request_timeout)]
     parsed = benchmark.parser().parse_args(cli)
     data, plan = benchmark.preflight(parsed)
     plan['serving'] = {'launch_record_sha256': launch_hash, 'launch_record': launch,
                        'acceptance_sha256': acceptance_hash, 'acceptance': acceptance,
-                       'experimental_condition': 'Qwen3.8-27B Q8_0 on two V100S; distinct from BF16 results.'}
+                       'experimental_condition': 'Qwen3.8-27B Q8_0 on two V100S; identical 16384-token initial solves, proof total ceiling 90000. Smaller-context reference preset, distinct from HyperQwen and BF16 results.'}
     return parsed, data, plan
 
 
@@ -95,7 +95,6 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=20260926)
     parser.add_argument('--seconds', type=float, default=14400, help='Wall-time ceiling per job; calibrate on synthetic problems')
     parser.add_argument('--request-timeout', type=float, default=7200)
-    parser.add_argument('--selection-seconds', type=float, default=1800)
     parser.add_argument('--dry-run', action='store_true', help='Validate files and print the plan without network or writes')
     args = parser.parse_args(argv)
     try:

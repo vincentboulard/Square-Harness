@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "profile": "a10-hyperqwen-dflash2-v0.5",
+  "image": "ghcr.io/syv-ai/hyperqwen@sha256:6ac4aea86882fae42381b701bb3eb20a1df94a93a62e23f0e1edb3c8b34d2819",
+  "model": "qwen3.8-27b",
+  "model_revision": "dbirks/Qwen3.8-27B-W4A16-AutoRound@1f05c441c4e64ae0549de44fa9ea5a6d43610314;fast@124c14e7e8c7d2f5402933b9af368e772a9fcf0c;dflash2@4d30ec736ffc6b8688dc2ae2b502d9b48bdec279",
+  "dtype": "W4A16-AutoRound-fast;INT4-head;FP16-recurrent;BF16-KV",
+  "host": "http://127.0.0.1:18020",
+  "context": 40960,
+  "harness_tokens": 120000,
+  "solver_predict": 32768,
+  "rounds": 3,
+  "raw_seconds": 1800,
+  "harness_seconds": 1800,
+  "request_timeout": 1800,
+  "seed": 20260927,
+  "thinking_environment": {
+    "SQUARE_OPENAI_THINKING_FRACTION": "0.75",
+    "SQUARE_OPENAI_STRUCTURED_THINKING_FRACTION": "0.75"
+  },
+  "server_env": {
+    "MODEL": "/app/models/Qwen3.8-27B-W4A16-AutoRound-fast",
+    "MAX_LEN": "40960",
+    "MAX_SEQS": "2",
+    "PREFIX_CACHE": "0",
+    "SPEC": "dflash2",
+    "DFLASH_TOKENS": "7",
+    "KV_MEM": "4294967296",
+    "INT8_ACT": "",
+    "PREFILL_ATTN": "",
+    "EXTRA_ARGS": "--generation-config vllm --no-enable-prefix-caching"
+  },
+  "verify_tokens": 16384
+}

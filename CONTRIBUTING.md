@@ -1,11 +1,12 @@
 # Contributing
 
-Square Harness is an early research project. Small fixes, clear failure cases,
-documentation improvements, and focused pull requests are welcome.
+Square Harness is an experimental mathematical research project. Focused fixes,
+clear failure cases and documentation improvements are welcome. The current
+priority is a dependable solve–verify–repair loop before adding more orchestration.
 
 ## Development
 
-Use Python 3.10 or later on macOS or Linux. From the repository root:
+Use Python 3.10+ on Linux or macOS:
 
 ```bash
 python3 -m venv .venv
@@ -14,20 +15,21 @@ python -m pip install -e '.[research]'
 python -m unittest discover -s tests -v
 ```
 
-The automated tests use mocks and temporary workspaces; they do not require a
-running model. For model-dependent changes, describe the model tag, Ollama
-version, settings, and manual check in your pull request.
+Tests use mocks and temporary workspaces; they do not need a model server.
+For inference-dependent changes, record the model/weights revision, server
+version, settings, exact source revision and the manual check performed.
 
-## Issues and pull requests
+## Useful contributions
 
-- Explain the problem and expected behavior. Discuss substantial changes in an
-  issue before implementing them.
-- For a mathematical failure, provide a shareable statement, exact command and
-  settings, relevant output, and the first false or unjustified inference.
-- Add a regression test when fixing a reproducible code bug. Keep changes focused.
-- Do not upload private manuscripts, credentials, or unredacted session logs.
+- Explain the observed behaviour and the intended change. Discuss a large design
+  change in an issue before implementing it.
+- For mathematical failures, provide a shareable statement, candidate proof,
+  relevant review and the first false or unjustified inference. Distinguish
+  demonstrated errors from unresolved doubts.
+- Test reproducible controller bugs without inference when possible. Preserve
+  original candidates and do not turn operational errors into mathematical verdicts.
+- Keep private manuscripts, credentials and unredacted research logs out of commits.
 
-Maintainers review contributions and decide what is merged. Public access lets
-others propose changes or maintain their own forks; it does not grant write
-access to this repository. Contributions are submitted under the project's
-[Apache License 2.0](LICENSE).
+Maintainers decide what is merged. Public access allows proposed changes and
+forks; it does not grant write access to this repository. Contributions use the
+project's [Apache License 2.0](LICENSE).

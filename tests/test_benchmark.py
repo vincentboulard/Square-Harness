@@ -1,3 +1,4 @@
+"""Private v0.5 trials preserve inputs, exact candidates and conservative costs."""
 import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -14,7 +15,6 @@ from unittest.mock import patch
 
 from mathagent import benchmark
 from mathagent.agent import AgentError
-from mathagent.portfolio import branch_seed
 
 
 class FakeClient:
@@ -23,15 +23,15 @@ class FakeClient:
     def __init__(self, fail=False, usage=True):
         self.fail, self.usage, self.requests = fail, usage, []
 
+    def models(self):
+        return ['square-qwen']
+
     def stream(self, payload):
         self.requests.append(payload)
         if self.fail:
             raise AgentError('Simulated server failure')
-        if payload.get('format'):
-            text = json.dumps({'verdict': 'gap', 'explanation': 'The proposed argument has an unchecked implication.',
-                               'first_invalid_step': 'The induction step is missing.'})
-        else:
-            text = 'A full candidate text, with a potentially incomplete mathematical argument.'
+        text = (json.dumps({'verdict': 'no_issue_found', 'explanation': 'Every step checks out.', 'issues': []})
+                if payload.get('format') else 'For every real x, reflexivity gives x = x.')
         event = {'message': {'content': text}, 'done': True, 'done_reason': 'stop'}
         if self.usage:
             event.update(eval_count=11, prompt_eval_count=7)
@@ -41,23 +41,20 @@ class FakeClient:
 class BenchmarkTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.manifest = benchmark.init_smoke(self.root / 'dataset')
         self.args = benchmark.parser().parse_args(['--manifest', str(self.manifest), '--output', str(self.root / 'runs')])
 
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def test_manifest_is_allowlisted_hashes_inputs_and_rejects_answer_fields(self):
-        data = benchmark.load_manifest(self.manifest)
-        self.assertEqual(len(data['problems']), 2)
-        original = json.loads(self.manifest.read_text())
-        original['problems'][0]['answer'] = 'Do not send this to a solver.'
-        self.manifest.write_text(json.dumps(original))
+    def test_manifest_is_allowlisted_and_rejects_answer_fields(self):
+        self.assertEqual(len(benchmark.load_manifest(self.manifest)['problems']), 2)
+        value = json.loads(self.manifest.read_text())
+        value['problems'][0]['answer'] = 'Private reference answer.'
+        self.manifest.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError, 'fields'):
             benchmark.load_manifest(self.manifest)
 
-    def test_mutated_statement_fails_declared_checksum(self):
+    def test_mutated_statement_fails_checksum(self):
         (self.manifest.parent / 'toy_identity.txt').write_text('Different problem')
         with self.assertRaisesRegex(ValueError, 'checksum'):
             benchmark.load_manifest(self.manifest)
@@ -75,17 +72,18 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'contained'):
             benchmark.load_manifest(self.manifest)
 
-    def test_dry_run_has_no_network_and_no_writes(self):
-        with patch.object(benchmark, 'create_client', side_effect=AssertionError('Network/client creation forbidden')):
+    def test_dry_run_no_network_or_writes_and_only_two_arms(self):
+        with patch.object(benchmark, 'create_client', side_effect=AssertionError('Network forbidden')):
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 code = benchmark.main(['--manifest', str(self.manifest), '--output', str(self.root / 'runs'), '--dry-run'])
         self.assertEqual(code, 0)
         plan = json.loads(out.getvalue())
-        self.assertEqual(plan['jobs'], 6)
-        self.assertEqual(plan['generated_token_ceiling'], 360000)
+        self.assertEqual(plan['jobs'], 4)
+        self.assertEqual(plan['settings']['arms'], ['raw-single', 'proof'])
+        self.assertEqual(plan['generated_token_ceiling'], 2 * (32768 + 120000))
         self.assertFalse((self.root / 'runs').exists())
 
-    def test_existing_output_and_output_in_dataset_fail_closed(self):
+    def test_existing_output_and_output_in_dataset_rejected(self):
         self.args.output.mkdir()
         with self.assertRaisesRegex(ValueError, 'already exists'):
             benchmark.preflight(self.args)
@@ -93,114 +91,71 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'outside'):
             benchmark.preflight(self.args)
 
-    def test_workers_times_branch_width_is_bounded(self):
+    def test_resource_preflight_rejects_underfunded_cycle_and_concurrency(self):
         self.args.workers = 2
-        with self.assertRaisesRegex(ValueError, 'branch width'):
+        with self.assertRaisesRegex(ValueError, 'workers'):
             benchmark.preflight(self.args)
-        self.args.max_in_flight = 6
+        self.args.max_in_flight = 2
         benchmark.preflight(self.args)
-
-    def test_one_slot_keeps_three_logical_branches_and_matched_time_partitions(self):
-        self.args.branch_concurrency = 1
-        self.args.max_in_flight = 1
-        self.args.seconds, self.args.selection_seconds = 43200, 3600
-        self.args.request_timeout = 7200
-        data, plan = benchmark.preflight(self.args)
-        self.assertEqual(plan['settings']['branches'], 3)
-        self.assertEqual(plan['branch_schedule']['branch_concurrency'], 1)
-        self.assertEqual(plan['branch_schedule']['branch_seconds'], 13200)
-        output = self.root / 'runs'
-        output.mkdir()
-        with patch.object(benchmark, 'create_client', return_value=FakeClient()) as factory:
-            result = benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
-        self.assertEqual(result['branch_schedule'], plan['branch_schedule'])
-        self.assertEqual(len(result['candidates']), 3)
-        self.assertTrue(all(call.kwargs['timeout'] == 7200 for call in factory.call_args_list))
-        for index in range(3):
-            call = json.loads((output / 'jobs' / result['id'] / f'raw-{index}' / 'call.json').read_text())
-            self.assertEqual(call['reserved_tokens'], 17952)
-            self.assertEqual(call['seed'], branch_seed(4, index))
-            self.assertEqual(call['max_seconds'], 13200)
-        self.args.workers = 2
-        self.args.output = self.root / 'second-run'
-        with self.assertRaisesRegex(ValueError, 'branch width'):
+        self.args.tokens = self.args.predict + self.args.verify_tokens - 1
+        with self.assertRaisesRegex(ValueError, 'full solver and verifier'):
             benchmark.preflight(self.args)
 
-    def test_invalid_branch_concurrency_is_rejected_without_inference(self):
-        for width in (0, -1, 17):
-            self.args.branch_concurrency = width
-            with self.assertRaisesRegex(ValueError, 'Branch concurrency'):
-                benchmark.preflight(self.args)
-
-    def test_context_check_includes_raw_partition_not_just_predict(self):
+    def test_context_and_invalid_time_guards_fail_before_dispatch(self):
         self.args.ctx = 16384
         with self.assertRaisesRegex(ValueError, 'Context'):
             benchmark.preflight(self.args)
-
-    def test_v100_time_guards_are_recorded_and_forwarded_to_direct_requests(self):
-        self.args.backend = 'llamacpp'
-        self.args.seconds = 14400
-        self.args.request_timeout = 7200
-        self.args.selection_seconds = 1800
-        data, plan = benchmark.preflight(self.args)
-        self.assertEqual(plan['settings']['request_timeout'], 7200)
-        self.assertEqual(plan['settings']['selection_seconds'], 1800)
-        output = self.root / 'runs'
-        output.mkdir()
-        with patch.object(benchmark, 'create_client', return_value=FakeClient()) as factory:
-            benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
-        self.assertEqual(len(factory.call_args_list), 4)
-        self.assertTrue(all(c.kwargs['timeout'] == 7200 for c in factory.call_args_list))
-
-    def test_invalid_request_and_selection_time_guards_fail_before_dispatch(self):
-        for field in ('request_timeout', 'selection_seconds'):
+        self.args.ctx = 40960
+        for name in ('seconds', 'raw_seconds', 'request_timeout'):
+            original = getattr(self.args, name)
             for value in (0, -1, float('nan'), float('inf')):
-                with self.subTest(field=field, value=value):
-                    args = benchmark.parser().parse_args([
-                        '--manifest', str(self.manifest), '--output', str(self.root / 'runs')])
-                    setattr(args, field, value)
-                    with self.assertRaisesRegex(ValueError, 'finite and positive'):
-                        benchmark.preflight(args)
+                setattr(self.args, name, value)
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, 'finite and positive'):
+                    benchmark.preflight(self.args)
+            setattr(self.args, name, original)
 
     def test_missing_usage_keeps_full_reservation_and_partial_text(self):
-        client = FakeClient(usage=False)
-        result = benchmark._raw(client, 'Prove the goal.', self.root / 'raw', self.args, 1000, 3)
+        result = benchmark._raw(FakeClient(usage=False), 'Prove x=x.', self.root / 'raw', self.args, 1000, 3)
         usage = benchmark._usage([result['call']])
         self.assertEqual(usage['tokens_charged'], 1000)
         self.assertEqual(usage['reserved_unmeasured_tokens'], 1000)
-        self.assertEqual(usage['measured_completion_tokens'], 0)
         self.assertTrue(Path(result['answer_path']).read_text())
 
-    def test_raw_budget_violation_retains_observed_usage_and_stops_selection(self):
+    def test_runtime_context_rejection_never_dispatches_or_charges(self):
+        class TooLarge(FakeClient):
+            def count_input_tokens(self, payload):
+                return self_ctx
+        self_ctx = self.args.ctx
+        client = TooLarge()
+        result = benchmark._raw(client, 'Goal', self.root / 'raw', self.args, 32768, 0)
+        self.assertEqual(client.requests, [])
+        self.assertEqual(benchmark._usage([result['call']])['tokens_charged'], 0)
+        self.assertEqual(result['call']['status'], 'error')
+
+    def test_missing_completion_reason_is_not_success(self):
+        class NoReason(FakeClient):
+            def stream(self, payload):
+                yield {'message': {'content': 'A candidate'}, 'done': True, 'eval_count': 3}
+        result = benchmark._raw(NoReason(), 'Goal', self.root / 'raw', self.args, 1000, 0)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['call']['status'], 'error')
+
+    def test_raw_budget_violation_retains_observed_usage(self):
         class OverspendingClient(FakeClient):
             def stream(self, payload):
                 self.requests.append(payload)
                 cap = payload['options']['num_predict']
                 raise benchmark.TokenBudgetError({'eval_count': cap + 7, 'prompt_eval_count': 4}, cap)
         data, _ = benchmark.preflight(self.args)
-        output = self.root / 'runs'
-        output.mkdir()
         client = OverspendingClient()
         with patch.object(benchmark, 'create_client', return_value=client):
-            result = benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
+            result = benchmark.run_job((data['problems'][0], 'raw-single', 0, 4), self.root / 'runs', self.args)
         self.assertEqual(result['status'], 'error')
-        self.assertEqual(len(client.requests), 3)
-        self.assertTrue(all('format' not in request for request in client.requests))
-        self.assertEqual(result['measured_completion_tokens'], 3 * (17952 + 7))
+        self.assertEqual(result['measured_completion_tokens'], self.args.predict + 7)
         self.assertEqual(result['reserved_unmeasured_tokens'], 0)
-        self.assertEqual(result['prompt_tokens'], 12)
-        self.args.branch_concurrency = 1
-        output = self.root / 'one-slot'
-        output.mkdir()
-        client = OverspendingClient()
-        with patch.object(benchmark, 'create_client', return_value=client):
-            result = benchmark.run_job((data['problems'][0], 'raw-best', 0, 4), output, self.args, None)
-        self.assertEqual(result['status'], 'error')
         self.assertEqual(len(client.requests), 1)
-        self.assertEqual(result['measured_completion_tokens'], 17952 + 7)
-        self.assertEqual(result['reserved_unmeasured_tokens'], 0)
 
-    def test_raw_time_guard_closes_stream_and_preserves_partial_answer(self):
+    def test_time_guard_closes_stream_and_preserves_answer(self):
         class SlowClient(FakeClient):
             closed = False
             def stream(self, payload):
@@ -210,130 +165,76 @@ class BenchmarkTests(unittest.TestCase):
                 finally:
                     self.closed = True
         client = SlowClient()
-        with patch.object(benchmark.time, 'monotonic', side_effect=[0, 2, 3]):
+        with patch.object(benchmark.time, 'monotonic', side_effect=[0, 0, 2, 3]):
             result = benchmark._raw(client, 'Goal', self.root / 'raw', self.args, 1000, 0, max_seconds=1)
         self.assertTrue(client.closed)
         self.assertEqual(result['call']['status'], 'error')
         self.assertEqual(Path(result['answer_path']).read_text(), 'Partial written argument.')
         self.assertEqual(benchmark._usage([result['call']])['reserved_unmeasured_tokens'], 1000)
 
-    def test_raw_best_uses_same_branch_seeds_shared_selector_and_exact_answer(self):
+    def test_identical_initial_requests_and_all_proof_roles_charged(self):
         data, _ = benchmark.preflight(self.args)
-        output = self.root / 'runs'
-        output.mkdir()
-        clients = []
-        def factory(*args, **kwargs):
-            client = FakeClient()
-            clients.append(client)
-            return client
-        seed = 17
-        with patch.object(benchmark, 'create_client', side_effect=factory):
-            result = benchmark.run_job((data['problems'][0], 'raw-best', 0, seed), output, self.args, threading.BoundedSemaphore(3))
-        self.assertEqual(result['status'], 'selected_unverified')
-        self.assertEqual(result['tokens_charged'], 66)
-        self.assertEqual(result['prompt_tokens'], 42)
-        requests = [request for client in clients for request in client.requests]
-        raw = [r for r in requests if not r.get('format')]
-        review = [r for r in requests if r.get('format')]
-        self.assertEqual(sorted(r['options']['seed'] for r in raw), sorted(branch_seed(seed, i) for i in range(3)))
-        self.assertTrue(all(r['options']['temperature'] == 0 for r in review))
-        self.assertTrue(all(r['options']['num_predict'] == 17952 for r in raw))
-        self.assertTrue(all('tools' not in r for r in raw))
-        self.assertEqual(Path(result['answer_path']).read_bytes(), Path(result['raw_at_1_path']).read_bytes())
-        self.assertEqual(result['answer_sha256'], result['raw_at_1_sha256'])
-        self.assertEqual(list((output / 'jobs' / result['id'] / 'workspace').iterdir())[0].name, 'statement.txt')
+        clients = [FakeClient(), FakeClient()]
+        with patch.object(benchmark, 'create_client', side_effect=clients):
+            raw = benchmark.run_job((data['problems'][0], 'raw-single', 0, 42), self.root / 'runs', self.args)
+            proof = benchmark.run_job((data['problems'][0], 'proof', 0, 42), self.root / 'runs', self.args)
+        self.assertEqual(clients[0].requests[0], clients[1].requests[0])
+        self.assertTrue(clients[0].requests[0]['think'])
+        self.assertNotIn('tools', clients[0].requests[0])
+        self.assertEqual(proof['status'], 'candidate_complete', proof)
+        self.assertEqual(proof['tokens_charged'], 22)
+        self.assertEqual(proof['request_count'], 2)
+        self.assertEqual(Path(raw['answer_path']).read_bytes(), Path(proof['answer_path']).read_bytes())
 
-    def test_failed_job_does_not_destroy_other_results_or_hide_charge(self):
-        data, _ = benchmark.preflight(self.args)
-        output = self.root / 'runs'
-        output.mkdir()
-        with patch.object(benchmark, 'create_client', return_value=FakeClient(fail=True)):
-            failed = benchmark.run_job((data['problems'][0], 'raw-single', 0, 11), output, self.args, threading.BoundedSemaphore(1))
-        with patch.object(benchmark, 'create_client', return_value=FakeClient()):
-            passed = benchmark.run_job((data['problems'][1], 'raw-single', 0, 12), output, self.args, threading.BoundedSemaphore(1))
-        self.assertEqual(failed['status'], 'error')
-        self.assertEqual(failed['reserved_unmeasured_tokens'], self.args.predict)
-        self.assertEqual(passed['status'], 'complete')
-        benchmark.export_grading(output, [failed, passed], data['problems'], 7)
-        sheet = (output / 'grading' / 'scores.csv').read_text()
-        self.assertNotIn('raw-single', sheet)
-        self.assertNotIn('model_approved', sheet)
-        self.assertEqual(sheet.count('submission-'), 6)  # three appearances per row
-        self.assertTrue((output / 'grading-key.private.json').is_file())
-
-    def test_rejected_old_audit_does_not_replace_newer_draft(self):
-        directory = self.root / 'proof'
-        (directory / 'artifacts').mkdir(parents=True)
-        (directory / 'artifacts' / 'old.json').write_text(json.dumps({'text': 'Rejected old argument', 'complete': True}))
-        (directory / 'artifacts' / 'new.json').write_text(json.dumps({'text': 'Newest written candidate', 'complete': True}))
+    def test_engine_selected_answer_is_exported_without_newest_draft_lookup(self):
         workspace = self.root / 'workspace'
         workspace.mkdir()
         agent = SimpleNamespace(workspace=SimpleNamespace(root=workspace))
-        state = {'status': 'budget_exhausted', 'final_audit': {'candidate': 'old.json', 'verdict': 'gap'},
-                 'pending': {'draft': 'new.json'}, 'rounds': [{'draft': 'old.json'}], 'calls': []}
-        with patch.object(benchmark, 'ProofRunner') as runner, patch.object(benchmark, '_proof_usage', return_value=(benchmark._usage([]), [(directory, state)])):
-            runner.return_value.start.return_value = {'status': 'budget_exhausted', 'directory': str(directory)}
-            outcome = benchmark._sequential(agent, 'Original goal', self.root, self.args)
-        self.assertEqual(outcome['selected_artifact'], 'new.json')
-        self.assertEqual(Path(outcome['answer_path']).read_text(), 'Newest written candidate')
-        state['pending'] = None
-        state['rounds'].append({'draft': 'new.json'})
-        with patch.object(benchmark, 'ProofRunner') as runner, patch.object(benchmark, '_proof_usage', return_value=(benchmark._usage([]), [(directory, state)])):
-            runner.return_value.start.return_value = {'status': 'budget_exhausted', 'directory': str(directory)}
-            outcome = benchmark._sequential(agent, 'Original goal', self.root, self.args)
-        self.assertEqual(outcome['selected_artifact'], 'new.json')
+        selected = {'id': 'candidate-1', 'artifact': 'original.md', 'transport_complete': True}
+        state = {'status': 'budget_exhausted', 'pending': {'text': 'PARTIAL latest'}, 'calls': []}
+        with patch.object(benchmark, 'ProofRunner') as runner, patch.object(benchmark, '_proof_usage', return_value=(benchmark._usage([]), [(workspace, state)])):
+            runner.return_value.start.return_value = {'answer': 'Exact original proof.', 'status': 'budget_exhausted', 'selected_candidate': selected}
+            outcome = benchmark._proof(agent, 'Original goal', self.root, self.args)
+        self.assertEqual(Path(outcome['answer_path']).read_text(), 'Exact original proof.')
+        self.assertEqual(outcome['selected_artifact'], 'original.md')
+        self.assertEqual(runner.return_value.start.call_args.kwargs['source_files'], ())
 
-    def test_paused_transport_failure_is_benchmark_error_not_success(self):
+    def test_failed_job_keeps_cost_and_does_not_destroy_other_results(self):
         data, _ = benchmark.preflight(self.args)
-        output = self.root / 'runs'
-        output.mkdir()
         with patch.object(benchmark, 'create_client', return_value=FakeClient(fail=True)):
-            result = benchmark.run_job((data['problems'][0], 'sequential', 0, 8), output, self.args, None)
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['proof_status'], 'paused')
-        self.assertIn('Simulated server failure', result['error'])
-        self.assertEqual(result['reserved_unmeasured_tokens'], self.args.predict)
-        self.assertEqual(Path(result['answer_path']).read_text(), '')
+            failed = benchmark.run_job((data['problems'][0], 'raw-single', 0, 11), self.root / 'runs', self.args)
+        with patch.object(benchmark, 'create_client', return_value=FakeClient()):
+            passed = benchmark.run_job((data['problems'][1], 'raw-single', 0, 12), self.root / 'runs', self.args)
+        self.assertEqual(failed['status'], 'error')
+        self.assertEqual(failed['reserved_unmeasured_tokens'], self.args.predict)
+        self.assertEqual(passed['status'], 'complete')
+        benchmark.export_grading(self.root / 'runs', [failed, passed], data['problems'], 7)
+        sheet = (self.root / 'runs/grading/scores.csv').read_text()
+        self.assertNotIn('raw-single', sheet)
+        self.assertNotIn('model_approved', sheet)
+        self.assertTrue((self.root / 'runs/grading-key.private.json').is_file())
 
-    def test_recorder_failure_keeps_candidate_and_error_in_benchmark(self):
-        from test_proof import FakeClient as ProofClient, response, critic, batch, review
-        data, _ = benchmark.preflight(self.args)
-        output = self.root / 'runs'
-        output.mkdir()
-        invalid = batch(review(dependencies=['C1']))
-        client = ProofClient([response('For every real x, reflexivity gives x=x.'),
-                              response(critic(complete_candidate=False)), response(invalid), response(invalid)])
-        client.backend = 'ollama'
-        with patch.object(benchmark, 'create_client', return_value=client):
-            result = benchmark.run_job((data['problems'][0], 'sequential', 0, 8), output, self.args, None)
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['proof_status'], 'stalled')
-        self.assertEqual(result['protocol_error']['stage'], 'recorder')
-        self.assertEqual(result['request_count'], 4)
-        self.assertEqual(result['tokens_charged'], 40)
-        self.assertEqual(Path(result['answer_path']).read_text(), 'For every real x, reflexivity gives x=x.')
+    def test_execute_freezes_source_and_shared_seeds_without_grading(self):
+        data, plan = benchmark.preflight(self.args)
+        with patch.object(benchmark, 'create_client', side_effect=lambda *a, **k: FakeClient()), contextlib.redirect_stdout(io.StringIO()):
+            records = benchmark.execute(self.args, data, plan)
+        self.assertEqual(len(records), 4)
+        for problem in data['problems']:
+            self.assertEqual(len({r['seed'] for r in records if r['problem_id'] == problem['id']}), 1)
+        self.assertEqual((self.args.output / 'source/mathagent/benchmark.py').read_bytes(), Path(benchmark.__file__).read_bytes())
+        self.assertIn('No mathematical scores inferred', (self.args.output / 'summary.json').read_text())
+        self.assertEqual(len((self.args.output / 'grading/scores.csv').read_text().splitlines()), 5)
 
-    def test_failed_parallel_branches_preserve_error_denominator_and_export(self):
-        data, _ = benchmark.preflight(self.args)
-        output = self.root / 'runs'
-        output.mkdir()
-        failed = {'status': 'no_complete_candidate', 'answer_path': None, 'tokens_charged': 2000,
-                  'measured_completion_tokens': 0, 'reserved_unmeasured_tokens': 2000, 'prompt_tokens': 0,
-                  'branches': [{'status': 'finished', 'proof_status': 'paused', 'calls': [{'status': 'interrupted'}]}],
-                  'selection': {'calls': []}}
-        with patch.object(benchmark, 'create_client', return_value=FakeClient()), patch('mathagent.portfolio.run_proof_portfolio', return_value=failed):
-            result = benchmark.run_job((data['problems'][0], 'parallel', 0, 8), output, self.args, None)
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['workflow_status'], 'no_complete_candidate')
-        self.assertEqual(result['request_count'], 1)
-        self.assertEqual(result['reserved_unmeasured_tokens'], 2000)
-        benchmark.export_grading(output, [result], data['problems'], 7)
-        self.assertTrue((output / 'grading' / 'submission-0001' / 'answer.md').is_file())
+    def test_source_drift_stops_before_network_or_output(self):
+        data, plan = benchmark.preflight(self.args)
+        plan['code_sha256'] = {}
+        with patch.object(benchmark, 'create_client', side_effect=AssertionError('No network')):
+            with self.assertRaisesRegex(ValueError, 'Source changed'):
+                benchmark.execute(self.args, data, plan)
+        self.assertFalse(self.args.output.exists())
 
-    def test_real_openai_http_cli_records_two_jobs_and_rejects_rerun(self):
+    def test_real_openai_http_cli_and_rerun_guard(self):
         requests = []
-        lock = threading.Lock()
-        active, maximum = 0, 0
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -343,35 +244,20 @@ class BenchmarkTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b'{"data":[{"id":"test-model"}]}')
             def do_POST(self):
-                nonlocal active, maximum
                 payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                with lock:
-                    requests.append(payload)
-                    active += 1
-                    maximum = max(maximum, active)
-                time.sleep(0.02)
+                if self.path.endswith('/tokenize'):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                requests.append(payload)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
-                def value(spec):
-                    if spec['type'] == 'object':
-                        return {key: value(child) for key, child in spec['properties'].items()}
-                    if spec['type'] == 'array':
-                        return []
-                    if spec['type'] == 'boolean':
-                        return False
-                    if 'enum' in spec:
-                        return 'gap' if 'gap' in spec['enum'] else spec['enum'][0]
-                    return 'A mathematical step remains unproved.'
-                schema = payload.get('structured_outputs', {}).get('json')
-                text = json.dumps(value(schema)) if schema else 'Synthetic test response.'
                 events = [
-                    {'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': None}]},
+                    {'choices': [{'index': 0, 'delta': {'content': 'Synthetic response.'}, 'finish_reason': None}]},
                     {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
                     {'choices': [], 'usage': {'prompt_tokens': 13, 'completion_tokens': 5, 'total_tokens': 18}},
                 ]
-                with lock:
-                    active -= 1
                 for event in events:
                     self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
                 self.wfile.write(b'data: [DONE]\n\n')
@@ -380,59 +266,17 @@ class BenchmarkTests(unittest.TestCase):
         thread.start()
         command = [sys.executable, '-m', 'mathagent.benchmark', '--manifest', str(self.manifest),
                    '--output', str(self.root / 'http-run'), '--arms', 'raw-single', '--model', 'test-model',
-                   '--host', f'http://127.0.0.1:{server.server_port}', '--workers', '2']
+                   '--host', f'http://127.0.0.1:{server.server_port}', '--workers', '2', '--max-in-flight', '2']
         try:
-            process = subprocess.run(command, text=True, capture_output=True, timeout=40)
-            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
-            rows = [json.loads(line) for line in (self.root / 'http-run' / 'outputs.jsonl').read_text().splitlines()]
+            result = subprocess.run(command, text=True, capture_output=True, timeout=40)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            rows = [json.loads(line) for line in (self.root / 'http-run/outputs.jsonl').read_text().splitlines()]
             self.assertEqual(len(rows), 2)
             self.assertTrue(all(r['tokens_charged'] == 5 and r['prompt_tokens'] == 13 for r in rows))
-            self.assertTrue(all(Path(r['answer_path']).read_text() == 'Synthetic test response.' for r in rows))
-            self.assertEqual(len(requests), 2)
             again = subprocess.run(command, text=True, capture_output=True, timeout=10)
             self.assertEqual(again.returncode, 2)
             self.assertIn('already exists', again.stderr)
             self.assertEqual(len(requests), 2)
-            maximum = 0
-            serialized = [sys.executable, '-m', 'mathagent.benchmark', '--manifest', str(self.manifest),
-                          '--output', str(self.root / 'one-slot'), '--model', 'test-model',
-                          '--host', f'http://127.0.0.1:{server.server_port}', '--rounds', '1',
-                          '--predict', '1024', '--max-predict', '1024',
-                          '--branch-concurrency', '1', '--max-in-flight', '1',
-                          '--seconds', '43200', '--selection-seconds', '3600', '--request-timeout', '7200']
-            process = subprocess.run(serialized, text=True, capture_output=True, timeout=40)
-            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
-            rows = [json.loads(line) for line in (self.root / 'one-slot' / 'outputs.jsonl').read_text().splitlines()]
-            self.assertEqual(len(rows), 6)
-            self.assertEqual(maximum, 1)
-            self.assertTrue(all(row['status'] != 'error' for row in rows), rows)
-            for row in rows:
-                if row['arm'] == 'raw-best':
-                    self.assertEqual(len(row['candidates']), 3)
-                    for index in range(3):
-                        call = json.loads((self.root / 'one-slot' / 'jobs' / row['id'] / f'raw-{index}' / 'call.json').read_text())
-                        self.assertEqual(call['seed'], branch_seed(row['seed'], index))
-                        self.assertEqual(call['reserved_tokens'], 17952)
-                        self.assertEqual(call['max_seconds'], 13200)
-                elif row['arm'] == 'parallel':
-                    self.assertEqual(len(row['branches']), 3)
-                    self.assertEqual([job['token_budget'] for job in row['jobs']], [17952] * 3)
-                    self.assertEqual([job['seed'] for job in row['jobs']], [branch_seed(row['seed'], i) for i in range(3)])
-                    self.assertEqual([job['max_seconds'] for job in row['jobs']], [13200] * 3)
-                    self.assertTrue(all(job['dispatched'] for job in row['jobs']))
-            all_arms = [sys.executable, '-m', 'mathagent.benchmark', '--manifest', str(self.manifest),
-                        '--output', str(self.root / 'all-arms'), '--model', 'test-model',
-                        '--host', f'http://127.0.0.1:{server.server_port}', '--rounds', '1',
-                        '--ctx', '16384', '--predict', '1024', '--max-predict', '1024',
-                        '--tokens', '12000', '--selection-tokens', '768', '--branches', '2']
-            process = subprocess.run(all_arms, text=True, capture_output=True, timeout=40)
-            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
-            rows = [json.loads(line) for line in (self.root / 'all-arms' / 'outputs.jsonl').read_text().splitlines()]
-            self.assertEqual(len(rows), 6)
-            self.assertEqual({r['arm'] for r in rows}, {'raw-best', 'sequential', 'parallel'})
-            self.assertTrue(all(r['status'] != 'error' for r in rows), rows)
-            self.assertTrue(all(r['measured_completion_tokens'] > 0 for r in rows))
-            self.assertTrue(all(Path(r['answer_path']).read_text() == 'Synthetic test response.' for r in rows))
         finally:
             server.shutdown()
             server.server_close()

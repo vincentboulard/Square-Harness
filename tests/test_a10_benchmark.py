@@ -1,4 +1,4 @@
-"""A10 trials retain the scientific allocation while explicitly serializing branches."""
+"""A10 reference trials retain matched initial solving and verified provenance."""
 import contextlib
 import hashlib
 import importlib.util
@@ -40,24 +40,23 @@ class A10BenchmarkTests(unittest.TestCase):
         self.argv = ['--manifest', str(self.manifest), '--output', str(self.root / 'results'),
                      '--launch-record', str(self.launch)]
 
-    def test_offline_preflight_preserves_three_attempts_and_budget_with_one_active_slot(self):
+    def test_offline_preflight_matches_initial_solve_and_uses_one_active_slot(self):
         with patch.object(run, 'create_client', side_effect=AssertionError('No network')), contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(run.main(self.argv + ['--dry-run']), 0)
         plan = json.loads(out.getvalue())
         settings = plan['settings']
-        self.assertEqual(settings['tokens'], 60000)
-        self.assertEqual(settings['branches'], 3)
-        self.assertEqual(settings['branch_concurrency'], 1)
+        self.assertEqual(settings['tokens'], 90000)
+        self.assertEqual(settings['rounds'], 3)
+        self.assertEqual(settings['predict'], 16384)
         self.assertEqual(settings['max_in_flight'], 1)
-        self.assertEqual(settings['selection_tokens'], 6144)
+        self.assertEqual(settings['verify_tokens'], 8192)
         self.assertEqual(settings['dtype'], 'q4_k_m')
         self.assertEqual(settings['ctx'], 32768)
         self.assertEqual(settings['seconds'], 43200)
         self.assertEqual(settings['request_timeout'], 7200)
-        self.assertEqual(settings['selection_seconds'], 3600)
-        self.assertEqual(settings['arms'], ['raw-best', 'sequential', 'parallel'])
-        self.assertEqual(plan['generated_token_ceiling'], 360000)
-        self.assertEqual(plan['serving']['profile'], 'a10-q4-serial-branches')
+        self.assertEqual(settings['arms'], ['raw-single', 'proof'])
+        self.assertEqual(plan['generated_token_ceiling'], 2 * (16384 + 90000))
+        self.assertEqual(plan['serving']['profile'], 'a10-q4-proof-v0.5')
         self.assertFalse((self.root / 'results').exists())
 
     def test_live_run_requires_acceptance_before_connecting_or_creating_outputs(self):
@@ -83,7 +82,7 @@ class A10BenchmarkTests(unittest.TestCase):
             self.assertEqual(run.main(self.argv + ['--acceptance', str(self.acceptance)]), 1)
         verify.assert_called_once_with(self.record)
         parsed, data, plan = execute.call_args.args
-        self.assertEqual(parsed.branch_concurrency, 1)
+        self.assertEqual(parsed.workers, 1)
         self.assertEqual(plan['serving']['launch_record'], self.record)
         self.assertTrue(plan['serving']['acceptance']['accepted_for_benchmark'])
         self.assertIn('not a concurrent-inference speed test', plan['serving']['experimental_condition'])

@@ -254,8 +254,8 @@ with store.lock():
 
     def test_validate_state_and_budget_fields(self):
         store = self.create()
-        for key, bad in (("version", 2), ("rounds_started", -1), ("tokens_charged", True),
-                         ("seconds_used", float("inf")), ("claims", "summary"),
+        for key, bad in (("version", 999), ("rounds_started", -1), ("tokens_charged", True),
+                         ("seconds_used", float("inf")), ("candidates", "summary"),
                          ("pending", "solver"), ("goal", "")):
             with self.subTest(key=key):
                 original = store.state[key]

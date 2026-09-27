@@ -1,32 +1,19 @@
 # Square Harness
 
-**A local-first, open-source harness for mathematical research.**
+**An open-source harness for mathematical proof work.**
 
-Square Harness connects a language model running through [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://vllm.ai/)
-to a mathematical workspace. It can read manuscripts, explore proof strategies,
-keep a record of unfinished work, and prepare literature and referee-report drafts.
+Square Harness connects a language model to a simple workflow:
+**solve → verify → repair when needed**. It preserves the original answer,
+reviews the complete proof, and saves every candidate and objection for inspection.
 
-**Early experimental version (0.4).** The goal is a reusable research tool that
-mathematicians can inspect, adapt, and run themselves. Outputs require human
-checking: a model's critique or agreement is not a proof certificate.
-
-## What it does
-
-- **Explore and critique:** work with local LaTeX and text files through a terminal interface.
-- **Continue proof work:** retain statements, arguments, objections, and next steps
-  across bounded, resumable solver/reviewer rounds.
-- **Compare proof strategies:** run isolated parallel branches with a shared token
-  ceiling, or opt into [cooperative subproblem work](docs/usage.md#cooperative-proof-work),
-  and benchmark them against direct model sampling.
-- **Investigate literature:** read cached or retrieved sources and draft reports
-  with source locations and explicit limitations.
-- **Stay local by default:** external retrieval is opt-in; manuscript edits require approval.
+**Version 0.5.0 · experimental.** The priority is a reliable, understandable proof
+workflow. A model's approval is not a mathematical certificate; independent
+checking remains necessary.
 
 ## Quick start
 
-You need **Python 3.10+**, Linux or macOS, and a running Ollama server.
-Native Windows is not supported yet. Model memory requirements depend on the
-chosen model and context size.
+You need Python 3.10+, Linux or macOS, and a running model server. Models and their
+memory requirements are separate from the harness. Native Windows is not supported.
 
 ```bash
 git clone https://github.com/vincentboulard/Square-Harness.git
@@ -40,73 +27,67 @@ mkdir -p ~/research/square-workspace
 square-harness --workspace ~/research/square-workspace
 ```
 
-If Ollama is not already running, start `ollama serve` in another terminal.
-The current default is `qwen3.8:27b`; select a different installed model with
-`--model <exact-tag>`. It must support the harness's Ollama tool-calling interface;
-compatibility and mathematical quality vary by model. Weights are downloaded
-separately and are not included in this repository.
+Start `ollama serve` separately if needed. Choose another installed model with
+`--model <exact-tag>`. The default proof profile uses a 40,960-token context;
+see the [usage guide](docs/usage.md) for smaller profiles and other servers.
 
-Try a self-contained question:
+At the prompt:
 
 ```text
-/critic Is every bounded sequence in L²(0,1) strongly precompact? Justify your answer.
 /prove Prove that every bounded sequence in H¹(0,1) has a subsequence converging strongly in L²(0,1).
+/proofs
+/proof-report
 ```
 
-For a manuscript, point `--workspace` at its directory, then ask:
+For a problem saved in your workspace:
 
-```text
-/critic Read manuscript.tex and identify the first unsupported implication.
+```bash
+square-harness --workspace ~/research/square-workspace \
+  --proof-file statement.tex --prompt "Prove the statement in statement.tex."
 ```
 
-The `mathagent` command remains an alias. You can also run `python -m mathagent`
-from the checkout without installing the optional terminal UI dependencies.
+## Proof mode
 
-## Main commands
+- Give the solver one substantial attempt at the **whole problem**, with thinking enabled.
+- Ask a fresh verifier to inspect the full written proof and identify concrete issues.
+- Return an approved candidate unchanged; repair or rebut concrete objections.
+  An uncertain or unavailable review retains the answer without compulsory rewriting.
+- Preserve the initial answer and all revisions. A later fragment cannot silently displace a complete response.
+- Bound generated tokens, attempts and time; resume interrupted work with its remaining budget.
+
+The controller and storage are ordinary code. Proof mode has no planner, advisor,
+model recorder, tool loop or compulsory rewriting step. Cooperative and portfolio
+proof modes are not part of v0.5.
 
 | Command | Purpose |
 | --- | --- |
-| `/prove <goal>` | Start a saved proof attempt with fixed budgets |
-| `/critic <question>` / `/explore <question>` | Check an argument or explore approaches |
-| `/review` | Review the last answer in a fresh model context |
-| `/proofs` / `/ledger <id>` / `/resume <id>` | Inspect and resume saved proof work |
-| `/literature <topic>` / `/referee <request>` | Start a saved research/report workflow |
-| `/help` | List all commands |
+| `/prove <problem>` | Start a saved proof job |
+| `/proofs` / `/proof-report <id>` | List jobs or inspect one without inference |
+| `/resume <id>` | Resume an interrupted v0.5 job |
+| `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
+| `/help` | Show commands |
 
-Proof and research jobs are saved under `.mathagent/` in your workspace.
-Sequential proof jobs can resume after Ctrl+C with their remaining budget;
-parallel portfolios and cooperative parents are one-shot runs.
-Launch with `--online` for external research. Proof search additionally requires
-`--proof-literature` to use literature tools.
+Jobs live under `.mathagent/` in the chosen workspace. The `mathagent` command is
+an alias; `python -m mathagent` also works from the checkout.
 
-See the [usage guide](docs/usage.md) for manuscript inputs, reports, budgets,
-optional PDF/Python tools, and all command-line settings.
-For GPU experiments, see the [single-A10 first pilot](docs/a10.md),
-[two-V100S Q8 setup](docs/ovh.md), and [benchmark protocol](docs/benchmark.md). GPU performance must be measured on the target server.
+## Guides
 
-## Limits and privacy
+- [Usage](docs/usage.md): settings, saved answers, resume and migration from v0.4.
+- [Benchmarks](docs/benchmark.md): direct inference versus proof mode, costs and grading.
+- [HyperQwen on A10](docs/hyperqwen-a10.md): the pinned fast serving profile.
+- [A10 llama.cpp](docs/a10.md) / [two V100S](docs/ovh.md): retained hardware alternatives.
+- [Optional research tools](docs/research.md): manuscript chat, literature and referee drafts.
 
-Solver and reviewers currently use the same model in separate contexts. They can
-share mistakes; no formal proof checker is integrated. Automated tests check
-software behavior, not mathematical reliability or comprehensive literature coverage.
+Ollama, llama.cpp and OpenAI-compatible servers are supported. The solver and
+verifier currently use the same model in separate contexts and can share errors.
+Tests check software behaviour; they do not establish mathematical performance.
 
-Online search queries leave your machine. A remote model host receives prompts
-and excerpts. Optional Python execution requires approval and **is not sandboxed**.
-Saved jobs can contain manuscript text: keep research workspaces private.
+## Contributing and license
 
-## Contributing and citation
+Created by **Vincent Boulard**, with **Louis Carillo**. See
+[CONTRIBUTING.md](CONTRIBUTING.md), [CITATION.cff](CITATION.cff) and
+[CHANGELOG.md](CHANGELOG.md). Maintainers decide which contributions are merged.
 
-Created by **Vincent Boulard**, with **Louis Carillo**.
-Small contributions, reproducible bug reports, and shareable mathematical failure
-cases are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
-Maintainers decide which changes enter this repository.
-
-Citation metadata is available in [CITATION.cff](CITATION.cff).
-See [CHANGELOG.md](CHANGELOG.md) for the current release scope.
-
-## License
-
-[Apache License 2.0](LICENSE). Free to use, modify, and redistribute for scientific
-and commercial purposes under its terms. The license covers the harness code,
-documentation, and bundled skills; models, dependencies, and retrieved papers
-retain their own licenses. See [NOTICE](NOTICE) for attribution.
+[Apache License 2.0](LICENSE): free scientific and commercial reuse under its terms.
+Model weights, dependencies and retrieved papers retain their own licenses.
+See [NOTICE](NOTICE) for attribution.

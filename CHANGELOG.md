@@ -1,48 +1,42 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-09-27
 
-- Opt-in cooperative proof strategy: an advisor proposes precise subproblems,
-  bounded workers follow their dependencies, and an assembly job checks the
-  original theorem. One targeted repair is allowed under a fixed total budget.
-- Separate `cooperative` benchmark arm with frozen allocations and blinded
-  grading; default arms and existing A10/V100 launchers remain unchanged.
-- Complete candidates that pass the fresh critic skip recorder inference and
-  proceed to final audit; partial work keeps the bounded recorder workflow.
+A simpler proof engine: solve the complete problem, verify the written proof,
+and repair a concrete objection. This release defines a new experimental
+protocol; mathematical gains have not yet been established by a live benchmark.
 
-- Separate single-A10 Q4 pilot with pinned weights/build, one 32K inference slot,
-  and its own deployment and benchmark launchers; the two-V100S Q8 profile stays available.
-- Bounded branch scheduling preserves three attempts and token partitions while
-  executing one branch at a time, with dispatch-based time windows and recorded scheduling.
-- One-slot serving acceptance is labeled sequential capacity rather than parallel speedup.
-- Serving acceptance supports the pinned llama.cpp token-state array; A10 logs
-  retain GPU placement and memory diagnostics for live validation.
+- A substantial initial solve with thinking enabled; the benchmark matches its
+  initial prompt and sampling settings to the direct-inference baseline.
+- One whole-proof verifier with explicit verdicts, explanations and located
+  issues. Positive explanation text no longer counts as an objection.
+- Targeted repair or rebuttal, followed by another full review. Protocol failures
+  remain distinct from mathematical objections.
+- Immutable initial answers and retained revisions. Partial later work cannot
+  silently replace a complete response in the exported answer.
+- Deterministic recording, persistent usage accounting and bounded resume.
+- Removal of cooperative and portfolio proof modes, model recorder/planner,
+  checkpoint summarization and proof-mode tool loops.
+- Separate solve and verification ceilings; default job allowance 120,000
+  generated tokens over at most three attempts, with a 40,960-token context.
+- Two benchmark arms, `raw-single` and `proof`, with explicit additional compute
+  for verification and repair. Retained hardware profiles are separate conditions.
+- Shorter README and manuals, updated citation metadata and `--version`.
 
-- OpenAI-compatible local model transport for vLLM, with streamed reasoning,
-  tool calls, structured reviews and explicit token usage.
-- Isolated parallel proof portfolios with fixed aggregate token budgets and
-  selection of an existing candidate after independent review.
-- Statement-only benchmark manifests, direct-sampling and harness comparison,
-  saved run metadata and anonymized submissions for mathematical grading.
-- Pinned two-V100S deployment using CUDA 12 llama.cpp and one shared Q8_0
-  model, with three 32K context slots and recorded model/image identities.
-- Explicit llama.cpp transport with exact formatted-prompt context checks,
-  streamed reasoning, tool history, structured reviews and token accounting.
-- Concurrent-capacity acceptance checks, longer configurable time guards, and
-  a launch wrapper that binds the benchmark to the verified serving record.
-  GPU fit, throughput and mathematical gains still require the actual server.
+Compatibility: old proof artifacts remain inspectable, but cannot resume in the
+new engine. Removed strategy and worker options are not silently mapped to new
+behaviour. Keep original code and settings when reproducing older experiments.
 
 ## 0.4.0 — initial public release candidate
 
-Early experimental version; prepared for publication, not a stability or
-mathematical reliability guarantee.
+Early local-first mathematical research workflows: manuscript critique,
+exploration, saved proof attempts, literature/referee drafts, Apache-2.0 license,
+citation metadata and automated tests.
 
-- Terminal-based manuscript critique and mathematical exploration with Ollama.
-- Persistent proof attempts with bounded budgets, saved arguments, objections,
-  separate model reviews, and interruption recovery.
-- Literature and referee-report workflows with cached sources and citation checks.
-- Offline operation by default, approved edits, and optional approved Python.
-- Apache-2.0 licensing, installation documentation, citation metadata, and CI.
+Subsequent v0.4 development explored proof portfolios, cooperative advisors,
+OpenAI-compatible and llama.cpp transports, GPU deployment profiles and saved
+benchmarks. These experiments motivated the v0.5 simplification; their original
+results and source snapshots should retain their original version identity.
 
-Interfaces and saved-state formats may evolve. Research outputs need independent
-mathematical checking. Live model performance is not measured by the test suite.
+Tests validate software behaviour, not mathematical correctness. Interfaces and
+saved-state formats may evolve while the project remains experimental.
