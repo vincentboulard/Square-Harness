@@ -247,7 +247,11 @@ function WorkspacePanel() {
   const folder = status.workspace.split('/').filter(Boolean).pop() || status.workspace
   const reachable = status.ollama.reachable
   const installed = status.ollama.models.includes(status.model)
-  const modelNote = !reachable ? 'Ollama is not reachable' : !installed ? 'Model is not installed' : 'Model ready'
+  const ollama = status.backend === 'ollama'
+  const modelNote = !reachable ? (ollama ? 'Ollama is not reachable' : 'The model server is not reachable')
+    : !installed ? (ollama ? 'Model is not installed' : 'Model is not served') : 'Model ready'
+  const modelHint = !reachable ? (ollama ? 'Start ollama serve, then reload.' : 'Start the model server, then reload.')
+    : ollama ? `Run ollama pull ${status.model}.` : `Serve ${status.model}, or restart with --model.`
   return (
     <footer className="workspace">
       <div className="workspace-row">
@@ -272,7 +276,7 @@ function WorkspacePanel() {
       </button>
       {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
-      {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {!reachable ? 'Start ollama serve, then reload.' : `Run ollama pull ${status.model}.`}</p>}
+      {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}
       {pairing && (
         <Modal title="Connect a phone" onClose={() => setPairing(false)}>
           <p>On a phone connected to the same network, open one of these addresses. It contains this workspace's access token, so share it only with your own devices.</p>

@@ -35,6 +35,7 @@ export function proofLook(status: string, running = false): Look {
   switch (status) {
     case 'candidate_complete': return { variant: 'complete', label: 'Complete candidate, audited by the model' }
     case 'budget_exhausted': return { variant: 'spent', label: 'Budget used up' }
+    case 'budget_violation': return { variant: 'error', label: 'Stopped: the model server exceeded the token cap' }
     case 'paused': return { variant: 'paused', label: 'Paused' }
     case 'running': return { variant: 'paused', label: 'Interrupted, can resume' }
     case 'ready': return { variant: 'ready', label: 'Ready to start' }
@@ -53,6 +54,7 @@ export function researchLook(status: string, running = false): Look {
     case 'complete': return { variant: 'complete', label: 'Compiled and checked' }
     case 'partial': return { variant: 'partial', label: 'Partial report' }
     case 'budget_exhausted': return { variant: 'spent', label: 'Budget used up' }
+    case 'budget_violation': return { variant: 'error', label: 'Stopped: the model server exceeded the token cap' }
     case 'paused': return { variant: 'paused', label: 'Paused' }
     case 'running': return { variant: 'paused', label: 'Interrupted, can resume' }
     case 'ready': return { variant: 'ready', label: 'Ready to start' }

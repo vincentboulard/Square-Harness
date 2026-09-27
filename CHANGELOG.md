@@ -21,6 +21,9 @@
 - `read_file` reads locally extracted PDF text; `.sty` and `.cls` are text files.
 - Effort levels (Low to Brezis) replace budget fields in the interface; online
   search is a per-conversation and per-report switch, locked off by `--offline`.
+- The interface uses the model server chosen with `--backend` (Ollama, vLLM or
+  llama.cpp) and the sampling options; pausing works with every backend.
+  Parallel portfolios and the cooperative strategy remain terminal-only.
 
 - Opt-in cooperative proof strategy: an advisor proposes precise subproblems,
   bounded workers follow their dependencies, and an assembly job checks the

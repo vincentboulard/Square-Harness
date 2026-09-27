@@ -265,6 +265,8 @@ def main():
     if args.gui:
         if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
             p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')
+        if args.proof_workers != 1 or args.proof_strategy != 'independent':
+            p.error('The interface runs one proof job at a time; use the terminal for --proof-workers above 1 or --proof-strategy cooperative')
         if not 0 <= args.gui_port <= 65535:
             p.error('--gui-port must be between 0 and 65535')
         from .gui import serve

@@ -13,6 +13,7 @@ import time
 import uuid
 
 from ..agent import Agent, AgentError, Ollama
+from ..backends import LlamaCpp, OpenAICompatible, create_client
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
@@ -71,8 +72,8 @@ class EventBus:
             return [e for e in self._events if e['seq'] > after], after + 1 < oldest
 
 
-class InterruptibleOllama(Ollama):
-    """Ollama client that turns a pause request into the engine's pause signal.
+class Interruptible:
+    """Model client mixin that turns a pause request into the engine's pause signal.
 
     The check runs between streamed events, which is where Ctrl+C normally
     lands in the terminal. Tools already running finish first.
@@ -93,6 +94,22 @@ class InterruptibleOllama(Ollama):
                 yield event
         finally:
             events.close()
+
+
+# Subclasses rather than wrappers: the runners set client.timeout for their time guards.
+class InterruptibleOllama(Interruptible, Ollama):
+    pass
+
+
+class InterruptibleOpenAI(Interruptible, OpenAICompatible):
+    pass
+
+
+class InterruptibleLlamaCpp(Interruptible, LlamaCpp):
+    pass
+
+
+INTERRUPTIBLE = {'ollama': InterruptibleOllama, 'openai': InterruptibleOpenAI, 'llamacpp': InterruptibleLlamaCpp}
 
 
 class Task:
@@ -372,24 +389,27 @@ class Hub:
                                   max_requests=args.research_requests, max_chars=args.research_chars)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root))
-        client = InterruptibleOllama(args.host, task.cancel)
+        client = INTERRUPTIBLE[args.backend](args.host, task.cancel, timeout=args.request_timeout)
         agent = Agent(client, workspace, args.model, ctx or args.ctx, args.predict,
-                      (not args.no_think) if think is None else bool(think), mode, args.max_rounds)
+                      (not args.no_think) if think is None else bool(think), mode, args.max_rounds,
+                      seed=args.seed, temperature=args.temperature, top_p=args.top_p)
         return agent, library
 
     def _ensure_model(self, agent):
         models = agent.client.models()
         if agent.model not in models:
-            raise AgentError(f'Model {agent.model!r} is not installed. Available: {", ".join(models) or "none"}. '
-                             f'Run: ollama pull {agent.model}, or restart with --model and an exact tag from ollama list.')
+            hint = (f'Run: ollama pull {agent.model}, or restart with --model and an exact tag from ollama list.'
+                    if self.args.backend == 'ollama' else
+                    'Start the server with this served model name, or restart with --model and an available model ID.')
+            raise AgentError(f'Model {agent.model!r} is not served. Available: {", ".join(models) or "none"}. ' + hint)
 
     def models(self):
-        """Installed models, cached briefly so status polling never hammers Ollama."""
+        """Served models, cached briefly so status polling never hammers the model server."""
         stamp, value = self._models
         if time.monotonic() - stamp < 10 and value is not None:
             return value
         try:
-            value = {'reachable': True, 'models': Ollama(self.args.host, timeout=3).models()}
+            value = {'reachable': True, 'models': create_client(self.args.backend, self.args.host, timeout=3).models()}
         except AgentError as exc:
             value = {'reachable': False, 'models': [], 'error': str(exc)}
         self._models = (time.monotonic(), value)
@@ -638,7 +658,7 @@ class Hub:
         # so a guess appears even while a job runs; its seconds count for that job.
         try:
             context = self._free_context(root, chat_id)
-            route = classify(Ollama(self.args.host, timeout=180), self.args.model, content,
+            route = classify(create_client(self.args.backend, self.args.host, timeout=180), self.args.model, content,
                              context=context, files=files,
                              available=[f['path'] for f in store.list_files(root, limit=200)],
                              ctx=self.args.ctx)

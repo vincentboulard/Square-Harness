@@ -133,7 +133,7 @@ def _clean_section(text, title):
 
 class WriteupRunner(ResearchRunner):
     KINDS = ('writeup',)
-    TERMINAL = ('complete', 'partial', 'budget_exhausted')
+    TERMINAL = ('complete', 'partial', 'budget_exhausted', 'budget_violation')
 
     def start(self, goal, *, template_files=(), template_texts=(), notes='', output='', source_files=(), **budgets):
         if not isinstance(notes, str) or len(notes) > 200_000:

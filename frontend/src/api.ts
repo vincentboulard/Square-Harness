@@ -25,6 +25,7 @@ export type Status = {
   workspace: string
   model: string
   host: string
+  backend: 'ollama' | 'openai' | 'llamacpp'
   online: boolean
   online_locked: boolean
   allow_python: boolean
@@ -113,6 +114,8 @@ export type Claim = {
   review_artifact: string | null
   next_task: string
   whole_proof_objection?: string
+  // Set when the claim restates a complete attempt approved by the whole-proof audit.
+  record_kind?: 'whole_candidate_audit'
 }
 
 export type Critique = {
@@ -139,6 +142,8 @@ export type Round = {
   raw_draft?: string
   partial?: string
   solver_truncated?: boolean
+  // A complete attempt the critic accepted goes straight to the audit, without the recorder.
+  fast_path?: boolean
   critique?: Critique
   claim_ids?: string[]
   review_artifact?: string

@@ -149,6 +149,7 @@ function phasesFor(round: Round, pending: boolean, audited: boolean, running: bo
   const visited = PHASES.filter((phase) =>
     phase === 'plan' ? round.fresh || !!round.plan
       : phase === 'checkpoint' ? !!round.solver_truncated || !!round.raw_draft
+      : phase === 'review' ? !round.fast_path
       : phase === 'audit' ? audited || round.phase === 'audit'
       : true)
   const current = pending ? PHASES.indexOf(round.phase as typeof PHASES[number]) : -1
@@ -353,7 +354,7 @@ function Ledger({ data, counts, focus, onFocus, onArtifact }: {
       )}
       <section className="aside-section">
         <h3 className="aside-title">Claims {tally && <span className="aside-count">{tally}</span>}</h3>
-        {!data.claims.length && <p className="muted small">No claims recorded yet. The recorder adds them after each critique.</p>}
+        {!data.claims.length && <p className="muted small">No claims recorded yet. They are added after each critique, or after the audit of a complete attempt.</p>}
         {data.claims.map((claim) => (
           <ClaimEntry key={claim.id} claim={claim} claims={data.claims} open={focus === claim.id} onFocus={onFocus} onArtifact={onArtifact} />
         ))}
@@ -395,7 +396,7 @@ function ClaimEntry({ claim, claims, open, onFocus, onArtifact }: {
           )}
           <p className="small">
             <button type="button" className="link-btn" onClick={() => onArtifact(claim.candidate_artifact)}>Attempt it came from</button>
-            {claim.review_artifact && <> and the <button type="button" className="link-btn" onClick={() => onArtifact(claim.review_artifact!)}>recorder's answer</button></>}
+            {claim.review_artifact && <> and the <button type="button" className="link-btn" onClick={() => onArtifact(claim.review_artifact!)}>{claim.record_kind === 'whole_candidate_audit' ? "auditor's answer" : "recorder's answer"}</button></>}
           </p>
         </div>
       )}

@@ -539,6 +539,12 @@ watched live in the browser.
 square-harness --gui --workspace ~/research/my-paper --ctx 16384
 ```
 
+The model server options apply as in the terminal: `--backend openai` (vLLM) or
+`--backend llamacpp` with `--host` and `--model`, plus `--seed`, `--temperature`,
+`--top-p` and `--request-timeout`. Parallel proof portfolios (`--proof-workers`
+above 1) and `--proof-strategy cooperative` remain terminal-only for now; the
+interface refuses them at launch rather than silently running single proofs.
+
 The browser opens automatically; `--no-browser` prevents it and `--gui-port`
 changes the port (default 8765, or the next free one). The left rail holds one
 notebook per mode, and the list beside it shows that mode's saved jobs or

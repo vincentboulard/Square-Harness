@@ -118,7 +118,7 @@ def _text(body, key, limit):
 def status(h, body):
     hub, args = h.server.hub, h.server.hub.args
     out = {'version': VERSION, 'instance': hub.bus.instance, 'seq': hub.bus.seq,
-           'workspace': str(hub.root), 'model': args.model, 'host': args.host,
+           'workspace': str(hub.root), 'model': args.model, 'host': args.host, 'backend': args.backend,
            'online': bool(args.online) and not hub.online_locked, 'online_locked': hub.online_locked,
            'allow_python': bool(args.allow_python),
            'proof_literature': bool(args.proof_literature), 'lan': not h.server.loopback,
@@ -748,7 +748,7 @@ def serve(args):
     server.watcher = watcher
     query = '/?' + urlencode({'token': token})
     lines = [f'╭─ SQUARE HARNESS · v{VERSION} · visual interface',
-             f'│ {args.model} · {args.host}',
+             f'│ {args.model} · {args.backend} at {args.host}',
              f'│ Workspace: {root}' + (f' (folders below {base} can be opened)' if base != root else ''),
              f'│ Research: {"online" if args.online else "offline (local/cache only)"} · proof literature: '
              f'{"enabled for new jobs" if args.proof_literature else "disabled"}',

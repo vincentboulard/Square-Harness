@@ -14,8 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from mathagent import cli
+from mathagent.agent import Ollama
+from mathagent.backends import LlamaCpp, OpenAICompatible
 from mathagent.gui import server, store
-from mathagent.gui.hub import Hub
+from mathagent.gui.hub import Hub, Task
 from mathagent.gui.watch import Watcher
 from mathagent.ledger import ProofStore
 
@@ -283,6 +285,9 @@ class ProofWorkflowTests(GuiCase):
         self.assertFalse(detail['running'])
         self.assertEqual(detail['candidate'], PROOF)
         self.assertEqual(detail['claims'][0]['status'], 'reviewed')
+        # The interface labels these: no Record step, and the evidence is the auditor's answer.
+        self.assertTrue(detail['rounds'][0]['fast_path'])
+        self.assertEqual(detail['claims'][0]['record_kind'], 'whole_candidate_audit')
         self.assertEqual(detail['sources'], [{'path': 'identity.tex', 'sha256': detail['sources'][0]['sha256'], 'lines': 1}])
         self.assertEqual([c['role'] for c in detail['calls']], ['solver', 'solver', 'critic', 'auditor'])
         self.assertGreater(len(detail['artifacts']), 5)
@@ -509,6 +514,62 @@ class LiveUpdateTests(GuiCase):
         self.assertFalse(detail['running'])  # no process holds the run lock
         with job.lock():
             self.assertTrue(self.ok('GET', f'/api/proofs/{job.state["id"]}')['running'])
+
+
+class BackendTests(unittest.TestCase):
+    """The interface builds the same model client as the terminal, for every --backend."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def hub(self, *extra):
+        return Hub(cli.parser().parse_args(['--workspace', str(self.root), '--host', 'http://127.0.0.1:9',
+                                            '--model', MODEL, *extra]))
+
+    def test_each_backend_gets_a_pausable_client_with_the_sampling_settings(self):
+        for backend, base in (('ollama', Ollama), ('openai', OpenAICompatible), ('llamacpp', LlamaCpp)):
+            with self.subTest(backend=backend):
+                hub = self.hub('--backend', backend, '--request-timeout', '42', '--seed', '7',
+                               '--temperature', '0.3', '--top-p', '0.9')
+                task = Task('proof', '', 'Proof')
+                agent, _ = hub._engine(task)
+                self.assertIsInstance(agent.client, base)
+                self.assertEqual((agent.client.backend, agent.client.timeout), (backend, 42))
+                self.assertEqual((agent.seed, agent.temperature, agent.top_p), (7, 0.3, 0.9))
+                task.cancel.set()
+                with self.assertRaises(KeyboardInterrupt):
+                    next(agent.client.stream({'model': MODEL, 'messages': [],
+                                              'options': {'num_ctx': 4096, 'num_predict': 64}}))
+
+    def test_model_status_speaks_the_backend_protocol(self):
+        class Models(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                found = self.path == '/v1/models'
+                body = json.dumps({'data': [{'id': MODEL}]} if found else {}).encode()
+                self.send_response(200 if found else 404)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), Models)
+        threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        hub = self.hub('--backend', 'openai', '--host', f'http://127.0.0.1:{httpd.server_address[1]}')
+        self.assertEqual(hub.models(), {'reachable': True, 'models': [MODEL]})
+
+    def test_gui_flag_rejects_parallel_and_cooperative_proofs(self):
+        for extra in (['--proof-workers', '2'], ['--proof-strategy', 'cooperative']):
+            process = subprocess.run([sys.executable, '-m', 'mathagent', '--gui', *extra, '--workspace', str(self.root)],
+                                     capture_output=True, text=True, timeout=20)
+            self.assertEqual(process.returncode, 2, extra)
+            self.assertIn('one proof job at a time', process.stderr)
 
 
 class StoreTests(unittest.TestCase):
