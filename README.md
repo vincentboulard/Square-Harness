@@ -10,6 +10,11 @@ reviews the complete proof, and saves every candidate and objection for inspecti
 workflow. A model's approval is not a mathematical certificate; independent
 checking remains necessary.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/interface-dark.png">
+  <img alt="The Square Harness visual interface on its default page: the Free notebook, with the Prove, Critic, Explore, Literature, Referee and Write-up modes in the left rail" src="docs/images/interface-light.png">
+</picture>
+
 ## Quick start
 
 You need Python 3.10+, Linux or macOS, and a running model server. Models and their
