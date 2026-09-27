@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "profile": "a10-hyperqwen-dflash2-v0.5",
+  "profile": "a10-hyperqwen-dflash2-v0.5.1",
   "image": "ghcr.io/syv-ai/hyperqwen@sha256:6ac4aea86882fae42381b701bb3eb20a1df94a93a62e23f0e1edb3c8b34d2819",
   "model": "qwen3.8-27b",
   "model_revision": "dbirks/Qwen3.8-27B-W4A16-AutoRound@1f05c441c4e64ae0549de44fa9ea5a6d43610314;fast@124c14e7e8c7d2f5402933b9af368e772a9fcf0c;dflash2@4d30ec736ffc6b8688dc2ae2b502d9b48bdec279",
@@ -30,5 +30,7 @@
     "PREFILL_ATTN": "",
     "EXTRA_ARGS": "--generation-config vllm --no-enable-prefix-caching"
   },
-  "verify_tokens": 16384
+  "verify_tokens": 16384,
+  "min_solve_tokens": 16384,
+  "verify_temperature": 0.6
 }

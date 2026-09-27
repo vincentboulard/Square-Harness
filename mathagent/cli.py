@@ -133,9 +133,9 @@ def parser():
     p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for other servers)')
     p.add_argument('--workspace', type=Path, default=Path.cwd())
     p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
-    p.add_argument('--request-timeout', type=float, default=600, help='Maximum seconds per model request')
+    p.add_argument('--request-timeout', type=float, default=1800, help='Maximum seconds per model request')
     p.add_argument('--seed', type=int, help='Base sampling seed; saved proof jobs retain their original seed')
-    p.add_argument('--temperature', type=float, default=0.6, help='Solver/chat temperature; proof reviews remain at zero')
+    p.add_argument('--temperature', type=float, default=0.6, help='Solver/chat sampling temperature')
     p.add_argument('--top-p', type=float, default=0.95)
     p.add_argument('--ctx', type=int, default=40960)
     p.add_argument('--predict', type=int, default=4096,
@@ -148,6 +148,10 @@ def parser():
                    help='Output ceiling for each full solve or revision, including thinking')
     p.add_argument('--proof-verify-tokens', type=int, default=16384,
                    help='Output ceiling for each whole-proof review, including thinking')
+    p.add_argument('--proof-min-solve-tokens', type=int, default=None,
+                   help='Smallest output allowance for a repair/continuation fitted to the context (default: min(16384, solve tokens))')
+    p.add_argument('--proof-verify-temperature', type=float, default=None,
+                   help='Verifier sampling temperature (default: --temperature)')
     p.add_argument('--proof-file', action='append', default=[], metavar='PATH',
                    help='Pin a complete theorem source relative to workspace; repeat for multiple files')
     network = p.add_mutually_exclusive_group()
@@ -211,6 +215,11 @@ def main():
             or not math.isfinite(args.proof_seconds) or args.proof_seconds <= 0
             or args.proof_solve_tokens < 128 or args.proof_verify_tokens < 128):
         p.error('Use proof-rounds 1–100, proof-tokens >= 512, finite proof-seconds > 0, and solve/verify limits >= 128')
+    if args.proof_min_solve_tokens is not None and not 128 <= args.proof_min_solve_tokens <= args.proof_solve_tokens:
+        p.error('--proof-min-solve-tokens must be between 128 and --proof-solve-tokens')
+    if args.proof_verify_temperature is not None and (not math.isfinite(args.proof_verify_temperature)
+                                                      or not 0 <= args.proof_verify_temperature <= 2):
+        p.error('--proof-verify-temperature must be between 0 and 2')
     if (not 1 <= args.research_rounds <= 50 or args.research_tokens < 1024
             or args.research_input_tokens < 2048 or not math.isfinite(args.research_seconds)
             or args.research_seconds <= 0 or not 0 <= args.research_requests <= 100
@@ -273,6 +282,18 @@ def main():
                 raise AgentError(f'Model {agent.model!r} is not served. Available: {", ".join(models) or "none"}\n' + hint)
             model_checked = True
 
+    def unpinned_files(query):
+        pinned = {str(Path(f)) for f in args.proof_file}
+        names = dict.fromkeys(re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt)\b', query))
+        found = []
+        for name in names:
+            try:
+                if name not in pinned and workspace.path(name).is_file():
+                    found.append(name)
+            except (OSError, ValueError):
+                continue
+        return found
+
     def proof_result(result):
         nonlocal last_proof_id
         last_proof_id = result['id']
@@ -321,13 +342,18 @@ def main():
                 raise ValueError('Proof context must exceed each solve/verify output limit plus room for the input')
             if args.proof_tokens < args.proof_solve_tokens + args.proof_verify_tokens:
                 raise ValueError('--proof-tokens must cover one full solve and verification; reduce their explicit limits or raise the total')
+            unpinned = unpinned_files(query)
+            if unpinned:
+                ui.say('Note: proof mode has no file tools; the model sees only pinned text. Not pinned: '
+                       + ', '.join(unpinned) + '. Relaunch with --proof-file to include them.')
             ensure_model()
             last_proof_id = ''
             proof_running = True
             result = ProofRunner(agent, ui.emit).start(query, max_rounds=args.proof_rounds,
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                 max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
-                source_files=args.proof_file)
+                min_solve_tokens=args.proof_min_solve_tokens,
+                verify_temperature=args.proof_verify_temperature, source_files=args.proof_file)
             proof_running = False
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},

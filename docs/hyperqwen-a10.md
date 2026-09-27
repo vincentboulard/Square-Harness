@@ -18,7 +18,9 @@ those results do not validate the new proof engine.
 
 The two initial calls use the same instruction, statement, temperature 0.6,
 top-p 0.95 and problem seed, with thinking enabled and no tools. Repairs use the
-same solver cap. Verification has its own prompt and a fresh context. The proof
+same solver cap when it fits the 40,960-token context, otherwise a fitted cap of at
+least 16,384 (`min_solve_tokens` in the lock). Verification has its own prompt, a
+fresh context and temperature 0.6 (`verify_temperature`); one review decides. The proof
 arm has additional compute; this is not an equal-total-budget comparison.
 
 The exact image, weights revisions and launch environment are in

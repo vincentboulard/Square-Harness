@@ -6,7 +6,7 @@ Square Harness connects a language model to a simple workflow:
 **solve → verify → repair when needed**. It preserves the original answer,
 reviews the complete proof, and saves every candidate and objection for inspection.
 
-**Version 0.5.0 · experimental.** The priority is a reliable, understandable proof
+**Version 0.5.1 · experimental.** The priority is a reliable, understandable proof
 workflow. A model's approval is not a mathematical certificate; independent
 checking remains necessary.
 

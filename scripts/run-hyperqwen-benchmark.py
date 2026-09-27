@@ -32,6 +32,8 @@ def prepare(args):
            '--ctx', str(lock['context']),
            '--tokens', str(lock['harness_tokens']), '--predict', str(lock['solver_predict']),
            '--verify-tokens', str(lock['verify_tokens']), '--rounds', str(lock['rounds']),
+           '--min-solve-tokens', str(lock['min_solve_tokens']),
+           '--verify-temperature', str(lock['verify_temperature']),
            '--raw-seconds', str(lock['raw_seconds']), '--seconds', str(lock['harness_seconds']),
            '--request-timeout', str(lock['request_timeout']), '--seed', str(lock['seed']),
            '--temperature', '0.6', '--top-p', '0.95', '--workers', '1', '--max-in-flight', '1']

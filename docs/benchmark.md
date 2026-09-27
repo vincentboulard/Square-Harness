@@ -90,7 +90,7 @@ python -m mathagent.benchmark \
   --server-image '<image-digest>' --dtype '<actual-serving-precision>' \
   --arms raw-single proof --ctx 40960 --predict 32768 \
   --verify-tokens 16384 --tokens 120000 --rounds 3 \
-  --seconds 1800 --request-timeout 600 --seed 20260927 \
+  --seconds 1800 --request-timeout 1800 --seed 20260927 \
   --workers 1 --max-in-flight 1 --dry-run
 ```
 
@@ -101,7 +101,10 @@ Keep the model weights, server build, reasoning policy and harness source fixed.
 Run long jobs in a server-side service or persistent terminal session.
 
 `--predict` is the initial solve/repair ceiling **for both arms**. `--verify-tokens`
-includes verifier thinking and its written response. `--tokens` is the proof-job
+includes verifier thinking and its written response; `--verify-temperature`
+defaults to `--temperature`. `--min-solve-tokens` (default min(16384, predict)) is
+the smallest context-fitted repair/continuation allowance; the initial solve is
+never fitted. `--tokens` is the proof-job
 ceiling, including all reviews and repairs. `--rounds` bounds solver attempts.
 `--raw-seconds` optionally gives direct inference a separate time guard; record
 that difference. `--workers` and `--max-in-flight` control independent jobs, not

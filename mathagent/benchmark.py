@@ -90,6 +90,9 @@ def parser():
     p.add_argument('--ctx', type=int, default=40960)
     p.add_argument('--predict', type=int, default=32768, help='Identical solver output ceiling in both arms')
     p.add_argument('--verify-tokens', type=int, default=16384, help='Output ceiling per proof verifier call, including thinking')
+    p.add_argument('--min-solve-tokens', type=int, default=None,
+                   help='Smallest context-fitted repair/continuation allowance (default: min(16384, predict))')
+    p.add_argument('--verify-temperature', type=float, default=None, help='Verifier sampling temperature (default: --temperature)')
     p.add_argument('--tokens', type=int, default=120000, help='Total generated-token ceiling for every proof role combined')
     p.add_argument('--rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve')
     p.add_argument('--replicates', type=int, default=1)
@@ -98,7 +101,7 @@ def parser():
     p.add_argument('--top-p', type=float, default=0.95)
     p.add_argument('--seconds', type=float, default=1800, help='Wall-time guard per job')
     p.add_argument('--raw-seconds', type=float, default=None, help='Optional different time guard for raw-single')
-    p.add_argument('--request-timeout', type=float, default=600, help='Per-request timeout, bounded by the job time remaining')
+    p.add_argument('--request-timeout', type=float, default=1800, help='Per-request timeout, bounded by the job time remaining')
     p.add_argument('--workers', type=int, default=1, help='Independent problem/arm jobs in flight')
     p.add_argument('--max-in-flight', type=int, default=1, help='Maximum model requests in flight; must be at least workers')
     p.add_argument('--dry-run', action='store_true', help='Validate inputs and print the plan without network or writes')
@@ -138,6 +141,14 @@ def preflight(args):
             raise ValueError(f'{name} must be finite and positive')
     if not math.isfinite(args.temperature) or not 0 <= args.temperature <= 2 or not math.isfinite(args.top_p) or not 0 < args.top_p <= 1:
         raise ValueError('Invalid sampling parameters')
+    if args.min_solve_tokens is None:
+        args.min_solve_tokens = min(16384, args.predict)
+    if not 128 <= args.min_solve_tokens <= args.predict:
+        raise ValueError('min-solve-tokens must be between 128 and predict')
+    if args.verify_temperature is None:
+        args.verify_temperature = args.temperature
+    if not math.isfinite(args.verify_temperature) or not 0 <= args.verify_temperature <= 2:
+        raise ValueError('verify-temperature must be between 0 and 2')
     # No tokenizer/model calls during dry run. Full later inputs are checked
     # by the proof engine when the actual candidate is available.
     for problem in data['problems']:
@@ -299,7 +310,8 @@ def _proof(agent, goal, path, args):
     # Export the engine-selected immutable candidate, never the newest draft.
     result = ProofRunner(agent).start(goal, max_rounds=args.rounds, max_tokens=args.tokens,
         max_seconds=args.seconds, source_files=(), max_predict=args.predict,
-        verify_tokens=args.verify_tokens)
+        verify_tokens=args.verify_tokens, min_solve_tokens=args.min_solve_tokens,
+        verify_temperature=args.verify_temperature)
     usage, states = _proof_usage(agent.workspace.root)
     answer_path = path / 'answer.md'
     answer_path.write_text(result['answer'], encoding='utf-8')

@@ -175,10 +175,10 @@ def _validate(state: dict, proof_id: str) -> None:
     for key in ("max_rounds", "max_tokens", "max_seconds"):
         if key not in state["settings"]:
             raise LedgerError(f"Missing required proof budget: settings.{key}")
-    for key in ("max_rounds", "token_budget", "max_tokens", "time_budget", "max_seconds", "predict", "ctx", "max_predict", "verify_tokens"):
+    for key in ("max_rounds", "token_budget", "max_tokens", "time_budget", "max_seconds", "predict", "ctx", "max_predict", "verify_tokens", "min_solve_tokens"):
         if key in state["settings"]:
             _number(state["settings"][key], f"settings.{key}", positive=True,
-                    integer=key in {"max_rounds", "token_budget", "max_tokens", "predict", "ctx", "max_predict", "verify_tokens"})
+                    integer=key in {"max_rounds", "token_budget", "max_tokens", "predict", "ctx", "max_predict", "verify_tokens", "min_solve_tokens"})
     if "truncation_streak" in state:
         _number(state["truncation_streak"], "truncation_streak", integer=True)
     for key in (("pending", "final_audit") if state["version"] == 1 else ("pending",)):

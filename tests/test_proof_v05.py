@@ -9,8 +9,11 @@ from unittest.mock import patch
 from mathagent.agent import Agent
 from mathagent.backends import TokenBudgetError
 from mathagent.ledger import LedgerError, ProofStore
-from mathagent.proof import ProofRunner, check_context, validate_review
-from mathagent.proof_policy import initial_request
+from types import SimpleNamespace
+
+from mathagent import benchmark
+from mathagent.proof import ProofBudget, ProofRunner, check_context, count_input, validate_review
+from mathagent.proof_policy import COMMON_INSTRUCTION, initial_request
 from mathagent.tools import Workspace
 
 
@@ -382,6 +385,150 @@ class ProofV05Tests(unittest.TestCase):
         self.assertEqual(check_context(client, payload)['method'], 'server token count')
         client.count_input_tokens = lambda payload: None
         self.assertIn('byte estimate', check_context(client, payload)['method'])
+
+
+class ExactClient(Client):
+    """Server-like counter: about 3.5 bytes per token, as measured on the A10 runs."""
+    def count_input_tokens(self, payload):
+        return int(len(json.dumps(payload['messages'], ensure_ascii=False).encode()) / 3.47) + 1
+
+
+class ByteFallbackClient(Client):
+    count_input_tokens = None  # e.g. Ollama: conservative 1 byte = 1 token estimate
+
+
+REAL = dict(max_predict=32768, verify_tokens=16384, min_solve_tokens=16384, max_tokens=120000, max_rounds=2)
+PROOF_7KB = 'Proof. ' + ('We use $\\sum_{k=0}^{n}\\binom{n}{k}x^k$ and check each case. ' * 110)
+LONG_OBJECTION = {'explanation': 'The argument is mostly sound. ' * 100, 'verdict': 'issues_found', 'issues': [{
+    'location': 'Step 3', 'kind': 'invalid_inference', 'evidence': 'For n=2 the displayed bound fails: 5 > 4. ' * 30}]}
+
+
+class ProofV051RealSizeTests(unittest.TestCase):
+    """v0.5.1: realistic 32k solves in a 40,960-token context."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def start(self, client, **kwargs):
+        agent = Agent(client, Workspace(self.root), ctx=40960, predict=77, seed=17, temperature=.6, top_p=.95, think=True)
+        runner = ProofRunner(agent)
+        settings = dict(REAL); settings.update(kwargs)
+        return runner, runner.start('Prove the identity for every integer n >= 1.', **settings)
+
+    def repair_scenario(self, client_class):
+        client = client_class([[event(PROOF_7KB, count=20000)], [event(LONG_OBJECTION, count=9000)],
+                               [event('Repaired complete proof.', count=21000)], [event(approval(), count=8000)]])
+        runner, result = self.start(client)
+        self.assertEqual(result['status'], 'candidate_complete')
+        self.assertEqual(result['answer'], 'Repaired complete proof.')
+        initial, repair = client.requests[0], client.requests[2]
+        self.assertEqual(initial['options']['num_predict'], 32768)  # the direct-call allowance is never fitted
+        self.assertEqual(initial['messages'], initial_request('Prove the identity for every integer n >= 1.'))
+        count = count_input(client, repair)[0]
+        self.assertEqual(repair['options']['num_predict'], min(32768, 40960 - count - 1))
+        self.assertEqual(runner.state['calls'][2]['reserved_tokens'], repair['options']['num_predict'])
+        return count, repair['options']['num_predict']
+
+    def test_repair_fits_with_exact_counter(self):
+        count, cap = self.repair_scenario(ExactClient)
+        self.assertEqual(cap, 32768)
+
+    def test_repair_fits_with_byte_fallback_by_fitting_its_cap(self):
+        count, cap = self.repair_scenario(ByteFallbackClient)
+        self.assertGreater(count + 32768 + 1, 40960)  # v0.5.0 stopped here with needs_context
+        self.assertTrue(16384 <= cap < 32768)
+
+    def test_repair_below_minimum_allowance_is_context_failure_not_clipping(self):
+        huge = 'x' * 21000  # the review fits; the repair would leave < 16384 output tokens
+        client = ByteFallbackClient([[event(huge, count=20000)], [event(LONG_OBJECTION, count=9000)]])
+        runner, result = self.start(client)
+        self.assertEqual(result['status'], 'needs_context')
+        self.assertEqual(result['answer'], huge)
+        self.assertEqual(len(client.requests), 2)
+
+    def test_long_notes_continue_as_marked_tail_excerpt(self):
+        notes = 'BEGIN-NOTES ' + ('checking the parity case carefully; ' * 2500) + ' END-NOTES'
+        partial = 'Partial written derivation: S_n = 2J - n. ' * 40
+        client = ExactClient([[event(partial, thinking=notes, reason='length', count=32768)],
+                              [event('Finished continuation proof.', count=20000)], [event(approval(), count=8000)]])
+        runner, result = self.start(client)
+        self.assertEqual(result['status'], 'candidate_complete')
+        self.assertEqual(result['answer'], 'Finished continuation proof.')
+        request = client.requests[1]
+        content = request['messages'][0]['content']
+        self.assertIn(partial, content)
+        self.assertIn('final excerpt, earlier notes omitted', content)
+        self.assertIn('END-NOTES', content)
+        self.assertNotIn('BEGIN-NOTES', content)
+        cap = request['options']['num_predict']
+        self.assertGreaterEqual(cap, 16384)
+        self.assertLessEqual(count_input(client, request)[0] + cap + 1, 40960)
+        self.assertEqual(runner.state['candidates'][1]['kind'], 'continue')
+
+    def test_unfittable_continuation_becomes_fresh_solve(self):
+        huge_fragment = 'fragment text ' * 9000
+        client = ExactClient([[event(huge_fragment, thinking='notes', reason='length', count=32768)],
+                              [event('Fresh complete proof.', count=20000)], [event(approval(), count=8000)]])
+        runner, result = self.start(client)
+        self.assertEqual(client.requests[1]['messages'], initial_request('Prove the identity for every integer n >= 1.'))
+        self.assertEqual(client.requests[1]['options']['num_predict'], 32768)
+        self.assertEqual(runner.state['candidates'][1]['kind'], 'retry')
+        self.assertEqual(result['answer'], 'Fresh complete proof.')
+        self.assertEqual(result['status'], 'candidate_complete')
+
+    def test_verifier_is_sampled_and_framed_as_review(self):
+        client = ExactClient([[event('A complete proof.', count=20000)], [event(approval(), count=8000)]])
+        runner, result = self.start(client, verify_temperature=.3)
+        solver, verifier = client.requests
+        self.assertEqual(solver['options']['temperature'], .6)
+        self.assertEqual(verifier['options']['temperature'], .3)
+        self.assertEqual(runner.state['settings']['verify_temperature'], .3)
+        content = verifier['messages'][0]['content']
+        self.assertFalse(content.startswith(COMMON_INSTRUCTION))
+        self.assertIn('TASK GIVEN TO THE SOLVER', content)
+        self.assertIn('Prove the identity for every integer n >= 1.', content)
+        self.assertIn('A complete proof.', content)
+        self.assertEqual(len(client.requests), 2)  # one approval ends the job
+
+    def test_verifier_temperature_defaults_to_solver_temperature(self):
+        client = ExactClient([[event('A complete proof.')], [event(approval())]])
+        runner, _ = self.start(client)
+        self.assertEqual(client.requests[1]['options']['temperature'], .6)
+
+    def test_verifier_output_is_bounded(self):
+        with self.assertRaises(ValueError):
+            validate_review(json.dumps(approval('x' * 4001)))
+        many = dict(objection(), issues=objection()['issues'] * 6)
+        with self.assertRaises(ValueError):
+            validate_review(json.dumps(many))
+
+    def test_repair_not_started_without_time_for_a_measured_cycle(self):
+        client = ExactClient([[event('A proof.')], [event(objection())]])
+        runner, result = self.start(client, max_rounds=1, max_seconds=1800)
+        self.assertEqual(result['status'], 'attempts_exhausted')
+        runner.state['calls'][0]['seconds'], runner.state['calls'][1]['seconds'] = 600, 400
+        runner._clock = None
+        runner._seconds_before = 1500
+        with self.assertRaisesRegex(ProofBudget, 'first solve and review took 1000'):
+            runner._reserve_attempt()
+        runner._seconds_before = 500
+        runner._reserve_attempt()  # 1300 s left covers a 1000 s cycle
+
+    def test_benchmark_records_and_forwards_new_settings(self):
+        data = benchmark.init_smoke(self.root / 'data')
+        args = benchmark.parser().parse_args(['--manifest', str(data), '--output', str(self.root / 'out'), '--arms', 'proof'])
+        _, plan = benchmark.preflight(args)
+        self.assertEqual(plan['settings']['min_solve_tokens'], 16384)
+        self.assertEqual(plan['settings']['verify_temperature'], .6)
+        self.assertEqual(plan['settings']['request_timeout'], 1800)
+        job = self.root / 'job'
+        job.mkdir()
+        with patch('mathagent.benchmark.ProofRunner') as runner:
+            runner.return_value.start.return_value = {'answer': 'proof', 'status': 'candidate_complete'}
+            benchmark._proof(SimpleNamespace(workspace=SimpleNamespace(root=job)), 'goal', job, args)
+        kwargs = runner.return_value.start.call_args.kwargs
+        self.assertEqual((kwargs['min_solve_tokens'], kwargs['verify_temperature']), (16384, .6))
 
 
 if __name__ == '__main__':

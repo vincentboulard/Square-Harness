@@ -27,18 +27,27 @@ and `/resume <id>`. `/paste` accepts multiple lines, ending with `/end`.
 
 1. **Solve.** One substantial, tool-free call asks for a complete proof. Thinking
    is enabled. The problem and pinned sources are retained exactly.
-2. **Verify.** A fresh context receives the original problem and the entire written
-   candidate. It returns a verdict, an explanation and located objections.
+2. **Verify.** A fresh context receives the solver's task (quoted as reference) and
+   the entire written candidate. It returns a verdict, an explanation and located
+   objections. The verifier samples with the solver temperature by default
+   (`--proof-verify-temperature`); greedy decoding tends to loop on thinking models.
 3. **Stop or repair.** If the verifier finds no issue, return that same candidate
    unchanged. Concrete objections are passed to the solver as claims to assess:
    it can repair the proof or rebut a mistaken objection. A revised complete proof
    is reviewed again. An uncertain verdict stops with the candidate retained; it
    does not automatically request a rewrite.
 
+One review decides: a single "no issue found" ends the job, and an uncertain
+verdict stops it. Extra tokens are spent only on repairing a concrete objection;
+there are no confirmation reviews.
+
 An unfinished response is retained as partial work. Continuing it is another
 model request grounded in saved text, not a guaranteed continuation of the prior
-request's hidden reasoning. Thinking stays on; the controller does not force a
-new approach after an arbitrary number of rounds.
+request's hidden reasoning. The written text is always included; the saved notes
+are included in full or, when they do not fit, as a clearly marked final excerpt.
+If even the written text leaves too little room, the original problem is solved
+afresh instead. Thinking stays on; the controller does not force a new approach
+after an arbitrary number of rounds.
 
 A malformed or truncated review is retried at most once on the same candidate
 when budget allows. If still unavailable, the job stops with the candidate
@@ -56,16 +65,23 @@ including agreement after repair, is not a formal proof certificate.
 | `--proof-tokens` | 120,000 | Generated-token ceiling for the entire job |
 | `--proof-rounds` | 3 | Maximum solver attempts, including the first |
 | `--proof-seconds` | 1,800 | Active job time allowance in seconds |
-| `--request-timeout` | 600 | Maximum seconds for a single request |
+| `--proof-min-solve-tokens` | min(16,384, solve) | Smallest context-fitted repair/continuation allowance |
+| `--proof-verify-temperature` | `--temperature` | Verifier sampling temperature |
+| `--request-timeout` | 1,800 | Maximum seconds for a single request |
 
 Output ceilings **include thinking**. A 120k job allowance spans several requests;
 it does not require a 120k context. Limits are ceilings, not spending targets.
 The controller reserves room for the next useful operation and its review,
-and stops when that operation cannot fit in the remaining budget.
+and stops when that operation cannot fit in the remaining budget. After the first
+solve and review, their measured duration must also fit in the remaining time
+before another attempt starts. With the defaults this usually allows one repair.
 
 These are starting settings, not experimentally established optima. A long
 candidate plus a long verifier response must fit within the same context window.
-An excessive prompt is an explicit context failure; it is not shortened invisibly.
+The first solve keeps its full allowance, exactly like direct inference. A repair
+or continuation may use a smaller output allowance so that its full input fits,
+but never less than `--proof-min-solve-tokens`; below that it is an explicit
+context failure. Prompts are never shortened invisibly.
 The llama.cpp adapter and supported vLLM `/tokenize` endpoints provide exact input
 counts; otherwise a conservative byte estimate can reject a request that would fit.
 Choose budgets to suit the server and keep enough room for both the problem and

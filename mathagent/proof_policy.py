@@ -18,17 +18,17 @@ def initial_request(goal, sources=()):
 ISSUE_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'properties': {
-        'location': {'type': 'string', 'maxLength': 4000},
+        'location': {'type': 'string', 'maxLength': 400},
         'kind': {'type': 'string', 'enum': ['invalid_inference', 'missing_justification', 'uncertainty']},
-        'evidence': {'type': 'string', 'maxLength': 12000},
+        'evidence': {'type': 'string', 'maxLength': 1500},
     },
     'required': ['location', 'kind', 'evidence'],
 }
 VERIFIER_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'properties': {
-        'explanation': {'type': 'string', 'maxLength': 40000},
-        'issues': {'type': 'array', 'maxItems': 12, 'items': ISSUE_SCHEMA},
+        'explanation': {'type': 'string', 'maxLength': 4000},
+        'issues': {'type': 'array', 'maxItems': 5, 'items': ISSUE_SCHEMA},
         'verdict': {'type': 'string', 'enum': ['no_issue_found', 'issues_found', 'uncertain']},
     },
     'required': ['explanation', 'issues', 'verdict'],
@@ -46,7 +46,8 @@ for invalid_inference give a checkable calculation, counterexample, or failed im
 for missing_justification identify the actual unmet obligation. Use uncertainty when you
 cannot decide, rather than claiming an unsupported refutation. Do not propose an unproved
 replacement lemma as a mandatory repair. A complete review concerns the whole proof,
-including assumptions, edge cases, and whether the requested conclusion follows."""
+including assumptions, edge cases, and whether the requested conclusion follows.
+Be concise; the schema limits lengths."""
 REPAIR_POLICY = """Assess the review below as fallible allegations, not established facts.
 Repair any valid objection in the SAME proof; rebut an invalid objection with a precise
 mathematical explanation. Preserve valid arguments. Return a complete self-contained
@@ -59,3 +60,12 @@ fallible and may end mid-sentence. This is a new call with saved text, not a res
 hidden reasoning state. Return a complete self-contained proof; if you cannot finish,
 identify the precise remaining obligation. Do not summarize the previous attempt in
 place of solving the problem."""
+
+
+def review_request(goal, sources, candidate_text):
+    """Verifier messages: the solver's exact task is quoted as reference, not as an instruction."""
+    task = initial_request(goal, sources)[0]['content']
+    content = (VERIFIER_POLICY + '\n\nTASK GIVEN TO THE SOLVER (reference; review the candidate, '
+               're-deriving steps as needed):\n<<<\n' + task + '\n>>>\n\nCANDIDATE PROOF TO REVIEW:\n<<<\n'
+               + candidate_text + '\n>>>')
+    return [{'role': 'user', 'content': content}]

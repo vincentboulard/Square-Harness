@@ -75,7 +75,7 @@ class SamplingTests(unittest.TestCase):
                     patch.object(cli, 'UI'), patch.object(cli, 'OpenAICompatible', return_value=client) as factory, \
                     patch.object(cli.Agent, 'run', autospec=True, return_value='Checked.') as run:
                 self.assertEqual(cli.main(), 0)
-                factory.assert_called_once_with('http://localhost:8000', timeout=600)
+                factory.assert_called_once_with('http://localhost:8000', timeout=1800)
                 agent = run.call_args.args[0]
                 self.assertEqual((agent.model, agent.seed, agent.temperature), ('square-qwen', 42, 0.4))
 

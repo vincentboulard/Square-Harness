@@ -8,7 +8,7 @@ authors:
     given-names: Vincent
   - family-names: Carillo
     given-names: Louis
-version: 0.5.0
+version: 0.5.1
 repository-code: "https://github.com/vincentboulard/Square-Harness"
 license: Apache-2.0
 keywords:

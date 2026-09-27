@@ -14,10 +14,10 @@ from .agent import AgentError
 from .backends import TokenBudgetError
 from .ledger import LedgerError, ProofStore
 from .proof_policy import (
-    CONTINUE_POLICY, REPAIR_POLICY, VERIFIER_POLICY, VERIFIER_SCHEMA, initial_request,
+    CONTINUE_POLICY, REPAIR_POLICY, VERIFIER_SCHEMA, initial_request, review_request,
 )
 
-POLICY_VERSION = 6
+POLICY_VERSION = 7
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 
@@ -66,10 +66,8 @@ def validate_review(text):
     return value
 
 
-def check_context(client, payload):
-    """Check the full request without clipping; return the counting provenance."""
-    cap = payload['options']['num_predict']
-    context = payload['options']['num_ctx']
+def count_input(client, payload):
+    """Count the full request input; return (tokens, counting method). Never clips."""
     counter = getattr(client, 'count_input_tokens', None)
     count = counter(payload) if callable(counter) else None
     if count is None:
@@ -82,6 +80,14 @@ def check_context(client, payload):
         if type(count) is not int or count < 0:
             raise AgentError('Invalid exact input token count')
         method = 'server token count'
+    return count, method
+
+
+def check_context(client, payload):
+    """Check the full request without clipping; return the counting provenance."""
+    cap = payload['options']['num_predict']
+    context = payload['options']['num_ctx']
+    count, method = count_input(client, payload)
     if count + cap + 1 > context:
         raise ProofContext(f'Full original statement and saved work need {count} input tokens ({method}) plus {cap} output tokens, exceeding context {context}. Nothing was clipped; candidate retained.')
     return {'input_tokens': count, 'method': method}
@@ -110,11 +116,12 @@ class ProofRunner:
             'controller_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'transport_sha256': {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                  for name in ('backends.py', 'agent.py')},
-            'harness_version': '0.5.0',
+            'harness_version': '0.5.1',
         }
 
     def start(self, goal, *, max_rounds=3, max_tokens=120000, max_seconds=1800,
-              source_files=(), max_predict=32768, verify_tokens=16384):
+              source_files=(), max_predict=32768, verify_tokens=16384,
+              min_solve_tokens=None, verify_temperature=None):
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 60000:
             raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
         for name, value, lower, upper in (
@@ -123,6 +130,15 @@ class ProofRunner:
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError(f'{name} must be an integer between {lower} and {upper}')
+        if min_solve_tokens is None:
+            min_solve_tokens = min(16384, max_predict)
+        if type(min_solve_tokens) is not int or not 128 <= min_solve_tokens <= max_predict:
+            raise ValueError('min_solve_tokens must be an integer between 128 and max_predict')
+        if verify_temperature is None:
+            verify_temperature = self.agent.temperature
+        if (isinstance(verify_temperature, bool) or not isinstance(verify_temperature, (int, float))
+                or not math.isfinite(verify_temperature) or not 0 <= verify_temperature <= 2):
+            raise ValueError('verify_temperature must be between 0 and 2')
         if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or max_seconds <= 0:
             raise ValueError('Proof time budget must be finite and positive')
         sources = []
@@ -134,9 +150,10 @@ class ProofRunner:
             text = self.agent.workspace.text(actual)
             sources.append({'path': str(path), 'content': text, 'sha256': _digest(text)})
         settings = dict(self._provenance(), max_rounds=max_rounds, max_tokens=max_tokens,
-                        max_seconds=max_seconds, max_predict=max_predict, verify_tokens=verify_tokens)
+                        max_seconds=max_seconds, max_predict=max_predict, verify_tokens=verify_tokens,
+                        min_solve_tokens=min_solve_tokens, verify_temperature=verify_temperature)
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources)
-        self.emit('notice', f'Proof {self.state["id"]}: solve, verify, and at most {max_rounds - 1} revisions')
+        self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
 
     def resume(self, proof_id):
@@ -180,6 +197,14 @@ class ProofRunner:
             raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
         if self._elapsed() >= settings['max_seconds']:
             raise ProofBudget('Elapsed-time budget exhausted')
+        # After one full cycle, its measured duration estimates the next one.
+        solver = next((c for c in self.state['calls'] if c['role'] == 'solver' and 'seconds' in c), None)
+        verifier = next((c for c in self.state['calls'] if c['role'] == 'verifier' and 'seconds' in c), None)
+        if solver and verifier:
+            cycle = solver['seconds'] + verifier['seconds']
+            left = settings['max_seconds'] - self._elapsed()
+            if left < cycle:
+                raise ProofBudget(f'Not starting another attempt: the first solve and review took {cycle:.0f} s; {left:.0f} s remain.')
 
     def _run(self):
         with self.store.lock():
@@ -202,7 +227,11 @@ class ProofRunner:
                 while self.state['status'] == 'running':
                     pending = self.state['pending']
                     if pending['phase'] == 'solve':
-                        result = self._call('solver', self._solve_messages(pending), self.state['settings']['max_predict'])
+                        if self._find_call(self._call_key('solver')) is not None:
+                            result = self._call('solver', None, pending.get('solver_cap', self.state['settings']['max_predict']))
+                        else:
+                            messages = self._solve_messages(pending)
+                            result = self._call('solver', messages, self._solver_cap(messages, pending))
                         candidate = self._candidate(result, pending)
                         pending['candidate'] = candidate['id']
                         pending['phase'] = 'review' if candidate['transport_complete'] else 'continue'
@@ -247,21 +276,92 @@ class ProofRunner:
             raise LedgerError('Candidate digest changed; refusing to review or export altered evidence')
         return text
 
+    def _find_call(self, key):
+        return next((c for c in self.state['calls'] if c['key'] == key), None)
+
+    def _payload(self, role, messages, cap, format_schema=None):
+        payload = {'model': self.agent.model, 'messages': messages, 'stream': True, 'think': True,
+                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap,
+                               'temperature': self.agent.temperature if role == 'solver'
+                               else self.state['settings'].get('verify_temperature', 0),
+                               'top_p': self.agent.top_p}}
+        if self.agent.seed is not None:
+            payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
+        if format_schema is not None:
+            payload['format'] = format_schema
+        return payload
+
+    def _count(self, messages, cap):
+        client = self.agent.client
+        old_timeout = getattr(client, 'timeout', None)
+        if old_timeout is not None:
+            client.timeout = max(0.1, min(old_timeout, self.state['settings']['max_seconds'] - self._elapsed()))
+        try:
+            return count_input(client, self._payload('solver', messages, cap))[0]
+        finally:
+            if old_timeout is not None:
+                client.timeout = old_timeout
+
+    def _solver_cap(self, messages, pending):
+        """The initial solve keeps the direct-call allowance; later calls fit the context."""
+        settings = self.state['settings']
+        cap = settings['max_predict']
+        if pending['kind'] not in {'initial', 'retry'}:
+            floor = settings.get('min_solve_tokens', cap)
+            count = self._count(messages, floor)
+            cap = min(cap, self.agent.ctx - count - 1)
+            if cap < floor:
+                raise ProofContext(f'The {pending["kind"]} request needs {count} input tokens; with context {self.agent.ctx} '
+                                   f'only {max(cap, 0)} output tokens remain, below the {floor}-token minimum. Nothing was clipped; candidates retained.')
+        pending['solver_cap'] = cap
+        return cap
+
     def _solve_messages(self, pending):
-        messages = initial_request(self.state['goal'], self.state['sources'])
-        if pending['kind'] == 'initial':
+        goal, sources = self.state['goal'], self.state['sources']
+        messages = initial_request(goal, sources)
+        if pending['kind'] in {'initial', 'retry'}:
             return messages
         prior = self._get_candidate(pending['parent'])
         text = self._candidate_text(prior)
         if pending['kind'] == 'repair':
             review = next(r for r in self.state['reviews'] if r['id'] == pending['review'])
-            task = REPAIR_POLICY + '\n\nPRIOR CANDIDATE:\n' + text + '\n\nFALLIBLE REVIEW:\n' + json.dumps(review['response'], ensure_ascii=False)
-        else:
-            call = next(c for c in self.state['calls'] if c['key'] == prior['call'])
-            result = self._read_stream(call['stream'])
-            task = CONTINUE_POLICY + '\n\nSAVED WRITTEN TEXT:\n' + text + '\n\nSAVED WORKING NOTES:\n' + result['thinking']
-        messages[0]['content'] += '\n\n' + task
-        return messages
+            messages[0]['content'] += ('\n\n' + REPAIR_POLICY + '\n\nPRIOR CANDIDATE:\n' + text +
+                                       '\n\nFALLIBLE REVIEW:\n' + json.dumps(review['response'], ensure_ascii=False))
+            return messages
+        return self._continue_messages(pending, prior, text)
+
+    def _continue_messages(self, pending, prior, text):
+        """Continue from the written text and as much of the latest notes as fits.
+
+        Only the solver's own saved notes may be excerpted, with an explicit
+        marker. If even the written text leaves too little output room, a fresh
+        solve of the original problem replaces the continuation.
+        """
+        goal, sources = self.state['goal'], self.state['sources']
+        notes = self._read_stream(self._find_call(prior['call'])['stream'])['thinking']
+        floor, ctx = self.state['settings']['min_solve_tokens'], self.agent.ctx
+
+        def build(tail):
+            header = ('SAVED WORKING NOTES:\n' if len(tail) == len(notes) else
+                      f'SAVED WORKING NOTES — final excerpt, earlier notes omitted ({len(tail)} of {len(notes)} characters):\n')
+            messages = initial_request(goal, sources)
+            messages[0]['content'] += '\n\n' + CONTINUE_POLICY + '\n\nSAVED WRITTEN TEXT:\n' + text + '\n\n' + header + tail
+            return messages
+
+        room = ctx - 1 - floor - self._count(build(''), floor) - 64
+        if room > 0:
+            keep = min(len(notes), int(room * 2.5))
+            for _ in range(5):
+                tail = notes[len(notes) - keep:] if keep else ''
+                messages = build(tail)
+                if self._count(messages, floor) + floor + 1 <= ctx:
+                    pending.update(notes_chars_kept=len(tail), notes_chars_total=len(notes))
+                    return messages
+                keep = int(keep * 0.75)
+        pending.update(kind='retry', continuation_fallback='fresh_solve',
+                       notes_chars_kept=0, notes_chars_total=len(notes))
+        self.emit('notice', 'Saved work does not fit a useful continuation; solving the original problem afresh')
+        return initial_request(goal, sources)
 
     def _candidate(self, result, pending):
         # A completed solver call can be recovered without dispatching it again.
@@ -297,8 +397,7 @@ class ProofRunner:
 
     def _review(self, pending):
         candidate = self._get_candidate(pending['candidate'])
-        messages = initial_request(self.state['goal'], self.state['sources'])
-        messages[0]['content'] += '\n\n' + VERIFIER_POLICY + '\n\nCANDIDATE:\n' + self._candidate_text(candidate)
+        messages = review_request(self.state['goal'], self.state['sources'], self._candidate_text(candidate))
         if pending.get('protocol_error'):
             messages[0]['content'] += ('\n\nYour previous review could not be interpreted: ' + pending['protocol_error'] +
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
@@ -402,14 +501,7 @@ class ProofRunner:
         remaining_seconds = self.state['settings']['max_seconds'] - self._elapsed()
         if remaining_seconds <= 0:
             raise ProofBudget('Elapsed-time budget exhausted')
-        payload = {'model': self.agent.model, 'messages': messages, 'stream': True, 'think': True,
-                   'options': {'num_ctx': self.agent.ctx, 'num_predict': cap,
-                               'temperature': self.agent.temperature if role == 'solver' else 0,
-                               'top_p': self.agent.top_p}}
-        if self.agent.seed is not None:
-            payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
-        if format_schema is not None:
-            payload['format'] = format_schema
+        payload = self._payload(role, messages, cap, format_schema)
         client = self.agent.client
         old_timeout = getattr(client, 'timeout', None)
         if old_timeout is not None:

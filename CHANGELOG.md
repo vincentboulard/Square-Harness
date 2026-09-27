@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1 — 2026-09-27
+
+Reliability fixes for the solve → verify → repair engine; no new model roles and
+no extra reviews. One review still decides, and uncertainty still stops the job.
+
+- Repairs and continuations fit their output allowance to the context (floor:
+  `--proof-min-solve-tokens`), so they no longer fail when the input would not fit
+  beside a full 32k allowance, including on the conservative byte estimate used
+  without an exact tokenizer. The initial solve is unchanged and still identical
+  to direct inference.
+- Continuations keep the written text and a marked final excerpt of the saved
+  notes; when nothing useful fits, the original problem is solved afresh.
+- The verifier samples at the solver temperature by default
+  (`--proof-verify-temperature`) instead of greedy decoding.
+- Verifier responses are bounded (explanation 4,000 characters, at most five
+  issues), so they fit the room left after thinking.
+- The verifier receives the solver's task as quoted reference, not as its own
+  instruction.
+- Default request timeout 1,800 s; another attempt starts only if the measured
+  first cycle fits in the remaining time. CLI notice for unpinned files.
+
 ## 0.5.0 — 2026-09-27
 
 A simpler proof engine: solve the complete problem, verify the written proof,
