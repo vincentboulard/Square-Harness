@@ -185,10 +185,157 @@ benchmark uses only `raw-single` and `proof`; its protocol is deliberately new.
 
 `/critic` and `/explore` are ordinary mathematical chat, with workspace tools.
 `/review` reviews the last chat answer in a fresh model context. Optional literature
-and referee workflows are described in [research.md](research.md); they are not
-part of the proof benchmark.
+and referee reports and LaTeX write-ups are described in [research.md](research.md);
+they are not part of the proof benchmark. The [visual interface](#visual-interface)
+offers all of these modes, and proof mode, in a browser.
 
 Manuscript writes require approval. Optional Python execution requires separate
 approval and is not sandboxed. Saved jobs can contain unpublished text; keep
 research workspaces private. The repository ignores `.mathagent/`, but an external
 backup or manual file copy can still include it.
+
+## Visual interface
+
+`square-harness --gui` serves a local web app instead of the terminal prompt.
+It uses the same engine, launch options and saved jobs as the terminal: a job
+started in one appears in the other, and a job running in a terminal can be
+watched live in the browser.
+
+```bash
+square-harness --gui --workspace ~/research/my-paper
+```
+
+The launch options apply as in the terminal: the model server (`--backend`,
+`--host`, `--model`), the sampling options (`--seed`, `--temperature`, `--top-p`),
+`--request-timeout`, `--ctx` and the `--proof-*` limits described in
+[Budgets](#budgets).
+
+The browser opens automatically; `--no-browser` prevents it and `--gui-port`
+changes the port (default 8765, or the next free one). The left rail holds one
+notebook per mode, and the list beside it shows that mode's saved jobs or
+conversations.
+
+| Mode | What the page shows |
+| --- | --- |
+| Free | A conversation where the model suggests the workflow for each message; you confirm before anything runs (see below) |
+| Prove | The selected answer and its review status; each attempt with its written answer (and thinking), the verifier's verdict, explanation and located issues, and the exact model calls; live model output while a call runs; a side panel with budgets and every retained candidate |
+| Critic, Explore | A conversation with typeset answers, collapsible thinking and tool calls, a thinking toggle, and a fresh-context review of the last answer |
+| Literature, Referee | The report with clickable citations that open the exact passage read, the controller's citation checks, manuscript coverage, evidence, plan, notes and budgets |
+| Write-up | The LaTeX document with source marks that open the note lines each paragraph came from, compile errors, the PDF, TODOs and template macros (see [LaTeX write-ups](research.md#latex-write-ups)) |
+
+New proofs, reports and write-ups take an **effort**: Low, Medium, High, Extra
+high or Brezis. Medium is the launch budget (`--proof-rounds`, `--proof-tokens`,
+`--research-tokens` and so on); the other levels scale it by 0.35, 2.5, 6 and 20,
+within the engine's limits (at most 100 attempts or rounds, and always room for one
+full solve and its review). The summary under the slider states the exact limits,
+and Advanced limits lets you edit them, including a proof's solve and review output
+ceilings and its context. The Brezis effort, named after Haïm Brezis, can run for
+hours; pause it whenever you like. Suggestions in Free mode carry the same control.
+
+A proof started in the interface is the same job as `/prove`: the model sees the
+statement and the pinned files only, with thinking on and no tools. The form warns
+when the statement names a workspace file that is not pinned. Proof jobs made by
+v0.4 stay listed with their report, sources and files, but cannot be resumed.
+
+Every job page also lists its saved files: exact request payloads, streamed
+answers and intermediate results. Pause stops model work at the next checkpoint,
+like Ctrl+C in the terminal; Resume continues with the remaining saved budget.
+The model serves one task at a time, because time budgets count wall-clock time:
+pause a running job before starting another. Approval dialogs replace the
+terminal's `[y/N]` prompt for file writes and, with `--allow-python`, for Python.
+
+Critic and explore conversations are saved in `.mathagent/chats/` so that they
+survive a reload. As in the terminal, a turn that is paused or fails never enters
+the model's context; the interface keeps it visible and marks it as discarded.
+
+### Folders and file access
+
+Click the folder name at the bottom of the sidebar to open another folder. Only
+folders at or below the interface root can be opened: by default the root is the
+`--workspace` folder itself; launch with `--gui-root ~/research` to move between
+all your projects. Hidden folders are never shown. Saved jobs and conversations
+belong to their folder, so switching waits until the running job is paused.
+
+The line below the folder name says which files the model may **discover and
+read by itself** in this folder: LaTeX (`.tex .bib .sty .cls`), PDF (text
+extracted locally), Python and other text files. All are allowed by default;
+untick a type to hide it from `list_files`, `search_text` and `read_file`. The
+choice is saved in the folder's `.mathagent/gui-settings.json` and applies to new
+work. Files you pin or drop into a job are always available to that job. Proof
+jobs never read files themselves; they receive the pinned text only.
+
+### Dropping files
+
+Drag files from your file manager onto the interface: `.tex .sty .cls .bib .md
+.txt .pdf .py` files up to 20 MB are saved in the open folder. A file with the
+same name is never replaced; the new one is renamed, for example `notes-2.tex`.
+What happens next depends on the page: a proof or report form pins the files, the
+write-up form puts `.sty` and `.cls` files in the template slot and the rest in
+the notes, and a conversation attaches them to your next message.
+
+### Free mode
+
+The ∀ notebook accepts any request. For each message the model makes one short
+structured call that suggests a workflow (proof, critique, exploration,
+literature report, referee report or write-up) and rewrites the request so that
+it stands on its own: proof and report jobs never see the conversation. A card
+shows the suggestion; you can edit the request, change the workflow and remove
+files before pressing Start, or dismiss it. When the message is ambiguous, the
+card asks one question instead.
+
+One conversation can hold several jobs: prove a statement, then ask for a
+literature report, then referee a manuscript. Jobs appear on their cards with a
+live status and open in their own notebook; later suggestions see the earlier
+requests and their outcomes. Critiques and explorations are answered in the
+conversation itself. Only files you attached or named are pinned, even if the
+model suggests others. Reading a message is allowed while a job runs (its few
+seconds count toward that job's time budget); a job started meanwhile waits in
+the queue shown under the running task, where it can be cancelled.
+
+### Security and phones
+
+By default the interface listens on `127.0.0.1` only. Every request needs the
+workspace's access token, stored in `.mathagent/gui-token` (mode 0600) and
+included in the printed address; the browser keeps it as an HttpOnly,
+SameSite=Strict cookie and removes it from the address bar. Requests from other
+web sites and unexpected `Host` headers are refused, and a strict
+Content-Security-Policy stops rendered model or document text from loading
+anything outside the harness. Fonts and KaTeX are bundled, so the interface itself
+never contacts another server. Online search is a switch you set per conversation
+(next to Thinking) and per report; it is off by default, starting from `--online`
+when that flag is given. Launching with an explicit `--offline` locks it off, which
+keeps unaided benchmarks unaided. A document or a model answer can never turn it
+on. Python stays a launch-time permission (`--allow-python`), and proof jobs have
+no tools at all. Delete `.mathagent/gui-token` to unpair devices.
+
+To use a phone on the same network:
+
+```bash
+square-harness --gui --gui-host 0.0.0.0 --workspace ~/research/my-paper
+```
+
+Open the printed phone address once; the phone then stays paired. On iPhone,
+use Share, then Add to Home Screen; on Android, use the browser menu's Install
+or Add to Home screen. A home-screen app keeps its own storage, so it may ask
+for the token once more. **This traffic is plain HTTP on your local network:**
+others on the network can read it, and anyone with the token controls the
+harness, including approved file writes. Use it only on a trusted network, or
+reach the harness through an SSH tunnel or a VPN such as WireGuard or Tailscale.
+For a GPU server, `ssh -L 8765:127.0.0.1:8765 server` keeps the default loopback
+mode and serves the interface to your laptop at `http://127.0.0.1:8765`.
+
+### Building the interface
+
+The built interface is committed in `mathagent/gui/static`, so installing the
+package needs no Node.js. To change it, install Node.js 22 and work in
+`frontend/`:
+
+```bash
+cd frontend
+npm ci
+npm run dev      # hot reload on :5173, using square-harness --gui on :8765 for /api
+npm test
+npm run build    # type-check, then rebuild mathagent/gui/static and its licence notices
+```
+
+CI rebuilds the interface and fails if the committed files differ from the sources.

@@ -104,5 +104,37 @@ class ResearchCliTests(unittest.TestCase):
                 self.run_cli(['--online', '--proof-literature', '--prompt', 'Prove x=x.'])
 
 
+
+class WriteupCliTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.ui, self.client, self.runner = Mock(), Mock(), Mock()
+        self.client.models.return_value = ['qwen3.8:27b']
+        self.runner.start.return_value = {'id': 'writeup-example', 'status': 'partial', 'report': '# Write-up\n',
+                                          'directory': str(self.root / '.mathagent/research/writeup-example')}
+
+    def run_cli(self, args):
+        with patch('sys.argv', ['mathagent', '--workspace', str(self.root), *args]), \
+                patch.object(cli, 'UI', return_value=self.ui), \
+                patch.object(cli, 'Ollama', return_value=self.client), \
+                patch.object(cli, 'WriteupRunner', return_value=self.runner):
+            return cli.main()
+
+    def test_writeup_pins_notes_and_template_and_names_the_output(self):
+        self.assertEqual(self.run_cli(['--research-file', 'notes.md', '--template-file', 'macros.sty',
+                                      '--output', 'lemma.tex', '--prompt', '/writeup A short section.']), 0)
+        call = self.runner.start.call_args
+        self.assertEqual(call.args[0], 'A short section.')
+        self.assertEqual((call.kwargs['source_files'], call.kwargs['template_files'], call.kwargs['output']),
+                         (['notes.md'], ['macros.sty'], 'lemma.tex'))
+        self.assertFalse((self.root / 'lemma.tex').exists())  # the runner writes it; the CLI exports no report there
+
+    def test_writeup_output_must_be_tex(self):
+        self.assertEqual(self.run_cli(['--mode', 'writeup', '--output', 'lemma.md', '--prompt', 'Write up.']), 1)
+        self.runner.start.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

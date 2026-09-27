@@ -19,6 +19,11 @@ Tests use mocks and temporary workspaces; they do not need a model server.
 For inference-dependent changes, record the model/weights revision, server
 version, settings, exact source revision and the manual check performed.
 
+The visual interface's source lives in `frontend/` and is built into
+`mathagent/gui/static`, which is committed so that installing needs no Node.js.
+After changing it, run `npm ci`, `npm test` and `npm run build` in `frontend/`
+(Node.js 22) and commit the rebuilt files with your source change.
+
 ## Useful contributions
 
 - Explain the observed behaviour and the intended change. Discuss a large design

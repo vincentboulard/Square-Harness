@@ -46,6 +46,23 @@ square-harness --workspace ~/research/square-workspace \
   --proof-file statement.tex --prompt "Prove the statement in statement.tex."
 ```
 
+### Visual interface
+
+The same harness also runs as a local web app:
+
+```bash
+square-harness --gui --workspace ~/research/square-workspace
+```
+
+Your browser opens on `http://127.0.0.1:8765`. Each mode is a notebook in the left
+rail, and the Free notebook suggests the right one for each request. Proofs,
+critiques, reports and write-ups appear as the model writes them, with typeset
+LaTeX, each proof attempt with its review, budgets, citation checks and approval
+dialogs for file writes. Drop files onto the window and switch folders from the
+sidebar. It uses the same engine, settings and saved jobs as the terminal, including
+jobs started there, and works in phone browsers too: see the
+[usage guide](docs/usage.md#visual-interface) before exposing it to your network.
+
 ## Proof mode
 
 - Give the solver one substantial attempt at the **whole problem**, with thinking enabled.
@@ -65,18 +82,20 @@ proof modes are not part of v0.5.
 | `/proofs` / `/proof-report <id>` | List jobs or inspect one without inference |
 | `/resume <id>` | Resume an interrupted v0.5 job |
 | `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
+| `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
 | `/help` | Show commands |
+| `square-harness --gui` | Open the visual interface instead of the terminal prompt |
 
 Jobs live under `.mathagent/` in the chosen workspace. The `mathagent` command is
 an alias; `python -m mathagent` also works from the checkout.
 
 ## Guides
 
-- [Usage](docs/usage.md): settings, saved answers, resume and migration from v0.4.
+- [Usage](docs/usage.md): settings, saved answers, resume, migration from v0.4 and the visual interface.
 - [Benchmarks](docs/benchmark.md): direct inference versus proof mode, costs and grading.
 - [HyperQwen on A10](docs/hyperqwen-a10.md): the pinned fast serving profile.
 - [A10 llama.cpp](docs/a10.md) / [two V100S](docs/ovh.md): retained hardware alternatives.
-- [Optional research tools](docs/research.md): manuscript chat, literature and referee drafts.
+- [Optional research tools](docs/research.md): manuscript chat, literature and referee drafts, LaTeX write-ups.
 
 Ollama, llama.cpp and OpenAI-compatible servers are supported. The solver and
 verifier currently use the same model in separate contexts and can share errors.

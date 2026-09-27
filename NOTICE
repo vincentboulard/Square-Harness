@@ -6,3 +6,8 @@ Licensed under the Apache License, Version 2.0. See LICENSE.
 This distribution contains the harness, its documentation, and its bundled
 workflow instructions. External models, dependencies, and retrieved papers
 are separate works and retain their respective licenses and notices.
+
+The visual interface bundles third-party JavaScript libraries and fonts, listed
+with their licenses in mathagent/gui/static/THIRD-PARTY-NOTICES.txt. The fonts
+Square Concrete and Square Typewriter are subset and renamed versions of
+Computer Modern Unicode (SIL Open Font License 1.1).

@@ -92,6 +92,9 @@ def _job_directory(root, job_id):
 
 
 class ResearchRunner:
+    KINDS = ('literature', 'referee')
+    TERMINAL = ('reviewed', 'partial', 'budget_exhausted', 'budget_violation')
+
     def __init__(self, agent, emit=lambda kind, value: None):
         self.agent, self.emit = agent, emit
         self.directory, self.state = None, None
@@ -105,8 +108,8 @@ class ResearchRunner:
     def start(self, goal, *, kind='literature', source_files=(), max_rounds=6,
               max_tokens=24000, max_input_tokens=100000, max_seconds=900,
               max_requests=12, max_chars=30000):
-        if kind not in {'literature', 'referee'}:
-            raise ValueError('Research kind must be literature or referee')
+        if kind not in self.KINDS:
+            raise ValueError('Research kind must be ' + ' or '.join(self.KINDS))
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 20000:
             raise ValueError('Provide a nonempty research goal, at most 20000 characters')
         settings = dict(max_rounds=max_rounds, max_tokens=max_tokens,
@@ -118,6 +121,20 @@ class ResearchRunner:
         if not 1 <= max_rounds <= 100 or max_tokens < 1024 or max_input_tokens < 2048:
             raise ValueError('Research needs 1–100 rounds, at least 1024 output and 2048 input tokens')
         names = list(source_files) or re.findall(r'(?<![\w/])[\w./-]+\.(?:tex|md|txt|pdf)\b', goal)
+        sources = self._pin(names, 'M') + self._extra_sources()
+        if sum(len(s['content'].encode()) for s in sources) > 2_000_000:
+            raise ValueError('Pinned manuscripts exceed 2 MB; split this research task')
+        skill = files('mathagent').joinpath('skills', kind, 'SKILL.md').read_text(encoding='utf-8')
+        return self._create(goal, kind, settings, sources, skill)
+
+    def _extra_sources(self):
+        """Subclasses may pin further snapshots (for example templates)."""
+        return []
+
+    def _extra_state(self):
+        return {}
+
+    def _pin(self, names, prefix):
         sources = []
         for index, name in enumerate(dict.fromkeys(str(n) for n in names), 1):
             rel = Path(name)
@@ -132,11 +149,11 @@ class ResearchRunner:
             else:
                 path = self.agent.workspace.path(str(rel))
                 content = self.agent.workspace.text(path)
-            sources.append({'id': f'M{index}', 'path': str(rel), 'content': content,
+            sources.append({'id': f'{prefix}{index}', 'path': str(rel), 'content': content,
                             'sha256': hashlib.sha256(content.encode()).hexdigest()})
-        if sum(len(s['content'].encode()) for s in sources) > 2_000_000:
-            raise ValueError('Pinned manuscripts exceed 2 MB; split this research task')
-        skill = files('mathagent').joinpath('skills', kind, 'SKILL.md').read_text(encoding='utf-8')
+        return sources
+
+    def _create(self, goal, kind, settings, sources, skill):
         settings.update(model=self.agent.model, ctx=self.agent.ctx, predict=self.agent.predict,
                         host=getattr(self.agent.client, 'host', None),
                         backend=getattr(self.agent.client, 'backend', 'ollama'), seed=self.agent.seed,
@@ -149,7 +166,7 @@ class ResearchRunner:
         self.directory.mkdir(mode=0o700)
         _directory(self.directory / 'artifacts', create=True)
         if self.literature:
-            self.literature.reset_budget(max_requests=max_requests, max_chars=max_chars)
+            self.literature.reset_budget(max_requests=settings['max_requests'], max_chars=settings['max_chars'])
         self.state = {'version': 1, 'id': job_id, 'kind': kind, 'goal': goal.strip(),
                       'settings': settings, 'sources': sources, 'skill': skill,
                       'skill_sha256': hashlib.sha256(skill.encode()).hexdigest(),
@@ -157,7 +174,8 @@ class ResearchRunner:
                       'updated_at': _now(), 'tokens_charged': 0, 'input_tokens_charged': 0,
                       'seconds_used': 0, 'rounds_started': 0, 'calls': [], 'evidence': [],
                       'notes': [], 'plan': '', 'draft': '', 'review': '',
-                      'warnings': [], 'manuscript_ranges': {}, 'pending_tools': None}
+                      'warnings': [], 'manuscript_ranges': {}, 'pending_tools': None,
+                      **self._extra_state()}
         self._save()
         self.emit('notice', f'Research {job_id}: {kind}; report in {self.directory / "report.md"}')
         return self._run()
@@ -165,6 +183,8 @@ class ResearchRunner:
     def resume(self, job_id):
         self.directory = _job_directory(self.agent.workspace.root, job_id)
         self.state = _read_state(self.directory, job_id)
+        if self.state['kind'] not in self.KINDS:
+            raise ValueError(f'This is a {self.state["kind"]} job; resume it from its own mode')
         if self.state['settings'].get('host') != getattr(self.agent.client, 'host', None):
             raise ValueError('Resume with the original --host; saved source data is not implicitly sent elsewhere')
         if self.state['settings'].get('backend', 'ollama') != getattr(self.agent.client, 'backend', 'ollama'):
@@ -241,7 +261,7 @@ class ResearchRunner:
     def _run(self):
         with self._lock():
             self.state = _read_state(self.directory, self.state['id'])
-            if self.state['status'] in {'reviewed', 'partial', 'budget_exhausted', 'budget_violation'}:
+            if self.state['status'] in self.TERMINAL:
                 return self._result()
             if self.state['status'] == 'running' and self.state.get('active_checkpoint_wall'):
                 self.state['seconds_used'] += max(0, time.time() - self.state['active_checkpoint_wall'])
@@ -264,56 +284,9 @@ class ResearchRunner:
                     self._check_time()
                     phase = self.state['phase']
                     self.emit('notice', 'Research phase: ' + phase)
-                    if phase == 'plan':
-                        result = self._call('plan', 'Write a concise research plan with scope, public topic queries, inclusion criteria, comparison dimensions and required manuscript sections. Do not claim to have searched yet.', cap=1400)
-                        self.state['plan'] = result['text']
-                        if not result['complete']:
-                            self.state['warnings'].append('Planning output was truncated; the saved plan is partial.')
-                        self.state['phase'] = 'investigate'
-                    elif phase == 'investigate':
-                        if self.state['pending_tools']:
-                            self._execute_pending()
-                        if self._finish_research():
-                            self.state['phase'] = 'draft'
-                            self._save()
-                            continue
-                        self.state['rounds_started'] += 1
-                        self._save()
-                        result = self._call('investigate', 'Make progress on the plan. Read exact manuscript or source passages and use tools for missing evidence. State concise working notes and unresolved checks. When enough evidence is available, return notes without tool calls to begin the report.', cap=2600, tools=self._schemas())
-                        self.state['notes'].append({'round': self.state['rounds_started'], 'text': result['text'], 'complete': result['complete']})
-                        if result['calls']:
-                            self.state['pending_tools'] = {'calls': result['calls'][:4], 'index': 0, 'active': False}
-                            if len(result['calls']) > 4:
-                                self.state['warnings'].append('Only four requested tools were accepted in one research round.')
-                        else:
-                            self.state['phase'] = 'draft'
-                    elif phase == 'draft':
-                        result = self._call('draft', 'Write the requested complete Markdown report using the saved skill. Use only encountered evidence, cite actual locators, and state coverage limitations and unfinished checks. No tool calls. Give the best honest partial report if evidence is insufficient.', cap=4096)
-                        self.state['draft'] = result['text']
-                        self.state['draft_complete'] = result['complete']
-                        self.state['citation_issues'] = self._citation_issues(result['text'])
-                        self.state['phase'] = 'review'
-                        self._report()
-                    elif phase == 'review':
-                        result = self._call('review', REVIEW_POLICY + '\nCitation checks: ' + json.dumps(self.state.get('citation_issues', [])), cap=2200)
-                        self.state['review'] = result['text']
-                        self.state['review_complete'] = result['complete'] and bool(result['text'].strip())
-                        self.state['phase'] = 'revise' if self._can_revise() else 'done'
-                    elif phase == 'revise':
-                        result = self._call('revise', 'Revise the Markdown report in light of the independent review and citation checks. Preserve unresolved concerns explicitly; do not claim review resolved an issue without evidence. Use only encountered source references. Output the whole revised report.', cap=4096)
-                        if result['text'].strip():
-                            self.state['draft_before_revision'] = self.state['draft']
-                            self.state['draft'] = result['text']
-                            self.state['draft_complete'] = result['complete']
-                        self.state['citation_issues'] = self._citation_issues(self.state['draft'])
-                        reviewed = [e for e in self.state['evidence'] if e['id'] in self.state.get('review_evidence_ids', [])]
-                        self.state['review_context_issues'] = self._citation_issues(self.state['draft'], reviewed)
-                        self.state['phase'] = 'done'
+                    self._step(phase)
                     self._save()
-                issues = self.state.get('citation_issues', []) + self.state.get('review_context_issues', [])
-                complete = self.state.get('draft_complete') and self.state.get('review_complete') and bool(self.state['draft'].strip()) and not issues
-                self.state['status'] = 'reviewed' if complete else 'partial'
-                self.state['stop_reason'] = 'Research workflow finished; output remains a model draft.'
+                self._finish()
             except KeyboardInterrupt:
                 self.state['status'] = 'paused'
                 self.state['stop_reason'] = 'Interrupted; evidence, partial streams and budget reservations were retained.'
@@ -333,6 +306,61 @@ class ResearchRunner:
                     self.literature.on_budget_change = old_callback
                     self.literature.deadline = old_deadline
             return self._result()
+
+    def _step(self, phase):
+        if phase == 'plan':
+            result = self._call('plan', 'Write a concise research plan with scope, public topic queries, inclusion criteria, comparison dimensions and required manuscript sections. Do not claim to have searched yet.', cap=1400)
+            self.state['plan'] = result['text']
+            if not result['complete']:
+                self.state['warnings'].append('Planning output was truncated; the saved plan is partial.')
+            self.state['phase'] = 'investigate'
+        elif phase == 'investigate':
+            if self.state['pending_tools']:
+                self._execute_pending()
+            if self._finish_research():
+                self.state['phase'] = 'draft'
+                self._save()
+                return
+            self.state['rounds_started'] += 1
+            self._save()
+            result = self._call('investigate', 'Make progress on the plan. Read exact manuscript or source passages and use tools for missing evidence. State concise working notes and unresolved checks. When enough evidence is available, return notes without tool calls to begin the report.', cap=2600, tools=self._schemas())
+            self.state['notes'].append({'round': self.state['rounds_started'], 'text': result['text'], 'complete': result['complete']})
+            if result['calls']:
+                self.state['pending_tools'] = {'calls': result['calls'][:4], 'index': 0, 'active': False}
+                if len(result['calls']) > 4:
+                    self.state['warnings'].append('Only four requested tools were accepted in one research round.')
+            else:
+                self.state['phase'] = 'draft'
+        elif phase == 'draft':
+            result = self._call('draft', 'Write the requested complete Markdown report using the saved skill. Use only encountered evidence, cite actual locators, and state coverage limitations and unfinished checks. No tool calls. Give the best honest partial report if evidence is insufficient.', cap=4096)
+            self.state['draft'] = result['text']
+            self.state['draft_complete'] = result['complete']
+            self.state['citation_issues'] = self._citation_issues(result['text'])
+            self.state['phase'] = 'review'
+            self._report()
+        elif phase == 'review':
+            result = self._call('review', REVIEW_POLICY + '\nCitation checks: ' + json.dumps(self.state.get('citation_issues', [])), cap=2200)
+            self.state['review'] = result['text']
+            self.state['review_complete'] = result['complete'] and bool(result['text'].strip())
+            self.state['phase'] = 'revise' if self._can_revise() else 'done'
+        elif phase == 'revise':
+            result = self._call('revise', 'Revise the Markdown report in light of the independent review and citation checks. Preserve unresolved concerns explicitly; do not claim review resolved an issue without evidence. Use only encountered source references. Output the whole revised report.', cap=4096)
+            if result['text'].strip():
+                self.state['draft_before_revision'] = self.state['draft']
+                self.state['draft'] = result['text']
+                self.state['draft_complete'] = result['complete']
+            self.state['citation_issues'] = self._citation_issues(self.state['draft'])
+            reviewed = [e for e in self.state['evidence'] if e['id'] in self.state.get('review_evidence_ids', [])]
+            self.state['review_context_issues'] = self._citation_issues(self.state['draft'], reviewed)
+            self.state['phase'] = 'done'
+        else:
+            raise ValueError('Unknown research phase: ' + phase)
+
+    def _finish(self):
+        issues = self.state.get('citation_issues', []) + self.state.get('review_context_issues', [])
+        complete = self.state.get('draft_complete') and self.state.get('review_complete') and bool(self.state['draft'].strip()) and not issues
+        self.state['status'] = 'reviewed' if complete else 'partial'
+        self.state['stop_reason'] = 'Research workflow finished; output remains a model draft.'
 
     def _recover(self):
         interrupted = [c for c in self.state['calls'] if c['status'] in {'running', 'interrupted'}]
@@ -477,7 +505,7 @@ class ResearchRunner:
             fixed += '\nCitation checks:\n' + json.dumps(self.state.get('citation_issues', []))
         return fixed, optional
 
-    def _call(self, role, instruction, *, cap, tools=()):
+    def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer=''):
         self._check_time()
         settings = self.state['settings']
         remaining = settings['max_tokens'] - self.state['tokens_charged']
@@ -495,9 +523,11 @@ class ResearchRunner:
             payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
         if tools:
             payload['tools'] = tools
+        if format_schema:
+            payload['format'] = format_schema
         system = BASE_POLICY + '\n' + self.state['skill']
         while True:
-            payload['messages'] = [{'role': 'system', 'content': system}, {'role': 'user', 'content': instruction + '\n\n' + fixed + '\n\n' + '\n\n'.join(optional)}]
+            payload['messages'] = [{'role': 'system', 'content': system}, {'role': 'user', 'content': instruction + '\n\n' + fixed + '\n\n' + '\n\n'.join(optional) + ('\n\n' + trailer if trailer else '')}]
             estimated = _estimate(payload)
             if estimated <= self.agent.ctx - cap - 256:
                 break
