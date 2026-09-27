@@ -316,3 +316,9 @@
 .toast-error { background: var(--red); color: #fff; }
 select { padding: 8px 10px; background: var(--sheet); border: 1px solid var(--line-strong); border-radius: 7px; font-size: 14px; }
 .field > input[type='text'], .field-input input[type='text'] { font-size: 15px; }
+/* Number inputs have an intrinsic width; let them shrink to their grid cell. */
+.field-grid > .field { grid-template-columns: minmax(0, 1fr); }
+.field-input { min-width: 0; width: 100%; }
+.field-input input { width: 0; }
+.field-grid { align-items: start; }
+.field-grid > .field { align-content: start; }
