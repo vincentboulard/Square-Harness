@@ -209,9 +209,15 @@ class SecurityTests(GuiCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(response.getheader('Connection'), 'close')
         connection.close()
+        status, value, _ = self.request('POST', '/api/chats', raw=b'{"mode": ', headers={'Content-Type': 'application/json'})
+        self.assertEqual((status, value['error']), (400, 'Invalid JSON body'))
+        # Deep nesting is refused either way: since Python 3.14 the parser's recursion bound is the
+        # real stack size, so a thread with a large stack parses this list instead of giving up.
         deep = ('[' * 100000 + ']' * 100000).encode()
         status, value, _ = self.request('POST', '/api/chats', raw=deep, headers={'Content-Type': 'application/json'})
-        self.assertEqual((status, value['error']), (400, 'Invalid JSON body'))
+        self.assertEqual(status, 400)
+        self.assertIn(value['error'], ('Invalid JSON body', 'Request body must be a JSON object'))
+        self.assertEqual(self.request('GET', '/api/status')[0], 200)
         status, _, headers = self.request('GET', '/%5Cattacker.example?token=' + self.token, auth=False)
         self.assertEqual((status, headers['Location']), (303, '/'))
         self.assertTrue(headers['Set-Cookie'].startswith(f'square_token_{self.port}='))
