@@ -396,26 +396,26 @@
 .effort-compact .effort-now { font-size: 14px; }
 .effort-compact .effort-stop { font-size: 11.5px; }
 
-/* Brezis: gold-star stickers, the ones a teacher puts on the best copies. */
+/* Poincaré: gold-star stickers, the ones a teacher puts on the best copies. */
 .sparkle { width: 11px; height: 11px; fill: #c9971a; flex: none; }
-.effort-stop-brezis .effort-label { color: #a8790c; }
+.effort-stop-poincare .effort-label { color: #a8790c; }
 .effort-now .sparkle { position: absolute; }
-.effort-brezis .effort-now { padding: 0 20px 0 14px; }
+.effort-poincare .effort-now { padding: 0 20px 0 14px; }
 .effort-now .s1 { right: 6px; top: -9px; width: 13px; height: 13px; }
 .effort-now .s2 { left: 0; bottom: -4px; width: 9px; height: 9px; }
 .effort-now .s3 { right: 0; bottom: -2px; width: 8px; height: 8px; }
-.effort-brezis .effort-now { color: #a8790c; }
-.effort-brezis .effort-stop-current .effort-square { background: linear-gradient(135deg, #e3b43c, #b8860b); border-color: #b8860b; box-shadow: 0 0 0 4px rgba(227, 180, 60, 0.25); }
-.effort-brezis .effort-fill { background: linear-gradient(90deg, var(--ink), #d4a52a); }
-.effort-brezis .sparkle { animation: twinkle 1.8s ease-in-out infinite; }
-.effort-brezis .s1 { animation-delay: 0.3s; }
-.effort-brezis .s2 { animation-delay: 0.9s; }
-.effort-brezis .s3 { animation-delay: 1.4s; }
+.effort-poincare .effort-now { color: #a8790c; }
+.effort-poincare .effort-stop-current .effort-square { background: linear-gradient(135deg, #e3b43c, #b8860b); border-color: #b8860b; box-shadow: 0 0 0 4px rgba(227, 180, 60, 0.25); }
+.effort-poincare .effort-fill { background: linear-gradient(90deg, var(--ink), #d4a52a); }
+.effort-poincare .sparkle { animation: twinkle 1.8s ease-in-out infinite; }
+.effort-poincare .s1 { animation-delay: 0.3s; }
+.effort-poincare .s2 { animation-delay: 0.9s; }
+.effort-poincare .s3 { animation-delay: 1.4s; }
 @keyframes twinkle { 0%, 100% { opacity: 0.35; transform: scale(0.7) rotate(0deg); } 50% { opacity: 1; transform: scale(1.1) rotate(20deg); } }
-:root[data-theme='dark'] .sparkle, :root[data-theme='dark'] .effort-brezis .effort-now, :root[data-theme='dark'] .effort-stop-brezis .effort-label { fill: #f0c85a; color: #f0c85a; }
+:root[data-theme='dark'] .sparkle, :root[data-theme='dark'] .effort-poincare .effort-now, :root[data-theme='dark'] .effort-stop-poincare .effort-label { fill: #f0c85a; color: #f0c85a; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) .sparkle { fill: #f0c85a; }
-  :root:not([data-theme='light']) .effort-brezis .effort-now, :root:not([data-theme='light']) .effort-stop-brezis .effort-label { color: #f0c85a; }
+  :root:not([data-theme='light']) .effort-poincare .effort-now, :root:not([data-theme='light']) .effort-stop-poincare .effort-label { color: #f0c85a; }
 }
 .output-field { margin-bottom: 14px; max-width: 420px; }
 .queued-note { margin: 8px 0; padding: 8px 12px; font-size: 14px; background: var(--ink-soft); border-left: 2px solid var(--ink); border-radius: 0 6px 6px 0; }

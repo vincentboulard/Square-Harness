@@ -452,6 +452,10 @@ def load_chat(root, chat_id):
             or chat.get('mode') not in CHAT_MODES or not isinstance(chat.get('history'), list)
             or not isinstance(chat.get('transcript'), list) or not isinstance(chat.get('settings'), dict)):
         raise ValueError('Invalid or unsupported chat file')
+    # Preserve the maximum budget of route cards saved before the effort rename.
+    for item in chat['transcript']:
+        if isinstance(item, dict) and item.get('role') == 'route' and item.get('effort') == 'brezis':
+            item['effort'] = 'poincare'
     return chat
 
 

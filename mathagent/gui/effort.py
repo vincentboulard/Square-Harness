@@ -1,4 +1,4 @@
-"""Effort levels: the budgets behind Low … Brezis.
+"""Effort levels: the budgets behind Low … Poincaré.
 
 The interface's forms use the same table (frontend/src/effort.ts); a test keeps
 the two identical. The Default notebook starts jobs on the server, so it needs
@@ -11,9 +11,9 @@ EFFORTS = {
     'medium': dict(tries=3, minutes=15, tokens=60_000, input=240_000, requests=12, chars=30_000),
     'high': dict(tries=5, minutes=30, tokens=100_000, input=400_000, requests=24, chars=60_000),
     'xhigh': dict(tries=7, minutes=60, tokens=150_000, input=600_000, requests=40, chars=100_000),
-    'brezis': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=60, chars=150_000),
+    'poincare': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=60, chars=150_000),
 }
-LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'brezis': 'Brezis'}
+LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'poincare': 'Poincaré'}
 
 
 def _proof_ceilings(args, tokens):

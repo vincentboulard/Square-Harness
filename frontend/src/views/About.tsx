@@ -83,7 +83,7 @@ export function About() {
           <p className="about-links">
             Source code, documentation and issues: <a href={SOURCE} target="_blank" rel="noopener noreferrer">{SOURCE.replace('https://', '')}</a>.
             {' '}Fonts and libraries in this interface: <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">open-source notices</a>.
-            {' '}The Brezis effort is named in honour of Haïm Brezis.
+            {' '}The Poincaré effort is named in honour of Henri Poincaré.
           </p>
         </div>
       </div>

@@ -474,6 +474,45 @@ if __name__ == '__main__':
 
 
 class EffortTableTests(unittest.TestCase):
+    def test_saved_maximum_effort_routes_keep_their_budgets(self):
+        from types import SimpleNamespace
+        from mathagent.gui import effort
+        args = SimpleNamespace(proof_solve_tokens=32768, proof_verify_tokens=16384,
+                               proof_repair_tokens=None, proof_min_solve_tokens=None)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chat = store.create_chat(root, 'free')
+            chat['history'] = [{'role': 'user', 'content': 'Keep the original conversation.'}]
+            chat['transcript'] = [{'role': 'user', 'content': 'Original request.', 'effort': 'brezis'}]
+            for status, mode in (('proposed', 'prove'), ('failed', 'referee'), ('cancelled', 'writeup')):
+                chat['transcript'].append({'role': 'route', 'status': status, 'mode': mode,
+                                           'request': 'Work on the attached notes.', 'files': ['notes.tex'],
+                                           'effort': 'brezis', 'reason': 'Maximum effort requested.',
+                                           'time': chat['created_at'], 'error': 'Keep this detail.'})
+            path = root / '.mathagent' / 'chats' / (chat['id'] + '.json')
+            raw = json.dumps(chat, ensure_ascii=False).encode('utf-8')
+            path.write_bytes(raw)
+
+            loaded = store.load_chat(root, chat['id'])
+            expected = json.loads(raw)
+            for item in expected['transcript'][1:]:
+                item['effort'] = 'poincare'
+            self.assertEqual(loaded, expected)
+            self.assertEqual(path.read_bytes(), raw)  # Loading remains read-only.
+            for item in loaded['transcript'][1:]:
+                with self.subTest(status=item['status'], mode=item['mode']):
+                    self.assertEqual(effort.LABELS[item['effort']], 'Poincaré')
+                    limits = effort.limits(item['mode'], item['effort'], args)
+                    self.assertEqual((limits['seconds'], limits['tokens']), (7200, 200000))
+                    if item['mode'] != 'writeup':
+                        self.assertEqual(limits['rounds'], 10)
+                    if item['mode'] == 'prove':
+                        self.assertEqual((limits['solve_tokens'], limits['verify_tokens']), (32768, 16384))
+                    else:
+                        self.assertEqual(limits['input_tokens'], 800000)
+                    if item['mode'] == 'referee':
+                        self.assertEqual((limits['requests'], limits['chars']), (60, 150000))
+
     def test_server_and_interface_use_the_same_budgets(self):
         import re
         from mathagent.gui import effort
@@ -496,7 +535,7 @@ class EffortTableTests(unittest.TestCase):
         self.assertEqual((low['rounds'], low['seconds'], low['tokens']), (1, 60, 30000))
         self.assertLessEqual(low['solve_tokens'] + low['verify_tokens'], low['tokens'])
         self.assertEqual(effort.limits('prove', 'medium', args)['solve_tokens'], 32768)
-        self.assertEqual(effort.limits('referee', 'brezis', args)['seconds'], 7200)
+        self.assertEqual(effort.limits('referee', 'poincare', args)['seconds'], 7200)
         self.assertEqual(effort.limits('critic', 'high', args), {})
 
 

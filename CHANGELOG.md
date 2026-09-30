@@ -22,7 +22,7 @@
 - The interface can open other folders below `--gui-root`, choose per folder which
   file types the model may read, and save dropped files into the workspace.
 - `read_file` reads locally extracted PDF text; `.sty` and `.cls` are text files.
-- Effort levels (Low to Brezis) replace budget fields in the interface; online
+- Effort levels (Low to Poincaré) replace budget fields in the interface; online
   search is a per-conversation and per-report switch, locked off by `--offline`.
 - The interface uses the model server chosen with `--backend` (Ollama, vLLM or
   llama.cpp), the sampling options and the `--proof-*` limits; pausing works
@@ -37,7 +37,7 @@
   `referee`).
 - Effort levels have fixed budgets instead of multiples of the launch defaults:
   from Low (1 attempt, 1 minute, 30,000 tokens) through Medium (3 attempts) to
-  Brezis (10 attempts, 2 hours, 200,000 tokens). A proof's per-call ceilings are
+  Poincaré (10 attempts, 2 hours, 200,000 tokens). A proof's per-call ceilings are
   reduced when needed so one full solve and its review always fit the budget.
 - Any job can be started while the model is busy: proof, report and write-up
   forms, suggestions and resume buttons add it to the queue instead of refusing.

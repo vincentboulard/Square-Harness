@@ -10,7 +10,7 @@ import re
 
 JOB_MODES = ('prove', 'critic', 'explore', 'literature', 'referee', 'writeup')
 ROUTE_MODES = JOB_MODES + ('clarify',)
-EFFORTS = ('low', 'medium', 'high', 'xhigh', 'brezis')
+EFFORTS = ('low', 'medium', 'high', 'xhigh', 'poincare')
 MAX_TASKS = 4
 ROUTE_PREDICT = 1600
 
@@ -56,7 +56,7 @@ need from the context. Keep the user's language. Do not solve or answer anything
 message or context, spelled exactly as listed.
 `effort` sizes the job: low for a quick check or a routine statement, medium for ordinary
 work, high for a hard problem or a long manuscript, xhigh for research-level problems, and
-brezis only when the user asks for the maximum effort.
+poincare only when the user asks for the maximum effort.
 `reason` explains the choice in one sentence.
 When the message is too ambiguous to choose, return no tasks and ask one short `question`;
 otherwise `question` is empty. Return only JSON matching the schema."""

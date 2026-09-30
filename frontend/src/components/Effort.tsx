@@ -33,15 +33,15 @@ export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, 
     focusNext.current = true
     onLevel(EFFORTS[clamp(index + step, 0, EFFORTS.length - 1)].id)
   }
-  const brezis = level === 'brezis' && !custom
+  const poincare = level === 'poincare' && !custom
   const limits = effortLimits(kind, defaults, level)
   return (
-    <div className={'effort' + (compact ? ' effort-compact' : '') + (brezis ? ' effort-brezis' : '')}>
+    <div className={'effort' + (compact ? ' effort-compact' : '') + (poincare ? ' effort-poincare' : '')}>
       <div className="effort-head">
         <span className="field-label">Effort{suggested && <span className="effort-suggested"> suggested by the model</span>}</span>
         <span className="effort-now">
           {custom ? 'Custom limits' : EFFORTS[index].label}
-          {brezis && <><Sparkle className="s1" /><Sparkle className="s2" /><Sparkle className="s3" /></>}
+          {poincare && <><Sparkle className="s1" /><Sparkle className="s2" /><Sparkle className="s3" /></>}
         </span>
       </div>
       <div className="effort-track" role="radiogroup" aria-label="Effort" onKeyDown={keys}>
@@ -49,16 +49,16 @@ export function EffortSlider({ kind, defaults, level, onLevel, custom, compact, 
         {EFFORTS.map((effort, i) => (
           <button key={effort.id} ref={(node) => { refs.current[i] = node }} type="button" role="radio"
             aria-checked={effort.id === level} tabIndex={effort.id === level ? 0 : -1} title={effort.hint}
-            className={'effort-stop' + (i <= index ? ' effort-stop-on' : '') + (effort.id === level ? ' effort-stop-current' : '') + (effort.id === 'brezis' ? ' effort-stop-brezis' : '')}
+            className={'effort-stop' + (i <= index ? ' effort-stop-on' : '') + (effort.id === level ? ' effort-stop-current' : '') + (effort.id === 'poincare' ? ' effort-stop-poincare' : '')}
             onClick={() => onLevel(effort.id)}>
             <span className="effort-square" aria-hidden="true" />
-            <span className="effort-label">{effort.label}{effort.id === 'brezis' && <Sparkle className="s0" />}</span>
+            <span className="effort-label">{effort.label}{effort.id === 'poincare' && <Sparkle className="s0" />}</span>
           </button>
         ))}
       </div>
       <p className={'field-hint effort-summary' + (compact ? ' effort-summary-compact' : '')}>
         {describeLimits(kind, limits)}{custom ? '; changed in Advanced limits below' : ''}.
-        {brezis && !compact && ' The Brezis effort can run for two hours; you can pause it at any time.'}
+        {poincare && !compact && ' The Poincaré effort can run for two hours; you can pause it at any time.'}
       </p>
     </div>
   )

@@ -235,7 +235,7 @@ New proofs, reports and write-ups take an **effort**. Each level is a fixed budg
 | Medium | 3 | 15 min | 60,000 | 240,000 | 12 |
 | High | 5 | 30 min | 100,000 | 400,000 | 24 |
 | Extra high | 7 | 1 h | 150,000 | 600,000 | 40 |
-| Brezis | 10 | 2 h | 200,000 | 800,000 | 60 |
+| Poincaré | 10 | 2 h | 200,000 | 800,000 | 60 |
 
 A proof attempt reserves one solve and one review (`--proof-solve-tokens` and
 `--proof-verify-tokens`); when a level's tokens cannot hold both, the form lowers
@@ -243,8 +243,8 @@ these two ceilings in proportion, so every level can make at least one full
 attempt. The attempts are a maximum: a job also stops when its tokens or time
 run out. Write-ups have no rounds. The summary under the slider states the exact
 limits, and Advanced limits lets you edit them, including a proof's solve and
-review output ceilings and its context. The Brezis effort, named after Haïm
-Brezis, can run for two hours; pause it whenever you like. The `--proof-*` and
+review output ceilings and its context. The Poincaré effort, named after Henri
+Poincaré, can run for two hours; pause it whenever you like. The `--proof-*` and
 `--research-*` budget flags keep applying to the terminal and to the API.
 
 A proof started in the interface is the same job as `/prove`: the model sees the
