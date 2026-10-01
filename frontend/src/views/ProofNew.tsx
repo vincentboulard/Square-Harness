@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { api, type WorkspaceFile } from '../api'
-import { Collapse, ErrorNote, FilePicker, NumberField } from '../components/common'
+import { Collapse, ErrorNote, FilePicker, NumberField, Toggle } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
 import { Markdown } from '../components/Markdown'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp, useTick } from '../store'
 import { BusyNote, queuedMessage } from './shared'
+import { PermissionChoice } from './ExperimentNew'
+import type { Permission } from '../api'
 
 // File names in the statement, as the terminal notices them (proof jobs have no file tools).
 const MENTIONED = /(?<![\w/])[\w./-]+\.(?:tex|md|txt)\b/g
@@ -27,6 +29,9 @@ export function ProofNew() {
   const [busy, setBusy] = useState(false)
   const [queuedNote, setQueuedNote] = useState('')
   const [workspace, setWorkspace] = useState<WorkspaceFile[]>([])
+  const [refuteFirst, setRefuteFirst] = useState(false)
+  const [testObjections, setTestObjections] = useState(false)
+  const [permission, setPermission] = useState<Permission>('ask')
   const changed = useTick('files')
 
   useDropTarget('Pinned to this proof as sources', (paths) => {
@@ -49,6 +54,9 @@ export function ProofNew() {
     if (!defaults) return
     applyLevel(level)
     setCtx(defaults.ctx)
+    setRefuteFirst(defaults.proof_refute_first)
+    setTestObjections(defaults.proof_test_objections)
+    setPermission(defaults.experiments)
     // Only when the launch defaults arrive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaults])
@@ -80,6 +88,8 @@ export function ProofNew() {
       const result = await api.startProof({
         goal, source_files: files, rounds, tokens, seconds: minutes * 60,
         solve_tokens: solveTokens, verify_tokens: verifyTokens, ctx: ctx !== defaults?.ctx ? ctx : undefined,
+        refute_first: refuteFirst, test_objections: testObjections,
+        permission: refuteFirst || testObjections ? permission : undefined,
         queue: true,
       })
       if (result.task.state === 'queued') {
@@ -150,6 +160,11 @@ export function ProofNew() {
           <div>
             {defaults && <EffortSlider kind="proof" defaults={defaults} level={level} onLevel={chooseLevel} custom={custom} />}
             <p className="field-hint">The limits are saved with the job. Resuming later continues from what is left; it never grants a new budget. Thinking is always on for proofs and counts toward the output ceilings.</p>
+            <Toggle label="Test numerically first" checked={refuteFirst} onChange={setRefuteFirst}
+              hint="Before the proof, an experiment looks for a counterexample. A certified one stops the proof; validated numbers are shown to the verifier, never to the first solve." />
+            <Toggle label="Test objections numerically" checked={testObjections} onChange={setTestObjections}
+              hint="When the verifier objects, an experiment tests the disputed step before the repair, and the repair sees its result." />
+            {(refuteFirst || testObjections) && <PermissionChoice value={permission} onChange={setPermission} />}
             <Collapse summary="Advanced limits">
               <div className="field-grid">
                 <NumberField label="Attempts" value={rounds} onChange={setRounds} min={1} max={100}

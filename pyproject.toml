@@ -33,6 +33,7 @@ Issues = "https://github.com/vincentboulard/Square-Harness/issues"
 [project.optional-dependencies]
 math = ["sympy>=1.12,<2", "numpy>=1.26,<3"]
 research = ["pypdf>=5,<7"]
+experiments = ["numpy>=1.26,<3", "scipy>=1.11,<2", "sympy>=1.12,<2", "mpmath>=1.3,<2", "matplotlib>=3.8,<4"]
 
 [project.scripts]
 square-harness = "mathagent.cli:main"

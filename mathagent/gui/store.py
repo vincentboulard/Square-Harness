@@ -24,7 +24,7 @@ CHAT_MODES = ('critic', 'explore', 'free')
 # How the interface names a suggestion in chat previews: critic and explore answers
 # are both answers in the conversation, and the referee workflow is called Review.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
-               'referee': 'Review', 'writeup': 'Write-up', 'clarify': 'Question'}
+               'referee': 'Review', 'writeup': 'Write-up', 'experiment': 'Experiment', 'clarify': 'Question'}
 UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py'}
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -335,7 +335,33 @@ def research_detail(root, job_id, active=None):
         **({key: s.get(key) for key in ('outline', 'sections', 'document', 'section_lines', 'compile',
                                         'outputs', 'macros', 'theorems', 'output_name')}
            if s['kind'] == 'writeup' else {}),
+        **({key: s.get(key) for key in ('experiment', 'protocol', 'code', 'code_issue', 'runs', 'interpretation',
+                                        'certificate', 'certificate_check', 'faithfulness')}
+           if s['kind'] == 'experiment' else {}),
     }
+
+
+_FIGURE = re.compile(r'[A-Za-z0-9_-]{1,80}\.(png|svg)\Z')
+_RUN = re.compile(r'run-[0-9]{1,4}\Z')
+
+
+def research_figure(root, job_id, run, name):
+    """A figure saved by an experiment run: (bytes, content type)."""
+    state = research_state(root, job_id)
+    if state['kind'] != 'experiment' or not _RUN.fullmatch(run) or not _FIGURE.fullmatch(name):
+        raise NotFound('Unknown figure')
+    if not any(r.get('folder') == 'runs/' + run and name in ((r.get('result') or {}).get('figures') or [])
+               for r in state.get('runs', [])):
+        raise NotFound('Unknown figure')
+    directory = _job_directory(root, job_id)
+    for part in (directory / 'runs', directory / 'runs' / run, directory / 'runs' / run / 'figures'):
+        _directory(part)
+    path = directory / 'runs' / run / 'figures' / name
+    _regular(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        data = stream.read(UPLOAD_BYTES)
+    return data, 'image/png' if name.endswith('.png') else 'image/svg+xml'
 
 
 def research_pdf(root, job_id):

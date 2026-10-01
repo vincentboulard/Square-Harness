@@ -4,14 +4,15 @@ export type ModeInfo = {
   mode: Mode
   label: string
   glyph: string
-  kind: 'free' | 'proof' | 'chat' | 'research' | 'writeup'
+  kind: 'free' | 'proof' | 'chat' | 'research' | 'writeup' | 'experiment'
   summary: string
   newLabel: string
   empty: string
 }
 
 // Glyphs are the subject's own notation: ∀ any task, ⊢ proves, ⊥ contradiction,
-// ∃ search for existence, [1] a citation, ¶ an edited manuscript, § a written section.
+// ∃ search for existence, [1] a citation, ¶ an edited manuscript, § a written section,
+// ≈ a numerical approximation.
 export const MODES: Record<Mode, ModeInfo> = {
   free: {
     mode: 'free', label: 'Default', glyph: '∀', kind: 'free',
@@ -22,6 +23,11 @@ export const MODES: Record<Mode, ModeInfo> = {
     mode: 'prove', label: 'Prove', glyph: '⊢', kind: 'proof',
     summary: 'Solve the whole problem, review the written proof, repair a concrete objection.',
     newLabel: 'New proof', empty: 'No proofs yet in this workspace.',
+  },
+  experiment: {
+    mode: 'experiment', label: 'Experiment', glyph: '≈', kind: 'experiment',
+    summary: 'Test a claim numerically: protocol, validated code in a sandbox, figures, and an exactly checked counterexample when there is one.',
+    newLabel: 'New experiment', empty: 'No experiments yet.',
   },
   // Not in the rail: the Default notebook answers with these, and older chats stay readable.
   critic: {

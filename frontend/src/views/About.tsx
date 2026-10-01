@@ -11,6 +11,7 @@ const NOTEBOOKS: Partial<Record<Mode, string>> = {
   literature: 'A report on published results that cites the exact passages it read.',
   referee: 'A review of a manuscript, with line-level citations for every claim it checks.',
   writeup: 'Clean LaTeX from your notes, drafts or PDFs, in your own macros and style.',
+  experiment: 'Numerical tests of a claim in a sandbox: validated code, figures, and counterexamples checked in exact arithmetic.',
 }
 
 export function About() {

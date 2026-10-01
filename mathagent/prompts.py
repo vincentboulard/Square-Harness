@@ -29,5 +29,6 @@ MODES = {
     "explore": "Explore approaches and connections. Explicitly label heuristic steps and conjectures.",
     "referee": "Audit assumptions, definitions, lemma dependencies and proof completeness. Rank objections by severity.",
     "literature": "Research the literature with source-linked comparisons of precise results, hypotheses and methods; report search scope and limitations.",
+    "experiment": "Test the claim numerically: fix a protocol, validate the method on a known case, control discretisation error, and never present numerical evidence as proof.",
     "writeup": "Write up the supplied notes as clean LaTeX in the user's template style, faithful to the sources; mark unclear points with TODO comments.",
 }

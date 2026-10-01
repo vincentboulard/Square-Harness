@@ -64,6 +64,15 @@ export function researchLook(status: string, running = false): Look {
     case 'running': return { variant: 'paused', label: 'Interrupted, can resume' }
     case 'ready': return { variant: 'ready', label: 'Ready to start' }
     case 'error': return { variant: 'error', label: 'Stopped by an error' }
+    // Numerical experiments: the controller's verdict from recorded data
+    case 'certified_counterexample': return { variant: 'complete', label: 'Certified counterexample' }
+    case 'evidence_against': return { variant: 'gap', label: 'Numerical evidence against' }
+    case 'consistent': return { variant: 'reviewed', label: 'Numerically consistent' }
+    case 'inconclusive': return { variant: 'uncertain', label: 'Inconclusive' }
+    case 'validation_failed': return { variant: 'error', label: 'Unreliable: validation failed' }
+    case 'unvalidated': return { variant: 'partial', label: 'Unreliable: not validated' }
+    case 'run_failed': return { variant: 'error', label: 'The code did not run' }
+    case 'not_run': return { variant: 'ready', label: 'Code written, not run' }
     default: return { variant: 'uncertain', label: status }
   }
 }

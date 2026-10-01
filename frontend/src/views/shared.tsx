@@ -85,6 +85,12 @@ export const ROLES: Record<string, { active: string; name: string; structured?: 
   outline: { active: 'Planning the sections from your notes', name: 'Outline', structured: true },
   section: { active: 'Writing a section from your notes', name: 'Section' },
   repair: { active: 'Repairing the sections named in LaTeX errors', name: 'Repair' },
+  protocol: { active: 'Fixing the experimental protocol before any computation', name: 'Protocol', structured: true },
+  code: { active: 'Writing the experiment code', name: 'Code' },
+  fix: { active: 'Fixing the experiment code after a failed run', name: 'Fix' },
+  interpret: { active: 'Interpreting the recorded results against the protocol', name: 'Interpretation', structured: true },
+  certificate: { active: 'Writing an exact counterexample certificate', name: 'Certificate' },
+  faithful: { active: 'A fresh reviewer is checking that the certificate encodes the statement', name: 'Faithfulness', structured: true },
 }
 
 export type LiveText = { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; loaded: boolean }

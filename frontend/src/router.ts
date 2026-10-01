@@ -1,10 +1,10 @@
 import { useSyncExternalStore } from 'react'
 
-export type Mode = 'free' | 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup'
-export const MODE_ORDER: Mode[] = ['free', 'prove', 'critic', 'explore', 'literature', 'referee', 'writeup']
+export type Mode = 'free' | 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup' | 'experiment'
+export const MODE_ORDER: Mode[] = ['free', 'prove', 'critic', 'explore', 'literature', 'referee', 'writeup', 'experiment']
 // The notebooks in the rail. Critic and explore remain workflows of the engine (the
 // Default notebook answers with them) and their older conversations stay readable.
-export const RAIL: Mode[] = ['free', 'prove', 'literature', 'referee', 'writeup']
+export const RAIL: Mode[] = ['free', 'prove', 'experiment', 'literature', 'referee', 'writeup']
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 
 export type Page = 'about'

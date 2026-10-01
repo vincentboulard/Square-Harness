@@ -39,7 +39,9 @@ export function ApprovalDialog() {
       setBusy(false)
     }
   }
-  const title = approval.kind === 'write' ? 'Approve this file change?' : approval.kind === 'python' ? 'Run this Python code?' : 'Confirm this action?'
+  const title = approval.kind === 'write' ? 'Approve this file change?' : approval.kind === 'python' ? 'Run this Python code?'
+    : approval.kind === 'experiment' ? 'Run this numerical experiment?' : 'Confirm this action?'
+  const isolated = /no network/.test(head)
   return (
     <Modal title={title} wide>
       {approval.kind === 'write' && (
@@ -54,12 +56,22 @@ export function ApprovalDialog() {
           <pre className="code-block">{body}</pre>
         </>
       )}
+      {approval.kind === 'experiment' && (
+        <>
+          <p className={isolated ? 'network-note' : 'warning-note'}>
+            {isolated
+              ? 'The code runs in a separate process without network access, with time, memory and file-size limits. ' + (/isolation: netns/.test(head) ? 'It can still read and write your files: read it first.' : 'It can write only in its run folder.')
+              : 'No sandbox is available: the code runs with your account’s permissions and network, under time and memory limits only. Run only code you have read.'}
+          </p>
+          <pre className="code-block">{body}</pre>
+        </>
+      )}
       {approval.kind === 'confirm' && <pre className="code-block">{approval.preview}</pre>}
       <ErrorNote>{error}</ErrorNote>
       <div className="modal-actions">
         <button type="button" className="btn" disabled={busy} onClick={() => decide(false)}>Deny</button>
         <button type="button" className="btn btn-primary" disabled={busy} onClick={() => decide(true)}>
-          {approval.kind === 'write' ? 'Write the file' : approval.kind === 'python' ? 'Run the code' : 'Approve'}
+          {approval.kind === 'write' ? 'Write the file' : approval.kind === 'python' || approval.kind === 'experiment' ? 'Run the code' : 'Approve'}
         </button>
       </div>
     </Modal>

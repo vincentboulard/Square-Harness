@@ -288,6 +288,7 @@
 .mode-free { background: #3b4256; }
 .mode-writeup { background: #0f7482; }
 .mode-writeup .mode-glyph { font-family: var(--font-text); font-weight: 700; font-size: 21px; }
+.mode-experiment { background: #b4462a; }
 
 /* Folder controls in the workspace footer */
 .workspace-open { display: flex; align-items: center; gap: 7px; padding: 3px 6px; margin: -3px -6px; border: 0; border-radius: 6px; background: none; color: var(--text); cursor: pointer; text-align: left; font: inherit; font-weight: 700; font-size: 13.5px; }

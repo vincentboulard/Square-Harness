@@ -8,7 +8,7 @@ several separate jobs; each becomes its own suggestion with a suggested effort.
 import json
 import re
 
-JOB_MODES = ('prove', 'critic', 'explore', 'literature', 'referee', 'writeup')
+JOB_MODES = ('prove', 'critic', 'explore', 'literature', 'referee', 'writeup', 'experiment')
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'poincare')
 MAX_TASKS = 4
@@ -43,8 +43,10 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
 - literature: a bibliographical report comparing published results on a topic.
 - referee: a review report assessing a manuscript file the user names or attaches.
 - writeup: turn notes, a draft or a PDF the user names or attaches into a clean LaTeX document.
+- experiment: test a claim, a constant or an intuition numerically (computations, plots,
+  search for a counterexample), when the user asks to test, compute, simulate or plot.
 A question (why, what, how, is it true that) is answered with critic or explore. Choose
-prove, literature, referee or writeup only when the message asks for that kind of work;
+prove, literature, referee, writeup or experiment only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
 Return one task per separate piece of work, in the order they should run. A single question,
 statement or request is exactly one task. Give several (at most 4) only when the message
@@ -61,8 +63,8 @@ poincare only when the user asks for the maximum effort.
 When the message is too ambiguous to choose, return no tasks and ask one short `question`;
 otherwise `question` is empty. Return only JSON matching the schema."""
 
-FALLBACK_QUESTION = ('Should I prove a statement, check an argument, explore an idea, write a '
-                     'literature report or a review of a manuscript, or write up notes in LaTeX?')
+FALLBACK_QUESTION = ('Should I prove a statement, check an argument, explore an idea, test a claim '
+                     'numerically, write a literature report or a review of a manuscript, or write up notes in LaTeX?')
 
 
 # In JSON, "\frac" written with one backslash reads as a form feed and "rac"; small models

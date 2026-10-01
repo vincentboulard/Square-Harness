@@ -38,7 +38,7 @@ class ProofCliTests(unittest.TestCase):
         self.assertEqual(self.run_cli(['--prompt', 'Prove x=x.']), 0)
         self.runner.start.assert_called_once_with('Prove x=x.', max_rounds=3,
             max_tokens=120000, max_seconds=1800, max_predict=32768,
-            verify_tokens=16384, min_solve_tokens=None, repair_tokens=None, verify_temperature=None, source_files=[])
+            verify_tokens=16384, min_solve_tokens=None, repair_tokens=None, verify_temperature=None, source_files=[], experiments=None)
         self.assertIn(self.result['answer'], self.output())
         self.assertIn(self.result['report'], self.output())
         self.assertIn('/proof-report proof-example', self.output())

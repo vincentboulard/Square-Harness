@@ -28,7 +28,8 @@ export function taskMode(task: TaskSummary | null, app: AppState): Mode | null {
   if (task.kind === 'proof') return 'prove'
   if (task.kind === 'research') {
     const job = app.research?.find((item) => item.id === task.target)
-    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Write') ? 'writeup' : 'literature'
+    return job ? job.kind : task.label.startsWith('Review') ? 'referee' : task.label.startsWith('Write') ? 'writeup'
+      : task.label.startsWith('Experiment') ? 'experiment' : 'literature'
   }
   const chat = app.chats?.find((item) => item.id === task.target)
   return chat ? chat.kind : null

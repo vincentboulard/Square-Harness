@@ -21,12 +21,13 @@ from ..research import ResearchRunner
 from ..router import JOB_MODES, clarify, classify
 from ..tools import Workspace
 from ..writeup import WriteupRunner
+from ..experiment import ExperimentRunner
 from . import effort, store
 from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
 # Task labels shown in the interface; the engine's kind stays 'referee'.
-LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up'}
+LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'experiment': 'Experiment'}
 
 
 class Busy(Exception):
@@ -143,7 +144,8 @@ class Approval:
         self.task = task
         self.preview = preview
         self.kind = ('write' if preview.startswith('WRITE ') else
-                     'python' if preview.startswith('RUN PYTHON') else 'confirm')
+                     'python' if preview.startswith('RUN PYTHON') else
+                     'experiment' if preview.startswith('RUN NUMERICAL EXPERIMENT') else 'confirm')
         self.decided = threading.Event()
         self.approved = False
 
@@ -464,8 +466,22 @@ class Hub:
 
     # -- proofs --------------------------------------------------------
 
+    def experiment_defaults(self):
+        args = self.args
+        return dict(permission=getattr(args, 'experiments', 'ask'), run_seconds=getattr(args, 'experiment_seconds', 120),
+                    memory_mb=getattr(args, 'experiment_memory', 2048), max_rounds=getattr(args, 'experiment_runs', 4),
+                    max_tokens=getattr(args, 'experiment_tokens', 30000), max_seconds=getattr(args, 'experiment_time', 1800))
+
+    def _permission(self, permission):
+        if permission is None:
+            return self.experiment_defaults()['permission']
+        if permission not in ('off', 'ask', 'auto'):
+            raise ValueError('Experiment permission must be off, ask or auto')
+        return permission
+
     def start_proof(self, goal, *, source_files=(), rounds=None, tokens=None, seconds=None,
-                    solve_tokens=None, verify_tokens=None, ctx=None, queue=False, on_update=None):
+                    solve_tokens=None, verify_tokens=None, ctx=None, queue=False, on_update=None,
+                    refute_first=None, test_objections=None, permission=None):
         # Proof work always thinks and has no tools: the model sees the goal and
         # the pinned text only, exactly as with the terminal's /prove.
         args = self.args
@@ -476,6 +492,13 @@ class Hub:
         verify = args.proof_verify_tokens if verify_tokens is None else verify_tokens
         _check_ctx(ctx, args.predict)
         _check_proof(args, tokens=tokens, solve=solve, verify=verify, ctx=ctx or args.ctx)
+        refute = getattr(args, 'proof_refute_first', False) if refute_first is None else bool(refute_first)
+        objections = getattr(args, 'proof_test_objections', False) if test_objections is None else bool(test_objections)
+        experiments = None
+        if refute or objections:
+            experiments = dict(self.experiment_defaults(), permission=self._permission(permission),
+                               refute_first=refute, test_objections=objections)
+            experiments['max_seconds'] = min(experiments['max_seconds'], max(60, seconds / 3))
 
         def work(task):
             agent, _ = self._engine(task, mode='prove', ctx=ctx, online=False)
@@ -485,7 +508,7 @@ class Hub:
             return runner.start(goal, max_rounds=rounds, max_tokens=tokens, max_seconds=seconds,
                                 max_predict=solve, verify_tokens=verify, min_solve_tokens=args.proof_min_solve_tokens,
                                 repair_tokens=args.proof_repair_tokens, verify_temperature=args.proof_verify_temperature,
-                                source_files=list(source_files))
+                                source_files=list(source_files), experiments=experiments)
         return self._started(self._begin('proof', None, 'Proof', goal, work, queue=queue, on_update=on_update))
 
     def resume_proof(self, proof_id, queue=False):
@@ -545,8 +568,37 @@ class Hub:
                                 template_texts=texts, notes=notes, output=output, **budgets)
         return self._started(self._begin('research', None, LABELS['writeup'], goal, work, queue=queue, on_update=on_update))
 
+    def start_experiment(self, goal, *, source_files=(), permission=None, run_seconds=None, memory_mb=None,
+                         rounds=None, tokens=None, input_tokens=None, seconds=None, queue=False, on_update=None):
+        defaults = self.experiment_defaults()
+        options = dict(permission=self._permission(permission),
+                       run_seconds=defaults['run_seconds'] if run_seconds is None else run_seconds,
+                       memory_mb=defaults['memory_mb'] if memory_mb is None else memory_mb,
+                       max_rounds=defaults['max_rounds'] if rounds is None else rounds,
+                       max_tokens=defaults['max_tokens'] if tokens is None else tokens,
+                       max_input_tokens=self.args.research_input_tokens if input_tokens is None else input_tokens,
+                       max_seconds=defaults['max_seconds'] if seconds is None else seconds)
+
+        def work(task):
+            # Experiments never search: the code runs without network.
+            agent, _ = self._engine(task, mode='experiment', online=False)
+            self._ensure_model(agent)
+            runner = ExperimentRunner(agent)
+            runner.emit = self._job_emit(task, runner, 'research')
+            return runner.start(goal, source_files=list(source_files), **options)
+        return self._started(self._begin('research', None, LABELS['experiment'], goal, work, queue=queue, on_update=on_update))
+
     def resume_research(self, job_id, queue=False):
         state = store.research_state(self.root, job_id)
+        if state['kind'] == 'experiment':
+            def work(task):
+                agent, _ = self._engine(task, mode='experiment', online=False)
+                runner = ExperimentRunner(agent)
+                runner.emit = self._job_emit(task, runner, 'research')
+                return runner.resume(job_id, permission=self.experiment_defaults()['permission'])
+            task = self._begin('research', job_id, LABELS['experiment'], state['goal'], work, queue=queue)
+            task.ready.set()
+            return task
         runner_class = WriteupRunner if state['kind'] == 'writeup' else ResearchRunner
         # A job keeps the network choice it started with (never more, per the runner).
         online = bool(state['settings'].get('online')) and not self.online_locked
@@ -727,6 +779,11 @@ class Hub:
                 if detail['status'] == 'candidate_complete' and detail['answer']:
                     return 'the model review found no issue in this answer: ' + one_line(detail['answer'], 600)
                 return detail['status'] + (f'; {one_line(detail["stop_reason"], 300)}' if detail.get('stop_reason') else '')
+            if item['mode'] == 'experiment':
+                state = store.research_state(root, job)
+                verdict = (state.get('interpretation') or {}).get('explanation', '')
+                return f'{state["status"]}: {one_line(state.get("stop_reason") or "", 300)}' + (
+                    ' ' + one_line(verdict, 500) if verdict else '')
             if item['mode'] in ('literature', 'referee', 'writeup'):
                 state = store.research_state(root, job)
                 text = state.get('document') or state.get('draft') or ''
@@ -744,7 +801,7 @@ class Hub:
         if chat['transcript'][index].get('status') not in ('proposed', 'failed', 'cancelled'):
             raise ValueError('This suggestion has already started')
         if mode not in JOB_MODES:
-            raise ValueError('Choose prove, critic, explore, literature, referee or writeup')
+            raise ValueError('Choose prove, critic, explore, literature, referee, writeup or experiment')
         if not isinstance(request, str) or not request.strip():
             raise ValueError('The request cannot be empty')
         files = self.check_files(list(files))
@@ -779,6 +836,10 @@ class Hub:
             elif mode in ('literature', 'referee'):
                 task = self.start_research(mode, request, source_files=files, online=online, queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
+            elif mode == 'experiment':
+                task = self.start_experiment(request, source_files=[f for f in files if not f.lower().endswith('.pdf')],
+                                             queue=True, on_update=on_update,
+                                             **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds')})
             elif mode == 'writeup':
                 task = self.start_writeup(request, source_files=files, notes='' if files else request,
                                           queue=True, on_update=on_update,

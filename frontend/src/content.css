@@ -472,3 +472,36 @@
 .route-details > summary { font-size: 12.5px; }
 .route-details .route-summary { font-size: 14px; color: var(--text-2); }
 .route-clarify .route-card { border-color: var(--ink-soft-strong); }
+
+/* Numerical experiments */
+.experiment-section { margin: 0 0 26px; }
+.experiment-section .section-title { margin: 0 0 8px; font: 700 17px/1.3 var(--font-ui); }
+.experiment-section .section-title .small { font-weight: 400; }
+.verdict { margin: 0 0 22px; padding: 12px 16px; border-left: 3px solid var(--line-strong); border-radius: 0 8px 8px 0; background: var(--sheet); font-size: 15px; }
+.verdict p { margin: 0; }
+.verdict-title { margin-bottom: 4px !important; font: 700 16px/1.3 var(--font-ui); }
+.verdict-certified_counterexample, .verdict-consistent { border-left-color: var(--green); background: var(--green-soft); }
+.verdict-evidence_against, .verdict-validation_failed, .verdict-run_failed { border-left-color: var(--red); background: var(--red-soft); }
+.verdict-inconclusive, .verdict-unvalidated, .verdict-not_run { border-left-color: var(--ochre); background: var(--ochre-soft); }
+.key-numbers { margin: 6px 0 10px; padding-left: 18px; font-size: 14.5px; }
+.key-numbers p { margin: 0; }
+.result-table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+.result-table th, .result-table td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.result-table th { font: 700 12.5px/1.3 var(--font-ui); color: var(--text-2); }
+.result-table .row-bad td { color: var(--red); }
+.figure-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.figure { margin: 0; padding: 8px; background: #fff; border: 1px solid var(--line); border-radius: 8px; }
+.figure img { display: block; width: 100%; height: auto; }
+.figure figcaption { margin-top: 6px; font-size: 12.5px; color: #4a4f63; font-family: var(--font-mono); }
+.figure figcaption a { color: inherit; }
+.check-list { display: grid; gap: 5px; margin: 6px 0 10px; padding-left: 18px; font-size: 13.5px; }
+.check-list code { overflow-wrap: anywhere; }
+.check-good::marker { color: var(--green); }
+.check-bad { color: var(--red); }
+.certificate { padding: 12px 16px; border: 1px solid var(--line-strong); border-radius: 8px; }
+.certificate-ok { border-color: var(--green); }
+.protocol { display: grid; gap: 12px; margin: 0; }
+.protocol dt { font: 700 12.5px/1.4 var(--font-ui); color: var(--text-2); }
+.protocol dd { margin: 2px 0 0; }
+.protocol dd p { margin: 0; }
+.field > .segmented { justify-self: start; align-self: flex-start; width: auto; margin-bottom: 6px; }

@@ -43,17 +43,19 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
 }
 
 // How a card names what the model started. Critic and explore are both an answer here.
-type Kind = 'answer' | 'prove' | 'literature' | 'referee' | 'writeup'
+type Kind = 'answer' | 'prove' | 'literature' | 'referee' | 'writeup' | 'experiment'
 const KINDS: Record<Kind, { noun: string; label: string; glyph: string; cover: string }> = {
   answer: { noun: 'an answer', label: 'Answer', glyph: MODES.free.glyph, cover: 'free' },
   prove: { noun: 'a proof', label: 'Proof', glyph: MODES.prove.glyph, cover: 'prove' },
   literature: { noun: 'a literature report', label: 'Literature report', glyph: MODES.literature.glyph, cover: 'literature' },
   referee: { noun: 'a review', label: 'Review', glyph: MODES.referee.glyph, cover: 'referee' },
   writeup: { noun: 'a write-up', label: 'Write-up', glyph: MODES.writeup.glyph, cover: 'writeup' },
+  experiment: { noun: 'an experiment', label: 'Experiment', glyph: MODES.experiment.glyph, cover: 'experiment' },
 }
 const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
-  mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : mode === 'literature' || mode === 'referee' ? 'research' : null
+  mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : mode === 'experiment' ? 'experiment'
+    : mode === 'literature' || mode === 'referee' ? 'research' : null
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {

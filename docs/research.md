@@ -1,7 +1,8 @@
 # Optional chat, research and write-up workflows
 
 These existing tools remain available alongside the focused
-[proof workflow](usage.md). They do not participate in proof-mode benchmarks.
+[proof workflow](usage.md). Numerical experiments have their own guide:
+[experiments](experiments.md). They do not participate in proof-mode benchmarks.
 
 ## Manuscript chat
 

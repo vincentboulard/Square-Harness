@@ -1,7 +1,7 @@
 // Effort levels: one control instead of budget fields (no React; testable with node).
 import type { Defaults } from './api'
 
-export type EffortKind = 'proof' | 'research' | 'writeup'
+export type EffortKind = 'proof' | 'research' | 'writeup' | 'experiment'
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'poincare'
 
 // The same budgets for every kind of job. Tries are proof attempts or investigation
@@ -49,6 +49,8 @@ export function effortLimits(kind: EffortKind, defaults: Defaults, level: Effort
   if (kind === 'proof') return { rounds: effort.tries, seconds, ...proofCeilings(defaults, effort.tokens) }
   const base: Limits = { tokens: effort.tokens, input_tokens: effort.input, seconds }
   if (kind === 'writeup') return base
+  // Experiments: tries are code runs (each fix is a run); a Low experiment still gets one fix.
+  if (kind === 'experiment') return { ...base, rounds: Math.max(2, effort.tries + 1), seconds: Math.max(seconds, 300) }
   return { ...base, rounds: effort.tries, requests: effort.requests, chars: effort.chars }
 }
 
@@ -62,5 +64,6 @@ export function describeLimits(kind: EffortKind, limits: Limits) {
   const tries = (n: number, one: string) => `${count(n)} ${n === 1 ? one : one + 's'}`
   if (kind === 'proof') return `Up to ${tries(limits.rounds!, 'attempt')}, ${count(limits.tokens)} tokens and ${minutesLabel(limits.seconds)}`
   if (kind === 'writeup') return `Up to ${count(limits.tokens)} generated tokens and ${minutesLabel(limits.seconds)}`
+  if (kind === 'experiment') return `Up to ${tries(limits.rounds!, 'code run')}, ${count(limits.tokens)} generated tokens and ${minutesLabel(limits.seconds)}`
   return `Up to ${tries(limits.rounds!, 'round')}, ${count(limits.tokens)} generated tokens, ${count(limits.requests!)} web requests and ${minutesLabel(limits.seconds)}`
 }

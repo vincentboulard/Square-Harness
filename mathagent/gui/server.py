@@ -32,6 +32,7 @@ import webbrowser
 from .. import __version__
 from ..agent import AgentError
 from ..ledger import _directory
+from .. import sandbox
 from . import store
 from .hub import Busy, Hub
 from .watch import Watcher
@@ -133,7 +134,16 @@ def status(h, body):
                         'research_rounds': args.research_rounds, 'research_tokens': args.research_tokens,
                         'research_input_tokens': args.research_input_tokens,
                         'research_seconds': args.research_seconds, 'research_requests': args.research_requests,
-                        'research_chars': args.research_chars},
+                        'research_chars': args.research_chars,
+                        'experiments': getattr(args, 'experiments', 'ask'),
+                        'experiment_seconds': getattr(args, 'experiment_seconds', 120),
+                        'experiment_memory': getattr(args, 'experiment_memory', 2048),
+                        'experiment_runs': getattr(args, 'experiment_runs', 4),
+                        'experiment_tokens': getattr(args, 'experiment_tokens', 30000),
+                        'experiment_time': getattr(args, 'experiment_time', 1800),
+                        'proof_refute_first': bool(getattr(args, 'proof_refute_first', False)),
+                        'proof_test_objections': bool(getattr(args, 'proof_test_objections', False))},
+           'isolation': sandbox.available_isolation(),
            'ollama': hub.models(), 'root': str(hub.base),
            'workspace_path': '' if hub.root == hub.base else hub.root.relative_to(hub.base).as_posix(),
            'read': store.load_settings(hub.root)['read'], 'latex': shutil.which('latexmk') is not None,
@@ -231,8 +241,37 @@ def proof_start(h, body):
         rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 512),
         seconds=_seconds(body, 'seconds'), solve_tokens=_int(body, 'solve_tokens', 128, 1_000_000),
         verify_tokens=_int(body, 'verify_tokens', 128, 1_000_000), ctx=_int(body, 'ctx', 2048),
+        refute_first=_flag(body, 'refute_first'), test_objections=_flag(body, 'test_objections'),
+        permission=_permission(body), queue=bool(_flag(body, 'queue')))
+    return {'task': task.summary(), 'id': task.target}
+
+
+def _permission(body):
+    value = body.get('permission')
+    if value is not None and value not in ('off', 'ask', 'auto'):
+        raise ValueError('permission must be off, ask or auto')
+    return value
+
+
+@route('POST', '/api/experiments')
+def experiment_start(h, body):
+    task = h.server.hub.start_experiment(
+        _text(body, 'goal', 20000), source_files=_files(body), permission=_permission(body),
+        run_seconds=_int(body, 'run_seconds', 5, 3600), memory_mb=_int(body, 'memory_mb', 256, 65536),
+        rounds=_int(body, 'rounds', 1, 20), tokens=_int(body, 'tokens', 4000),
+        input_tokens=_int(body, 'input_tokens', 8000), seconds=_seconds(body, 'seconds'),
         queue=bool(_flag(body, 'queue')))
     return {'task': task.summary(), 'id': task.target}
+
+
+@route('GET', '/api/research/' + UUID + r'/figures/(?P<run>run-[0-9]{1,4})/(?P<name>[A-Za-z0-9_-]{1,80}\.(?:png|svg))')
+def research_figure(h, body, id, run, name):
+    data, kind = store.research_figure(h.server.hub.root, id, run, name)
+    headers = [('Cache-Control', 'private, max-age=3600')]
+    if kind == 'image/svg+xml':
+        headers.append(('Content-Disposition', f'attachment; filename="{name}"'))
+    h.send_bytes(200, data, kind, headers)
+    return Streamed
 
 
 @route('GET', '/api/proofs/' + UUID)

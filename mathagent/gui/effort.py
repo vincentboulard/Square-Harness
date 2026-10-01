@@ -36,6 +36,10 @@ def limits(mode, level, args):
         return dict(rounds=effort['tries'], tokens=tokens, seconds=seconds, solve_tokens=solve, verify_tokens=verify)
     if mode == 'writeup':
         return dict(tokens=effort['tokens'], input_tokens=effort['input'], seconds=seconds)
+    if mode == 'experiment':
+        # tries are code runs (each fix is a run); a Low experiment still gets one fix.
+        return dict(rounds=max(2, effort['tries'] + 1), tokens=effort['tokens'], input_tokens=effort['input'],
+                    seconds=max(seconds, 300))
     if mode in ('literature', 'referee'):
         return dict(rounds=effort['tries'], tokens=effort['tokens'], input_tokens=effort['input'], seconds=seconds,
                     requests=effort['requests'], chars=effort['chars'])

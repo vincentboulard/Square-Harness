@@ -89,11 +89,22 @@ proof modes are not part of v0.5.
 | `/resume <id>` | Resume an interrupted v0.5 job |
 | `/critic <question>` / `/explore <question>` | Use ordinary mathematical chat |
 | `/writeup <instructions>` | Write up pinned notes as LaTeX in your template style |
+| `/experiment <claim>` | Test a claim numerically in a sandbox; certify an explicit counterexample |
 | `/help` | Show commands |
 | `square-harness --gui` | Open the visual interface instead of the terminal prompt |
 
 Jobs live under `.mathagent/` in the chosen workspace. The `mathagent` command is
 an alias; `python -m mathagent` also works from the checkout.
+
+## Numerical experiments
+
+`/experiment <claim>` (or the Experiment notebook) fixes a protocol, writes code with tested
+numerical helpers, runs it in a separate process without network and with resource limits,
+and reads the recorded numbers. The status comes from the data: a method that failed its
+known-answer validation, or an unconverged quantity, is reported as unreliable. An explicit
+counterexample is checked in exact or interval arithmetic before it is called certified.
+`--proof-refute-first` and `--proof-test-objections` connect experiments to proof mode.
+Install with `pip install -e '.[experiments]'`; see [Numerical experiments](docs/experiments.md).
 
 ## Guides
 
@@ -102,6 +113,7 @@ an alias; `python -m mathagent` also works from the checkout.
 - [HyperQwen on A10](docs/hyperqwen-a10.md): the pinned fast serving profile.
 - [A10 llama.cpp](docs/a10.md) / [two V100S](docs/ovh.md): retained hardware alternatives.
 - [Optional research tools](docs/research.md): manuscript chat, literature and referee drafts, LaTeX write-ups.
+- [Numerical experiments](docs/experiments.md): sandboxed tests, figures and certified counterexamples.
 
 Ollama, llama.cpp and OpenAI-compatible servers are supported. The solver and
 verifier currently use the same model in separate contexts and can share errors.

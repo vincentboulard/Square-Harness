@@ -12,13 +12,14 @@ import time
 
 from .agent import AgentError
 from .backends import TokenBudgetError
+from .experiment import ExperimentRunner
 from .ledger import LedgerError, ProofStore
 from .proof_policy import (
     CONTINUE_POLICY, REPAIR_POLICY, VERIFIER_SCHEMA, initial_request, review_request,
 )
 
 POLICY_VERSION = 7
-TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
+TERMINAL = {'candidate_complete', 'refuted', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
 
 
@@ -93,6 +94,43 @@ def check_context(client, payload):
     return {'input_tokens': count, 'method': method}
 
 
+EXPERIMENT_KEYS = {'permission', 'run_seconds', 'memory_mb', 'max_rounds', 'max_tokens', 'max_seconds',
+                   'refute_first', 'test_objections'}
+USEFUL_EVIDENCE = {'evidence_against', 'consistent', 'certified_counterexample'}
+
+
+def _experiment_settings(value):
+    """Validate optional proof-mode experiment settings (None disables them)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - EXPERIMENT_KEYS:
+        raise ValueError('Unknown proof experiment settings: ' + ', '.join(sorted(set(value) - EXPERIMENT_KEYS)))
+    result = {'permission': 'ask', 'run_seconds': 120, 'memory_mb': 2048, 'max_rounds': 4,
+              'max_tokens': 30000, 'max_seconds': 900, 'refute_first': False, 'test_objections': False}
+    result.update(value)
+    if result['permission'] not in ('off', 'ask', 'auto'):
+        raise ValueError('Experiment permission must be off, ask or auto')
+    for key in ('refute_first', 'test_objections'):
+        if not isinstance(result[key], bool):
+            raise ValueError(key + ' must be true or false')
+    return result if (result['refute_first'] or result['test_objections']) else None
+
+
+def experiment_note(summary, title):
+    """Numerical findings as fallible data for a verifier or a repair."""
+    lines = [f'{title} (Square Harness experiment {summary["id"]}; numerical evidence is fallible and is not proof):',
+             'Status: ' + summary['status'] + ' — ' + summary['stop_reason']]
+    if summary.get('explanation'):
+        lines.append('Interpretation: ' + summary['explanation'][:2500])
+    if summary.get('key_numbers'):
+        lines.append('Key numbers: ' + '; '.join(summary['key_numbers'][:8]))
+    if summary.get('limitations'):
+        lines.append('Limitations: ' + summary['limitations'][:1200])
+    if summary.get('certified') and summary.get('certificate'):
+        lines.append('Exactly checked counterexample certificate: ' + json.dumps(summary['certificate'], ensure_ascii=False)[:3000])
+    return '\n'.join(lines)
+
+
 class ProofRunner:
     def __init__(self, agent, emit=lambda kind, value: None):
         self.agent, self.emit = agent, emit
@@ -121,7 +159,7 @@ class ProofRunner:
 
     def start(self, goal, *, max_rounds=3, max_tokens=120000, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
-              min_solve_tokens=None, verify_temperature=None, repair_tokens=None):
+              min_solve_tokens=None, verify_temperature=None, repair_tokens=None, experiments=None):
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 60000:
             raise ValueError('Provide a nonempty proof goal, at most 60000 characters')
         for name, value, lower, upper in (
@@ -153,10 +191,13 @@ class ProofRunner:
             actual = self.agent.workspace.path(str(path))
             text = self.agent.workspace.text(actual)
             sources.append({'path': str(path), 'content': text, 'sha256': _digest(text)})
+        experiments = _experiment_settings(experiments)
         settings = dict(self._provenance(), max_rounds=max_rounds, max_tokens=max_tokens,
                         max_seconds=max_seconds, max_predict=max_predict, verify_tokens=verify_tokens,
                         min_solve_tokens=min_solve_tokens, verify_temperature=verify_temperature,
                         repair_tokens=repair_tokens)
+        if experiments:
+            settings['experiments'] = experiments
         self.store = ProofStore.create(self.agent.workspace.root, goal, settings, sources)
         self.emit('notice', f'Proof {self.state["id"]}: solve, verify, repair if needed; up to {max_rounds} attempts, subject to budget')
         return self._run()
@@ -231,6 +272,16 @@ class ProofRunner:
             self.state['status'] = 'running'
             try:
                 self._recover_calls()
+                config = self.state['settings'].get('experiments') or {}
+                if config.get('refute_first') and not self.state['candidates']:
+                    record = self._experiment('refute_first', 'refute-first', self.state['goal'],
+                                              'Before attempting a proof, test the statement numerically; look '
+                                              'actively for a counterexample.')
+                    if record and record.get('status') == 'certified_counterexample':
+                        self._stop('refuted', 'A numerical experiment produced a counterexample certificate that the exact '
+                                   'checker verified and a review judged faithful to the statement. Read the certificate: '
+                                   'its correspondence with the statement is a model judgement.')
+                        return self._result()
                 if self.state['pending'] is None:
                     self._new_attempt('initial')
                 while self.state['status'] == 'running':
@@ -248,6 +299,8 @@ class ProofRunner:
                     elif pending['phase'] == 'review':
                         self._review(pending)
                     elif pending['phase'] in {'continue', 'repair'}:
+                        if pending['phase'] == 'repair' and self._can_attempt('repair'):
+                            self._test_objection(pending)
                         self._new_attempt(pending['phase'], pending['candidate'], pending.get('review'))
                     else:
                         raise LedgerError('Invalid saved proof phase')
@@ -265,6 +318,80 @@ class ProofRunner:
                 self._save()
                 self._clock = None
             return self._result()
+
+    def _can_attempt(self, kind):
+        settings = self.state['settings']
+        return (self.state['rounds_started'] < settings['max_rounds']
+                and self._remaining() >= self._attempt_cap(kind) + settings['verify_tokens']
+                and self._elapsed() < settings['max_seconds'])
+
+    def _experiment(self, stage, key, goal, context):
+        """Run (or resume) one auxiliary experiment job; its tokens are budgeted separately."""
+        config = self.state['settings'].get('experiments') or {}
+        records = self.state.setdefault('experiments', [])
+        record = next((r for r in records if r['key'] == key), None)
+        if record and record.get('status') in ExperimentRunner.TERMINAL + ('error', 'skipped'):
+            return record
+        left = self.state['settings']['max_seconds'] - self._elapsed()
+        if record is None:
+            record = {'key': key, 'stage': stage, 'id': None, 'status': 'starting'}
+            records.append(record)
+            if left < 60:
+                record.update(status='skipped', error='Less than a minute of the proof time budget remained.')
+                self._save()
+                return record
+            self._save()
+        runner = ExperimentRunner(self.agent, self.emit)
+
+        def created(job_id):
+            record['id'] = job_id
+            self._save()
+        runner.on_created = created
+        self.emit('notice', f'Numerical experiment ({stage.replace("_", " ")}) before continuing the proof')
+        try:
+            if record['id'] is None:
+                result = runner.start(goal, context=context, permission=config['permission'],
+                                      run_seconds=config['run_seconds'], memory_mb=config['memory_mb'],
+                                      max_rounds=config['max_rounds'], max_tokens=config['max_tokens'],
+                                      max_seconds=max(30, min(config['max_seconds'], left - 30)))
+            else:
+                result = runner.resume(record['id'], permission=config['permission'])
+        except (AgentError, OSError, ValueError, LedgerError) as exc:
+            record.update(status='error', error=f'{type(exc).__name__}: {exc}')
+            self._save()
+            return record
+        record['id'] = result['id']
+        record['directory'] = result['directory']
+        if result['status'] in ('paused', 'running', 'ready'):
+            record['status'] = 'paused'
+            self._save()
+            raise KeyboardInterrupt
+        record['status'] = result['status']
+        record['summary'] = runner.summary()
+        self._save()
+        return record
+
+    def _test_objection(self, pending):
+        review = next((r for r in self.state['reviews'] if r['id'] == pending.get('review')), None)
+        config = self.state['settings'].get('experiments') or {}
+        if not config.get('test_objections') or review is None or not review.get('response'):
+            return
+        issues = [i for i in review['response']['issues'] if i['kind'] != 'uncertainty'][:3]
+        if not issues:
+            return
+        candidate = self._candidate_text(self._get_candidate(review['candidate']))
+        goal = ('A reviewer objected to a proposed proof. Test numerically whether the disputed assertion holds '
+                '(look for a counterexample to it if it is a general claim).\n\n' +
+                '\n'.join(f'Objection {n} ({i["kind"]}, at {i["location"]}): {i["evidence"]}' for n, i in enumerate(issues, 1)))
+        context = ('STATEMENT BEING PROVED:\n' + self.state['goal'] + '\n\nPROPOSED PROOF (excerpt, data):\n'
+                   + (candidate if len(candidate) <= 8000 else candidate[:4000] + '\n[...]\n' + candidate[-4000:]))
+        self._experiment('objection', 'objection-' + review['id'], goal, context)
+
+    def _experiment_summary(self, key):
+        record = next((r for r in self.state.get('experiments', []) if r['key'] == key), None)
+        if record and record.get('summary') and record['status'] in USEFUL_EVIDENCE:
+            return record['summary']
+        return None
 
     def _new_attempt(self, kind, parent=None, review=None):
         if self.state['rounds_started'] >= self.state['settings']['max_rounds']:
@@ -337,6 +464,9 @@ class ProofRunner:
             review = next(r for r in self.state['reviews'] if r['id'] == pending['review'])
             messages[0]['content'] += ('\n\n' + REPAIR_POLICY + '\n\nPRIOR CANDIDATE:\n' + text +
                                        '\n\nFALLIBLE REVIEW:\n' + json.dumps(review['response'], ensure_ascii=False))
+            tested = self._experiment_summary('objection-' + review['id'])
+            if tested:
+                messages[0]['content'] += '\n\n' + experiment_note(tested, 'NUMERICAL TEST OF THE OBJECTION')
             return messages
         return self._continue_messages(pending, prior, text)
 
@@ -408,6 +538,9 @@ class ProofRunner:
     def _review(self, pending):
         candidate = self._get_candidate(pending['candidate'])
         messages = review_request(self.state['goal'], self.state['sources'], self._candidate_text(candidate))
+        prior = self._experiment_summary('refute-first')
+        if prior:
+            messages[0]['content'] += '\n\n' + experiment_note(prior, 'NUMERICAL CONTEXT FOR THE STATEMENT')
         if pending.get('protocol_error'):
             messages[0]['content'] += ('\n\nYour previous review could not be interpreted: ' + pending['protocol_error'] +
                 '\nReview this SAME candidate again using the exact JSON contract. A response-format error is not a mathematical objection.')
@@ -612,6 +745,17 @@ class ProofRunner:
             for issue in response['issues']:
                 lines += [f'- **{issue["kind"]}**, {issue["location"]}: {issue["evidence"]}']
             lines += ['']
+        if self.state.get('experiments'):
+            lines += ['## Numerical experiments', '',
+                      'Auxiliary jobs with their own token budgets (not counted above). Numerical evidence is not proof.', '']
+            for record in self.state['experiments']:
+                summary = record.get('summary') or {}
+                lines.append(f'- {record["stage"].replace("_", " ")} (`{record["key"]}`): **{record["status"]}**'
+                             + (f'; job `{record["id"]}`' if record.get('id') else '')
+                             + (f'; report `{record["directory"]}/report.md`' if record.get('directory') else '')
+                             + (f'; tokens {summary["tokens_charged"]}' if summary else '')
+                             + (f'. {record["error"]}' if record.get('error') else '.'))
+            lines.append('')
         report = '\n'.join(lines)
         self.store.write_report(report)
         self.store.write_proof(answer)

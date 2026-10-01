@@ -19,6 +19,7 @@ from .tools import Workspace
 from .literature import LiteratureTools
 from .research import ResearchRunner
 from .writeup import WriteupRunner
+from .experiment import ExperimentRunner
 from . import __version__
 
 # Never let model/file content inject terminal escape sequences.
@@ -101,6 +102,7 @@ HELP = '''Commands
   /literature [topic]                 Saved bibliographical research and Markdown report
   /referee [task or manuscript]       Saved manuscript review with literature checks
   /writeup [instructions]             LaTeX write-up of --research-file notes in the --template-file style
+  /experiment [claim]                Numerical experiment: protocol, validated code, sandboxed run, verdict
   /researches                        List saved research/report jobs
   /research-report <id>               Read a saved Markdown report without inference
   /research-resume <id>               Resume a research job with its saved budgets
@@ -118,7 +120,9 @@ HELP = '''Commands
   /help, /quit
 Ctrl+C pauses proof work at its saved checkpoint; /resume continues it.
 In ordinary chat, the unfinished turn is discarded. Approved actions remain.
-Python is opt-in (--allow-python), always approved per call, and NOT sandboxed.
+Python in chat is opt-in (--allow-python), always approved per call, and NOT sandboxed.
+Experiments (--experiments off|ask|auto, default ask) run in a separate, resource-limited
+process without network; numerical evidence is never reported as proof.
 Manuscript writes require approval. Proof checkpoints save automatically in .mathagent/.
 Proof status means model review, never formal verification.
 Offline is the default: a loopback model server and cached/local sources only.
@@ -170,6 +174,18 @@ def parser():
     p.add_argument('--research-seconds', type=float, default=900, help='Total time budget per new report')
     p.add_argument('--research-requests', type=int, default=12, help='Maximum external HTTP requests per new research or assisted-proof job')
     p.add_argument('--research-chars', type=int, default=30000, help='Maximum literature-tool response characters per job')
+    p.add_argument('--experiments', choices=('off', 'ask', 'auto'), default='ask',
+                   help='Numerical experiments: off (write code only), ask before each run (default), or auto '
+                        '(run without asking when network isolation is available)')
+    p.add_argument('--experiment-seconds', type=int, default=120, help='CPU and wall-time limit per experiment run')
+    p.add_argument('--experiment-memory', type=int, default=2048, help='Memory limit per experiment run, in MB')
+    p.add_argument('--experiment-runs', type=int, default=4, help='Maximum runs per experiment, including fixes')
+    p.add_argument('--experiment-tokens', type=int, default=30000, help='Generated-token budget per experiment')
+    p.add_argument('--experiment-time', type=float, default=1800, help='Total time budget per experiment, in seconds')
+    p.add_argument('--proof-refute-first', action='store_true',
+                   help='Before a proof, run a numerical experiment; a certified counterexample stops the proof')
+    p.add_argument('--proof-test-objections', action='store_true',
+                   help='Test a verifier objection numerically before each repair; results go to the repair')
     p.add_argument('--output', metavar='PATH', help='Export the research/referee Markdown report inside the workspace')
     p.add_argument('--mode', choices=MODES, default='prove')
     p.add_argument('--no-think', action='store_true')
@@ -186,7 +202,7 @@ def parser():
     one_shot.add_argument('--prompt', help='Run one query or command and exit')
     one_shot.add_argument('--resume', nargs='?', const='', metavar='PROOF_ID',
                           help='Resume a saved proof and exit (default: latest active proof)')
-    one_shot.add_argument('--research-resume', metavar='RESEARCH_ID', help='Resume a saved literature/referee job and exit')
+    one_shot.add_argument('--research-resume', metavar='RESEARCH_ID', help='Resume a saved literature/referee/write-up/experiment job and exit')
     return p
 
 
@@ -252,6 +268,11 @@ def main():
             p.error('Offline mode requires a localhost/loopback model --host; use --online explicitly for a remote server')
         if args.allow_python:
             p.error('--allow-python requires --online: unrestricted Python can access the network')
+    if (not 5 <= args.experiment_seconds <= 3600 or not 256 <= args.experiment_memory <= 65536
+            or not 1 <= args.experiment_runs <= 20 or args.experiment_tokens < 4000
+            or not math.isfinite(args.experiment_time) or args.experiment_time <= 0):
+        p.error('Use experiment-seconds 5–3600, experiment-memory 256–65536 MB, experiment-runs 1–20, '
+                'experiment-tokens >= 4000 and a positive finite experiment-time')
     if args.gui:
         if args.prompt is not None or args.resume is not None or args.research_resume is not None or args.output:
             p.error('--gui cannot be combined with --prompt, --resume, --research-resume or --output')
@@ -358,6 +379,19 @@ def main():
             dest.write_text(exported, encoding='utf-8')
             ui.say(f'Exported {dest}')
 
+    def experiment_options():
+        return dict(permission=args.experiments, run_seconds=args.experiment_seconds,
+                    memory_mb=args.experiment_memory, source_files=args.research_file,
+                    max_rounds=args.experiment_runs, max_tokens=args.experiment_tokens,
+                    max_seconds=args.experiment_time)
+
+    def proof_experiments():
+        if not (args.proof_refute_first or args.proof_test_objections):
+            return None
+        options = experiment_options()
+        options.pop('source_files')
+        return dict(options, refute_first=args.proof_refute_first, test_objections=args.proof_test_objections)
+
     def run_query(query):
         nonlocal proof_running, last_proof_id, research_running, last_research_id
         fresh_library()
@@ -379,7 +413,8 @@ def main():
                 max_tokens=args.proof_tokens, max_seconds=args.proof_seconds,
                 max_predict=args.proof_solve_tokens, verify_tokens=args.proof_verify_tokens,
                 min_solve_tokens=args.proof_min_solve_tokens, repair_tokens=args.proof_repair_tokens,
-                verify_temperature=args.proof_verify_temperature, source_files=args.proof_file)
+                verify_temperature=args.proof_verify_temperature, source_files=args.proof_file,
+                experiments=proof_experiments())
             proof_running = False
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},
@@ -398,6 +433,15 @@ def main():
             research_running = False
             research_result(result)
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
+        elif agent.mode == 'experiment':
+            if args.output:
+                raise ValueError('--output is not used by experiments; the report and run folders save automatically')
+            ensure_model()
+            research_running = True
+            last_research_id = ''
+            result = ExperimentRunner(agent, ui.emit).start(query, **experiment_options())
+            research_running = False
+            research_result(result, export=False)
         elif agent.mode == 'writeup':
             if args.output and workspace.path(args.output).suffix.lower() != '.tex':
                 raise ValueError('For a write-up, --output names the new .tex file')
@@ -437,7 +481,7 @@ def main():
                     agent.history = []
                     ui.say('Conversation cleared.')
                 elif command == '/skills':
-                    for name in ('literature', 'referee', 'writeup'):
+                    for name in ('literature', 'referee', 'writeup', 'experiment'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                 elif command == '/researches':
                     jobs = ResearchRunner.list(workspace.root)
@@ -449,18 +493,21 @@ def main():
                     if not rest and not last_research_id:
                         raise ValueError('Supply a research job ID; use /researches to list jobs')
                     result = ResearchRunner.inspect(workspace.root, rest or last_research_id)
-                    research_result(result, export=result.get('kind') != 'writeup')
+                    research_result(result, export=result.get('kind') not in ('writeup', 'experiment'))
                 elif command == '/research-resume':
                     if not rest and not last_research_id:
                         raise ValueError('Supply a research job ID; use /researches to list jobs')
                     research_running = True
                     fresh_library()
                     job_id = rest or last_research_id
-                    writeup = ResearchRunner.inspect(workspace.root, job_id).get('kind') == 'writeup'
-                    result = (WriteupRunner if writeup else ResearchRunner)(agent, ui.emit).resume(job_id)
+                    kind = ResearchRunner.inspect(workspace.root, job_id).get('kind')
+                    if kind == 'experiment':
+                        result = ExperimentRunner(agent, ui.emit).resume(job_id, permission=args.experiments)
+                    else:
+                        result = (WriteupRunner if kind == 'writeup' else ResearchRunner)(agent, ui.emit).resume(job_id)
                     research_running = False
                     model_checked = False
-                    research_result(result, export=not writeup)
+                    research_result(result, export=kind not in ('writeup', 'experiment'))
                 elif command in {'/' + m for m in MODES}:
                     agent.mode = command[1:]
                     ui.say('Mode: ' + agent.mode)

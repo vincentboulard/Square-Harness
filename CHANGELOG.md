@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Numerical experiments (`--mode experiment`, `/experiment`, Experiment notebook): a protocol
+  fixed before any code, a script using tested helpers (`mathagent/numerics.py`: Laplacians,
+  spectra, heat and wave solvers, observability Gramians, convergence studies, adversarial
+  search, plots), sandboxed runs (`mathagent/sandbox.py`: bubblewrap, macOS sandbox or network
+  namespace when available, plus CPU, memory and file limits), bounded fixes, and a status set
+  by the controller from `results.json` (validation and convergence required).
+- Counterexample certificates (`mathagent/certify.py`): an explicit witness is checked in exact
+  rational or outward-rounded interval arithmetic; a fresh review judges whether it encodes the
+  statement. The checker is standalone and saved with each job.
+- `--experiments off|ask|auto` and per-run limits; the interface asks with an experiment
+  approval that states the isolation in force.
+- Proof mode can run an experiment first (`--proof-refute-first`; a certified counterexample
+  stops with status `refuted`) or test a verifier objection before the repair
+  (`--proof-test-objections`). The initial solve is unchanged.
+- Default mode can route a request to an experiment. New optional extra `experiments`.
+
 - Visual interface (`square-harness --gui`): a local web app for proof, critic,
   explore, literature and referee work, with typeset LaTeX, live model output,
   proof candidates with their whole-proof reviews, citation checks, pausing and

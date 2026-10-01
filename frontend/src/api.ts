@@ -19,7 +19,18 @@ export type Defaults = {
   research_seconds: number
   research_requests: number
   research_chars: number
+  experiments: Permission
+  experiment_seconds: number
+  experiment_memory: number
+  experiment_runs: number
+  experiment_tokens: number
+  experiment_time: number
+  proof_refute_first: boolean
+  proof_test_objections: boolean
 }
+
+export type Permission = 'off' | 'ask' | 'auto'
+export type Isolation = 'bwrap' | 'seatbelt' | 'netns' | 'none'
 
 export type Status = {
   version: string
@@ -41,6 +52,7 @@ export type Status = {
   read: ReadSettings
   latex: boolean
   recent: string[]
+  isolation: Isolation
 }
 
 export type ReadSettings = { tex: boolean; pdf: boolean; py: boolean; text: boolean }
@@ -76,7 +88,7 @@ export type Approval = {
   task: string
   task_kind: string
   target: string | null
-  kind: 'write' | 'python' | 'confirm'
+  kind: 'write' | 'python' | 'experiment' | 'confirm'
   preview: string
 }
 
@@ -215,7 +227,7 @@ export type Evidence = {
 
 export type ResearchListItem = {
   id: string
-  kind: 'literature' | 'referee' | 'writeup'
+  kind: 'literature' | 'referee' | 'writeup' | 'experiment'
   status: string
   phase: string
   title: string
@@ -237,9 +249,42 @@ export type CompileResult = {
   pdf: boolean
 }
 
+export type RunResult = {
+  returncode: number
+  ok: boolean
+  timed_out: boolean
+  limit_reason: string | null
+  seconds: number
+  isolation: Isolation
+  stdout: string
+  stderr: string
+  results: ExperimentResults | null
+  results_error: string | null
+  figures: string[]
+  limits: { seconds: number; memory_mb: number; file_mb: number; threads: number }
+}
+
+export type ExperimentResults = {
+  values?: Record<string, unknown>
+  validations?: { name: string; max_relative_error: number | string; rtol: number; passed: boolean }[]
+  convergence?: { name: string; observed_order: number | string; last_relative_change: number; extrapolated: number | null; converged: boolean; sizes: number[]; values: number[] }[]
+  searches?: { name: string; max: number; argmax: number[]; bounds: unknown; evaluations: number }[]
+}
+
+export type ExperimentRun = { index: number; code_sha256?: string; permission?: string; folder?: string; skipped?: string; result: RunResult | null }
+
+export type CertificateCheck = {
+  certified: boolean
+  reason: string
+  claim_violated?: boolean
+  assumptions_hold?: boolean
+  isolation?: Isolation
+  checks?: { what: string; relation: string; holds: boolean; method: string; detail: string }[]
+}
+
 export type ResearchDetail = {
   id: string
-  kind: 'literature' | 'referee' | 'writeup'
+  kind: 'literature' | 'referee' | 'writeup' | 'experiment'
   goal: string
   status: string
   phase: string
@@ -274,6 +319,16 @@ export type ResearchDetail = {
   macros?: string[]
   theorems?: string[]
   output_name?: string
+  experiment?: { permission: Permission; run_seconds: number; memory_mb: number; context: string;
+    environment: { python: string; platform: string; isolation: Isolation; packages: Record<string, string | null> } }
+  protocol?: Record<string, string> | null
+  code?: string
+  code_issue?: string | null
+  runs?: ExperimentRun[]
+  interpretation?: { verdict: 'supports' | 'refutes' | 'inconclusive'; explanation: string; key_numbers: string[]; limitations: string; explicit_counterexample: boolean } | null
+  certificate?: Record<string, unknown> | null
+  certificate_check?: CertificateCheck | null
+  faithfulness?: { verdict: 'faithful' | 'not_faithful' | 'unclear'; explanation: string } | null
 }
 
 export type ChatListItem = {
@@ -288,7 +343,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup'
+export type RouteMode = 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup' | 'experiment'
 
 export type TranscriptItem = {
   role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route'
@@ -429,6 +484,8 @@ export const api = {
   templates: () => get<{ templates: Template[] }>('/api/templates'),
   startWriteup: (body: Record<string, unknown>) => post<StartResult>('/api/writeup', body),
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
+  startExperiment: (body: Record<string, unknown>) => post<StartResult>('/api/experiments', body),
+  figureUrl: (id: string, folder: string, name: string) => `/api/research/${id}/figures/${folder.replace(/^runs\//, '')}/${name}`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[]) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files }),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number> }) =>

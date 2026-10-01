@@ -15,6 +15,8 @@ import { ResearchNew } from './views/ResearchNew'
 import { ResearchView } from './views/ResearchView'
 import { WriteupNew } from './views/WriteupNew'
 import { WriteupView } from './views/WriteupView'
+import { ExperimentNew } from './views/ExperimentNew'
+import { ExperimentView } from './views/ExperimentView'
 
 function View({ route }: { route: Route }) {
   if (route.page === 'about') return <About />
@@ -25,6 +27,7 @@ function View({ route }: { route: Route }) {
     const mode = route.id ? (route.mode as 'critic' | 'explore' | 'free') : 'free'
     return <ChatView key={mode + (route.id || '')} mode={mode} id={route.id} />
   }
+  if (info.kind === 'experiment') return route.id ? <ExperimentView key={route.id} id={route.id} tab={route.tab} /> : <ExperimentNew />
   if (info.kind === 'writeup') return route.id ? <WriteupView key={route.id} id={route.id} tab={route.tab} /> : <WriteupNew />
   return route.id
     ? <ResearchView key={route.id} id={route.id} tab={route.tab} />
