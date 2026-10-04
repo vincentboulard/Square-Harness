@@ -118,11 +118,11 @@ def _read_state(directory, job_id):
     return value
 
 
-def _job_directory(root, job_id):
+def _job_directory(root, job_id, folder='research'):
     if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
         raise ValueError('Research ID must be the saved UUID')
     root = Path(root).resolve(strict=True)
-    directory = root / '.mathagent' / 'research' / job_id
+    directory = root / '.mathagent' / folder / job_id
     for path in (root / '.mathagent', directory.parent, directory, directory / 'artifacts'):
         _directory(path)
     for name in ('state.json', 'run.lock', 'report.md'):
@@ -133,6 +133,8 @@ def _job_directory(root, job_id):
 class ResearchRunner:
     KINDS = ('literature', 'referee')
     TERMINAL = ('reviewed', 'partial', 'budget_exhausted', 'budget_violation')
+    FOLDER = 'research'  # below .mathagent/
+    POLICY = BASE_POLICY  # the system text before the skill
 
     def __init__(self, agent, emit=lambda kind, value: None):
         self.agent, self.emit = agent, emit
@@ -202,9 +204,9 @@ class ResearchRunner:
                         online=bool(self.literature and self.literature.online))
         root = self.agent.workspace.root / '.mathagent'
         _directory(root, create=True)
-        _directory(root / 'research', create=True)
+        _directory(root / self.FOLDER, create=True)
         job_id = str(uuid.uuid4())
-        self.directory = root / 'research' / job_id
+        self.directory = root / self.FOLDER / job_id
         self.directory.mkdir(mode=0o700)
         _directory(self.directory / 'artifacts', create=True)
         if self.literature:
@@ -225,7 +227,7 @@ class ResearchRunner:
         return self._run()
 
     def resume(self, job_id):
-        self.directory = _job_directory(self.agent.workspace.root, job_id)
+        self.directory = _job_directory(self.agent.workspace.root, job_id, self.FOLDER)
         self.state = _read_state(self.directory, job_id)
         if self.state['kind'] not in self.KINDS:
             raise ValueError(f'This is a {self.state["kind"]} job; resume it from its own mode')
@@ -238,11 +240,11 @@ class ResearchRunner:
         self.agent.seed = self.state['settings'].get('seed')
         return self._run()
 
-    @staticmethod
-    def inspect(root, job_id):
-        directory = _job_directory(root, job_id)
+    @classmethod
+    def inspect(cls, root, job_id):
+        directory = _job_directory(root, job_id, cls.FOLDER)
         state = _read_state(directory, job_id)
-        return {'id': job_id, 'status': state['status'], 'kind': state['kind'],
+        return {'id': job_id, 'status': state['status'], 'kind': state['kind'], 'pipeline': state.get('pipeline'),
                 'goal': state['goal'], 'phase': state['phase'], 'report': _read(directory / 'report.md') if (directory / 'report.md').exists() else '', 'report_path': str(directory / 'report.md'),
                 'directory': str(directory), 'tokens_charged': state['tokens_charged'],
                 'input_tokens_charged': state['input_tokens_charged'],
@@ -254,7 +256,7 @@ class ResearchRunner:
         if not base.exists():
             return []
         _directory(base)
-        base = base / 'research'
+        base = base / cls.FOLDER
         if not base.exists():
             return []
         _directory(base)
@@ -559,7 +561,7 @@ class ResearchRunner:
             fixed += '\nCitation checks:\n' + json.dumps(self.state.get('citation_issues', []))
         return fixed, optional
 
-    def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer=''):
+    def _call(self, role, instruction, *, cap, tools=(), format_schema=None, trailer='', think=False):
         self._check_time()
         settings = self.state['settings']
         remaining = settings['max_tokens'] - self.state['tokens_charged']
@@ -571,7 +573,7 @@ class ResearchRunner:
         if cap < 128:
             raise ResearchBudget('Generated-token budget exhausted (including review and recovery calls)')
         fixed, optional = self._material(role)
-        payload = {'model': self.agent.model, 'stream': True, 'think': False,
+        payload = {'model': self.agent.model, 'stream': True, 'think': think,
                    'options': {'num_ctx': self.agent.ctx, 'num_predict': cap, 'temperature': 0.2}}
         if self.agent.seed is not None:
             payload['options']['seed'] = (self.agent.seed + len(self.state['calls'])) % (2 ** 31)
@@ -579,7 +581,7 @@ class ResearchRunner:
             payload['tools'] = tools
         if format_schema:
             payload['format'] = format_schema
-        system = BASE_POLICY + '\n' + self.state['skill']
+        system = self.POLICY + '\n' + self.state['skill']
         while True:
             payload['messages'] = [{'role': 'system', 'content': system}, {'role': 'user', 'content': instruction + '\n\n' + fixed + '\n\n' + '\n\n'.join(optional) + ('\n\n' + trailer if trailer else '')}]
             if 'reference_context' in self.state:

@@ -311,6 +311,17 @@ unresolved issues and decides whether to answer, ask for clarification, or obtai
 more focused help. Delegation is optional; an elementary question can finish with
 one short answer.
 
+To find a precise reference for a known result ("where is the Rellich theorem
+proved?", "is Theorem 9.26 of Brezis about this?"), the assistant delegates a
+**literature check**: a quick lookup that recalls likely sources and checks each
+one against zbMATH, Crossref, the OpenCitations index and open papers. Each
+reference is graded read, cited, located, contradicted or not found, from the
+passages actually read; its card is marked [1] and its log is saved in
+`.mathagent/checks/`. A check sees only the delegated statement, never the
+conversation or workspace files, so its queries stay public words. A request for
+a reading list or survey of a topic goes to the Literature worker instead, which
+builds the same verified reading list as the Literature notebook.
+
 For a simple web lookup, the assistant can open a supplied public HTTPS URL,
 read page lines and links, and paginate its detected bibliography directly.
 It does not need a literature report for these requests. Bibliography entries
@@ -327,7 +338,8 @@ argument is correct. In particular, direct answers receive no automatic proof
 review, and a model review remains a model opinion.
 
 Research, review and write-up workers receive the delegated objective separately
-from an exact saved copy of the conversation and its source context. The
+from an exact saved copy of the conversation and its source context (a reading
+list uses it to set its scope). The
 20,000-character objective limit therefore does not apply to a long prior
 report. Context must still fit the model window; essential reference context is
 never silently shortened. Permanent input or permission failures are saved
@@ -380,8 +392,8 @@ anything outside the harness. Fonts and KaTeX are bundled, so the interface itse
 never contacts another server. Online search is a switch you set per conversation
 and per report. Assistant chooses effort automatically; ordinary critique and
 exploration chats also offer a Thinking switch. In the interface search is on by default, so
-literature tools may send short search queries to arXiv, Semantic Scholar and
-OpenAlex; untick it to keep a conversation or a report offline. Write-ups and
+literature tools may send short search queries to arXiv, Semantic Scholar, zbMATH,
+Crossref and OpenCitations; untick it to keep a conversation or a report offline. Write-ups and
 proofs never search. Launching with an explicit `--offline` locks it off, which
 keeps unaided benchmarks unaided. A document or a model answer can never turn it
 on. Python stays a launch-time permission (`--allow-python`), and proof jobs have

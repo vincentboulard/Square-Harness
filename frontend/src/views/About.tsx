@@ -1,6 +1,7 @@
 // The notebook's title page: what Square Harness is, who made it, and where to find more.
 import { MODES } from '../modes'
 import { href, RAIL, type Mode } from '../router'
+import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
 
 const SOURCE = 'https://github.com/vincentboulard/Square-Harness'
@@ -8,7 +9,7 @@ const SOURCE = 'https://github.com/vincentboulard/Square-Harness'
 const NOTEBOOKS: Partial<Record<Mode, string>> = {
   free: 'Say what you need. The model picks the workflow and its effort and starts at once; its card says what started and can cancel it.',
   prove: 'A solver writes a whole proof, a fresh verifier reviews it, and a concrete objection leads to a repair.',
-  literature: 'A report on published results that cites the exact passages it read.',
+  literature: 'A verified reading list on a topic: entry points, then the core literature by theme.',
   referee: 'A review of a manuscript, with line-level citations for every claim it checks.',
   writeup: 'Clean LaTeX from your notes, drafts or PDFs, in your own macros and style.',
 }
@@ -60,7 +61,7 @@ export function About() {
         </div>
         {RAIL.map((mode) => (
           <div key={mode} className="entry about-notebook">
-            <span className="in-margin"><span className={`about-cover mode-${mode}`} aria-hidden="true">{MODES[mode].glyph}</span></span>
+            <span className="in-margin"><span className={`about-cover mode-${mode}`} aria-hidden="true"><Glyph mode={mode} /></span></span>
             <p><a href={href(mode)} className="about-name">{MODES[mode].label}</a> {NOTEBOOKS[mode]}</p>
           </div>
         ))}

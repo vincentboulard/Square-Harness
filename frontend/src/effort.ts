@@ -11,11 +11,11 @@ export const EFFORTS: {
   id: EffortLevel; label: string; hint: string
   tries: number; minutes: number; tokens: number; input: number; requests: number; chars: number
 }[] = [
-  { id: 'low', label: 'Low', hint: 'One quick try', tries: 1, minutes: 1, tokens: 30_000, input: 120_000, requests: 4, chars: 15_000 },
-  { id: 'medium', label: 'Medium', hint: 'Three tries, the usual choice', tries: 3, minutes: 15, tokens: 60_000, input: 240_000, requests: 12, chars: 30_000 },
-  { id: 'high', label: 'High', hint: 'Five tries for harder work', tries: 5, minutes: 30, tokens: 100_000, input: 400_000, requests: 24, chars: 60_000 },
-  { id: 'xhigh', label: 'Extra high', hint: 'Seven tries, up to an hour', tries: 7, minutes: 60, tokens: 150_000, input: 600_000, requests: 40, chars: 100_000 },
-  { id: 'poincare', label: 'Poincaré', hint: 'Ten tries, up to two hours, in honour of Henri Poincaré', tries: 10, minutes: 120, tokens: 200_000, input: 800_000, requests: 60, chars: 150_000 },
+  { id: 'low', label: 'Low', hint: 'One quick try', tries: 1, minutes: 1, tokens: 30_000, input: 120_000, requests: 20, chars: 15_000 },
+  { id: 'medium', label: 'Medium', hint: 'Three tries, the usual choice', tries: 3, minutes: 15, tokens: 60_000, input: 240_000, requests: 50, chars: 30_000 },
+  { id: 'high', label: 'High', hint: 'Five tries for harder work', tries: 5, minutes: 30, tokens: 100_000, input: 400_000, requests: 80, chars: 60_000 },
+  { id: 'xhigh', label: 'Extra high', hint: 'Seven tries, up to an hour', tries: 7, minutes: 60, tokens: 150_000, input: 600_000, requests: 120, chars: 100_000 },
+  { id: 'poincare', label: 'Poincaré', hint: 'Ten tries, up to two hours, in honour of Henri Poincaré', tries: 10, minutes: 120, tokens: 200_000, input: 800_000, requests: 160, chars: 150_000 },
 ]
 
 export const LEVELS = EFFORTS.map((effort) => effort.id)

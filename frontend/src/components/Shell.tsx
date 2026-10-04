@@ -9,6 +9,7 @@ import { applyTheme, deleteConversation, readTheme, useApp, type AppState, type 
 import { ErrorNote, Modal } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline } from './Markdown'
+import { Glyph } from './Glyph'
 import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 
@@ -56,7 +57,7 @@ export function Rail({ route }: { route: Route }) {
           <a key={mode} href={href(mode)} className={'mode' + (active ? ' mode-active' : '')}
             aria-current={active ? 'page' : undefined} title={info.summary}>
             <span className={`mode-cover mode-${mode}`}>
-              <span className="mode-glyph">{info.glyph}</span>
+              <span className="mode-glyph"><Glyph mode={mode} /></span>
               {busy === mode && <span className="mode-busy" aria-label="Running" />}
             </span>
             <span className="mode-label">{info.label}</span>

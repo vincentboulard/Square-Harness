@@ -60,13 +60,31 @@ class LiteratureTests(unittest.TestCase):
             self.assertTrue(json.loads(offline.execute('search_papers', {'query': 'observability'}))['cached'])
             request.assert_not_called()
 
+    def test_zbmath_books_with_chapter_review_and_no_placeholder(self):
+        review = 'Intro. ' * 200 + 'The book is divided into 11 chapters, as follows: IX. Sobolev spaces in dimension N.'
+        payload = {'result': [
+            {'identifier': '1220.46002', 'title': {'title': 'Functional analysis'}, 'year': '2011',
+             'contributors': {'authors': [{'name': 'Brezis, Haim'}]}, 'document_type': {'description': 'book / book article'},
+             'source': {'book': [{'publisher': 'New York, NY: Springer'}]}, 'zbmath_url': 'https://zbmath.org/5633610',
+             'editorial_contributions': [{'text': review}]},
+            {'identifier': '1', 'title': {'title': 'Other'}, 'editorial_contributions': [
+                {'text': 'zbMATH Open Web Interface contents unavailable due to conflicting licenses.'}]}]}
+        with patch.object(self.lit, '_request_once', return_value=(200, {}, json.dumps(payload).encode())) as request:
+            result = self.result('search_papers', {'query': 'au:Brezis ti:Functional analysis', 'provider': 'zbmath'})
+            self.assertIn('api.zbmath.org/v1/document/_search?search_string=au%3ABrezis', request.call_args.args[0])
+        book, other = result['results']
+        self.assertEqual((book['identifier'], book['authors'], book['publisher']), ('zbl:1220.46002', ['Brezis, Haim'], 'New York, NY: Springer'))
+        self.assertIn('IX. Sobolev spaces', book['review'])
+        self.assertLessEqual(len(book['review']), 2510)
+        self.assertEqual(other['review'], '')
+
     def test_provider_misspelling_not_silently_fallback(self):
         with patch.object(self.lit, '_request_once') as request:
             self.assertIn('Unknown provider', self.result('search_papers', {'query': 'x', 'provider': 'arxvi'})['error'])
             request.assert_not_called()
 
     def test_schema_names_and_disabled_code_path(self):
-        self.assertEqual({x['function']['name'] for x in self.lit.schemas()}, {'search_papers', 'search_web', 'open_paper', 'read_paper', 'search_paper'})
+        self.assertEqual({x['function']['name'] for x in self.lit.schemas()}, {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper'})
         self.assertIn('Unknown', self.result('__class__', {})['error'])
         self.assertIn('error', self.result('search_papers', 'not json'))
         self.assertIn('error', self.result('search_papers', {'query': 'x', 'extra': 1}))
@@ -82,13 +100,6 @@ class LiteratureTests(unittest.TestCase):
         self.assertNotIn('sensitive-test-value', json.dumps(self.lit.snapshot()))
         for p in (self.root / '.mathagent/literature').rglob('*.json'):
             self.assertNotIn('sensitive-test-value', p.read_text())
-
-    def test_openalex_abstract_and_auth(self):
-        payload = {'results': [{'id': 'https://openalex.org/W1', 'title': 'A theorem', 'abstract_inverted_index': {'world': [1], 'Hello': [0]}, 'authorships': [], 'best_oa_location': {'pdf_url': 'https://example.org/p.pdf'}}]}
-        with patch.dict('os.environ', {'OPENALEX_API_KEY': 'secret-key'}), patch.object(self.lit, '_request_once', return_value=(200, {}, json.dumps(payload).encode())) as request:
-            result = self.result('search_papers', {'query': 'theorem', 'provider': 'openalex'})
-            self.assertEqual(result['results'][0]['abstract'], 'Hello world')
-            self.assertEqual(request.call_args.args[1]['Authorization'], 'Bearer secret-key')
 
     def test_web_requires_key_but_cached_works_without_key(self):
         with patch.dict('os.environ', {}, clear=True), patch.object(self.lit, '_request_once') as request:
@@ -173,7 +184,7 @@ class LiteratureTests(unittest.TestCase):
 
     def test_redirect_never_leaks_provider_key(self):
         with patch.object(self.lit, '_request_once', side_effect=[(302, {'location': 'https://example.org/x'}, b''), (200, {}, b'ok')]) as request:
-            self.lit._fetch('https://api.openalex.org/works', headers={'Authorization': 'Bearer secret'})
+            self.lit._fetch('https://api.semanticscholar.org/graph/v1/paper/search', headers={'x-api-key': 'secret'})
             self.assertEqual(request.call_args_list[1].args[1], {})
 
     def test_redirects_are_bounded_and_counted(self):

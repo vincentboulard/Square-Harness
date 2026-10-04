@@ -4,6 +4,7 @@ import { assistantResumable, routeActivity } from '../assistant'
 import { Collapse, ErrorNote, Loading, Toggle, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
+import { Glyph } from '../components/Glyph'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -18,9 +19,10 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Ask a question, share an argument, or describe what you want to work on. The assistant can answer directly, call on focused help when needed, and use the results to continue the discussion.',
+    text: 'Ask a question, share an argument, or describe what you want to work on. The assistant can answer directly, find precise references for known results, call on focused help when needed, and use the results to continue the discussion.',
     examples: [
       'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
+      'Find a reference on the $H^2$ regularity of elliptic problems with Neumann boundary conditions.',
       'Review manuscript.tex, and find the literature on compact Sobolev embeddings it should cite.',
       'Turn my notes in notes.md into a clean LaTeX section using my macros.',
     ],
@@ -43,14 +45,17 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
   },
 }
 
-// How a card names what the model started. Critic and explore are both an answer here.
-type Kind = 'answer' | 'prove' | 'literature' | 'referee' | 'writeup'
-const KINDS: Record<Kind, { noun: string; label: string; glyph: string; cover: string }> = {
-  answer: { noun: 'an answer', label: 'Answer', glyph: MODES.free.glyph, cover: 'free' },
-  prove: { noun: 'a proof', label: 'Proof', glyph: MODES.prove.glyph, cover: 'prove' },
-  literature: { noun: 'a literature report', label: 'Literature report', glyph: MODES.literature.glyph, cover: 'literature' },
-  referee: { noun: 'a review', label: 'Review', glyph: MODES.referee.glyph, cover: 'referee' },
-  writeup: { noun: 'a write-up', label: 'Write-up', glyph: MODES.writeup.glyph, cover: 'writeup' },
+// How a card names what the model started. Critic and explore are both an answer here;
+// a literature check also answers here, with its evidence.
+type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'writeup'
+// `cover` names the mark (components/Glyph.tsx) and its colour class.
+const KINDS: Record<Kind, { noun: string; label: string; cover: 'free' | 'check' | 'prove' | 'literature' | 'referee' | 'writeup' }> = {
+  answer: { noun: 'an answer', label: 'Answer', cover: 'free' },
+  check: { noun: 'a literature check', label: 'Literature check', cover: 'check' },
+  prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
+  literature: { noun: 'a literature report', label: 'Literature report', cover: 'literature' },
+  referee: { noun: 'a review', label: 'Review', cover: 'referee' },
+  writeup: { noun: 'a write-up', label: 'Write-up', cover: 'writeup' },
 }
 const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
@@ -290,25 +295,28 @@ function UserMessage({ item }: { item: TranscriptItem }) {
 function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; chatId: string }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
-  // An Assistant conversation answers with one voice, whichever engine mode wrote it;
-  // older critique and exploration chats keep their own mark.
-  const glyph: ChatMode = mode
+  // An Assistant conversation answers with one voice, whichever engine mode wrote it, except
+  // a literature check, which keeps its citation mark; older critique and exploration chats
+  // keep their own mark.
+  let mark: ChatMode | 'check' = mode
   const flush = (key: number) => {
     if (!blocks.length) return
     out.push(
       <div key={'answer' + key} className="entry message message-model">
-        <span className={`in-margin speaker speaker-model mode-${glyph}`} title={MODES[glyph].label}>{MODES[glyph].glyph}</span>
+        <span className={`in-margin speaker speaker-model mode-${mark}`} title={mark === 'check' ? 'Literature check' : MODES[mark].label}><Glyph mode={mark} /></span>
         <div className="message-body">{blocks}</div>
       </div>,
     )
     blocks = []
   }
+  const markFor = (item: TranscriptItem): ChatMode | 'check' => (item.mode === 'check' ? 'check' : mode)
   for (let i = 0; i < steps.length; i++) {
     const { item, index } = steps[i]
     if (item.role === 'route') {
       flush(index)
       out.push(<RouteCard key={'route' + index} chatId={chatId} index={index} item={item} />)
     } else if (item.role === 'assistant') {
+      if (markFor(item) !== mark) { flush(index); mark = markFor(item) }
       const calls = item.tool_calls || []
       const results: TranscriptItem[] = []
       while (i + 1 < steps.length && steps[i + 1].item.role === 'tool' && results.length < calls.length) results.push(steps[++i].item)
@@ -370,9 +378,9 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   const mode = item.mode as RouteMode
   const kind = kindOf(mode)
   const info = item.orchestrated && mode === 'critic'
-    ? { noun: 'a critique', label: 'Critique', glyph: MODES.critic.glyph, cover: 'critic' }
+    ? { noun: 'a critique', label: 'Critique', cover: 'critic' as const }
     : item.orchestrated && mode === 'explore'
-      ? { noun: 'an exploration', label: 'Exploration', glyph: MODES.explore.glyph, cover: 'explore' }
+      ? { noun: 'an exploration', label: 'Exploration', cover: 'explore' as const }
       : KINDS[kind]
   const effort = kind === 'answer' ? '' : `${effortLabel(item.effort)} effort`
   const act = async (action: () => Promise<unknown>) => {
@@ -404,15 +412,16 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   else if (item.status === 'cancelled') { headline = `${info.label} cancelled`; status = 'Removed from the queue'; variant = 'spent' }
   else if (queued) { headline = `${info.label} queued`; status = 'Starts when the model is free'; variant = 'ready' }
   else if (running && task?.state === 'pausing') { headline = `Stopping ${info.noun}`; status = 'At the next checkpoint'; variant = 'running' }
-  else if (running) { headline = kind === 'answer' && !item.orchestrated ? 'Answering here' : `${item.job_id || item.orchestrated ? 'Running' : 'Starting'} ${info.noun}`; status = ''; variant = 'running' }
+  else if (running) { headline = kind === 'answer' && !item.orchestrated ? 'Answering here' : kind === 'check' && !item.orchestrated ? 'Checking references' : `${item.job_id || item.orchestrated ? 'Running' : 'Starting'} ${info.noun}`; status = ''; variant = 'running' }
   else if (item.status === 'stopped') { headline = kind === 'answer' && !item.orchestrated ? 'The answer was stopped' : `${info.label} stopped`; status = status || 'Paused'; variant = 'paused' }
   else if (item.orchestrated && item.status === 'done') { headline = `${info.label} returned`; if (!item.job_id) { status = ''; variant = 'ready' } }
   else if (item.orchestrated) { headline = `${info.label} awaiting resume`; status = 'Paused'; variant = 'paused' }
   else if (kind === 'answer') { headline = 'Answered below'; status = ''; variant = 'complete' }
+  else if (kind === 'check') { headline = 'References checked below'; status = ''; variant = 'complete' }
   else { headline = info.label }
   return (
     <div className={'entry route route-' + (item.status || 'proposed')}>
-      <span className={`in-margin speaker speaker-model mode-${info.cover}`} title={info.label}>{info.glyph}</span>
+      <span className={`in-margin speaker speaker-model mode-${info.cover}`} title={info.label}><Glyph mode={info.cover} /></span>
       <div className="route-card route-auto">
         <div className="route-line">
           <Square variant={variant} size={14} />
@@ -428,13 +437,13 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id)}>Open the {info.label.toLowerCase()}</a>}
+          {item.job_id && mode !== 'check' && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}
             </button>
           )}
-          <Collapse className="route-details" summary={kind === 'answer' && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
+          <Collapse className="route-details" summary={(kind === 'answer' || kind === 'check') && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
             <div className="route-summary"><Inline limit={1200}>{item.request || ''}</Inline></div>
             {item.files && item.files.length > 0 && (
               <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
@@ -451,12 +460,12 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
 }
 
 function LiveTurnView({ live, mode }: { live: LiveTurn; mode: ChatMode }) {
-  const glyph: ChatMode = mode
+  const glyph: ChatMode | 'check' = live.mode === 'check' ? 'check' : mode
   return (
     <div className="turn turn-live">
       {live.kind === 'message' && live.user && <UserMessage item={{ role: 'user', content: live.user, time: '' }} />}
       <div className="entry message message-model">
-        <span className={`in-margin speaker speaker-model mode-${glyph}`}>{MODES[glyph].glyph}</span>
+        <span className={`in-margin speaker speaker-model mode-${glyph}`}><Glyph mode={glyph} /></span>
         <div className="message-body">
           {live.kind === 'review' && <p className="review-label">Fresh-context review in progress</p>}
           {live.steps.map((step, index) => step.type === 'call' ? (

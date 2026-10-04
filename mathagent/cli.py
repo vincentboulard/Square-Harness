@@ -17,6 +17,8 @@ from .proof import ProofRunner
 from .ledger import ProofStore
 from .tools import Workspace
 from .literature import LiteratureTools
+from .litreview import ReviewRunner
+from .refcheck import CheckRunner, nested_checker
 from .research import ResearchRunner
 from .writeup import WriteupRunner
 from . import __version__
@@ -98,6 +100,7 @@ class UI:
 HELP = '''Commands
   /prove [goal]                      Solve, verify, then repair if needed (default mode)
   /critic, /explore [query]            Ordinary conversational modes
+  /check [result]                     Quick literature check: 1-2 precise references, verified online
   /literature [topic]                 Saved bibliographical research and Markdown report
   /referee [task or manuscript]       Saved manuscript review with literature checks
   /writeup [instructions]             LaTeX write-up of --research-file notes in the --template-file style
@@ -399,7 +402,8 @@ def main():
             ensure_model()
             research_running = True
             last_research_id = ''
-            result = ResearchRunner(agent, ui.emit).start(query, kind=agent.mode,
+            runner = ReviewRunner(agent, ui.emit) if agent.mode == 'literature' else ResearchRunner(agent, ui.emit)
+            result = runner.start(query, kind=agent.mode,
                 source_files=args.research_file, max_rounds=args.research_rounds,
                 max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
                 max_seconds=args.research_seconds, max_requests=args.research_requests,
@@ -407,6 +411,15 @@ def main():
             research_running = False
             research_result(result)
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
+        elif agent.mode == 'check':
+            ensure_model()
+            if not args.online:
+                ui.say('Note: research is offline, so the check can only use cached sources. Relaunch with --online.')
+            runner = CheckRunner(agent, ui.emit)
+            result = runner.start(query)
+            ui.say('\n' + (runner.state.get('answer') or runner._compose()))
+            ui.say(f'Check {result["id"]} · {result["status"]} · log: {Path(result["directory"]) / "report.md"}')
+            agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': runner.state.get('answer', '')}])
         elif agent.mode == 'writeup':
             if args.output and workspace.path(args.output).suffix.lower() != '.tex':
                 raise ValueError('For a write-up, --output names the new .tex file')
@@ -424,6 +437,7 @@ def main():
             if args.output:
                 raise ValueError('--output is for literature/referee reports')
             ensure_model()
+            workspace.checker = nested_checker(agent, ui.emit) if workspace.literature.online else None
             agent.run(query, ui.emit)
 
     while True:
@@ -465,8 +479,11 @@ def main():
                     research_running = True
                     fresh_library()
                     job_id = rest or last_research_id
-                    writeup = ResearchRunner.inspect(workspace.root, job_id).get('kind') == 'writeup'
-                    result = (WriteupRunner if writeup else ResearchRunner)(agent, ui.emit).resume(job_id)
+                    saved = ResearchRunner.inspect(workspace.root, job_id)
+                    writeup = saved.get('kind') == 'writeup'
+                    runner_class = (WriteupRunner if writeup else ReviewRunner if saved.get('pipeline') == ReviewRunner.PIPELINE
+                                    else ResearchRunner)
+                    result = runner_class(agent, ui.emit).resume(job_id)
                     research_running = False
                     model_checked = False
                     research_result(result, export=not writeup)

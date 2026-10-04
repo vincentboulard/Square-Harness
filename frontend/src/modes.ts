@@ -11,7 +11,8 @@ export type ModeInfo = {
 }
 
 // Glyphs are the subject's own notation: ∀ any task, ⊢ proves, ⊥ contradiction,
-// ∃ search for existence, [1] a citation, ¶ an edited manuscript, § a written section.
+// ∃ search for existence, a magnifying glass for the literature (drawn: components/Glyph.tsx),
+// ¶ an edited manuscript, § a written section. A literature check in Default is marked [1], a citation.
 export const MODES: Record<Mode, ModeInfo> = {
   free: {
     mode: 'free', label: 'Assistant', glyph: '∀', kind: 'free',
@@ -35,9 +36,9 @@ export const MODES: Record<Mode, ModeInfo> = {
     newLabel: 'New conversation', empty: 'No conversations yet.',
   },
   literature: {
-    mode: 'literature', label: 'Literature', glyph: '[1]', kind: 'research',
-    summary: 'Bibliographical report with sources and the exact passages read.',
-    newLabel: 'New literature report', empty: 'No literature reports yet.',
+    mode: 'literature', label: 'Literature', glyph: '⌕', kind: 'research',
+    summary: 'A verified reading list: entry points, then the core literature by theme.',
+    newLabel: 'New reading list', empty: 'No reading lists yet.',
   },
   referee: {
     mode: 'referee', label: 'Review', glyph: '¶', kind: 'research',

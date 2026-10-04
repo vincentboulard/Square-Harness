@@ -59,9 +59,10 @@ locations. Search hits and abstracts are leads, not evidence that a theorem
 supports the requested assertion. PDF extraction can corrupt formulas; inspect
 important passages in the original source.
 
-Search tools support arXiv, Semantic Scholar and OpenAlex; public web discovery
-uses Brave Search. Optional keys are `SEMANTIC_SCHOLAR_API_KEY`,
-`OPENALEX_API_KEY` and `BRAVE_SEARCH_API_KEY`. Do not place keys in prompts or
+Search tools support arXiv, Semantic Scholar and zbMATH; reading lists and
+literature checks also use Crossref and the OpenCitations index. Public web
+discovery uses Brave Search. Optional keys are `SEMANTIC_SCHOLAR_API_KEY` and
+`BRAVE_SEARCH_API_KEY`. Do not place keys in prompts or
 manuscripts. No key is required to begin with arXiv; service limits still apply.
 Cached sources live under `.mathagent/literature/`.
 

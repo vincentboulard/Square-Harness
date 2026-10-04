@@ -7,11 +7,11 @@ the budgets here too.
 
 # tries are proof attempts or investigation rounds; tokens are generated tokens.
 EFFORTS = {
-    'low': dict(tries=1, minutes=1, tokens=30_000, input=120_000, requests=4, chars=15_000),
-    'medium': dict(tries=3, minutes=15, tokens=60_000, input=240_000, requests=12, chars=30_000),
-    'high': dict(tries=5, minutes=30, tokens=100_000, input=400_000, requests=24, chars=60_000),
-    'xhigh': dict(tries=7, minutes=60, tokens=150_000, input=600_000, requests=40, chars=100_000),
-    'poincare': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=60, chars=150_000),
+    'low': dict(tries=1, minutes=1, tokens=30_000, input=120_000, requests=20, chars=15_000),
+    'medium': dict(tries=3, minutes=15, tokens=60_000, input=240_000, requests=50, chars=30_000),
+    'high': dict(tries=5, minutes=30, tokens=100_000, input=400_000, requests=80, chars=60_000),
+    'xhigh': dict(tries=7, minutes=60, tokens=150_000, input=600_000, requests=120, chars=100_000),
+    'poincare': dict(tries=10, minutes=120, tokens=200_000, input=800_000, requests=160, chars=150_000),
 }
 LABELS = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'poincare': 'Poincaré'}
 
@@ -36,6 +36,9 @@ def limits(mode, level, args):
         return dict(rounds=effort['tries'], tokens=tokens, seconds=seconds, solve_tokens=solve, verify_tokens=verify)
     if mode == 'writeup':
         return dict(tokens=effort['tokens'], input_tokens=effort['input'], seconds=seconds)
+    if mode == 'check':
+        # A literature check has its own small budgets (refcheck.EFFORTS), chosen by level.
+        return dict(effort=level if level in EFFORTS else 'medium')
     if mode in ('literature', 'referee'):
         return dict(rounds=effort['tries'], tokens=effort['tokens'], input_tokens=effort['input'], seconds=seconds,
                     requests=effort['requests'], chars=effort['chars'])

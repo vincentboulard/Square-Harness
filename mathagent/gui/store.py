@@ -324,6 +324,7 @@ def research_detail(root, job_id, active=None):
         'sources': [{'id': src['id'], 'path': src['path'], 'sha256': src['sha256'],
                      'lines': len(src['content'].splitlines())} for src in s['sources']],
         'plan': s['plan'], 'notes': s['notes'], 'evidence': s['evidence'], 'draft': s['draft'],
+        'pipeline': s.get('pipeline'),
         'review': s['review'], 'draft_complete': s.get('draft_complete'),
         'review_complete': s.get('review_complete'), 'warnings': s.get('warnings', []),
         'citation_issues': s.get('citation_issues', []),

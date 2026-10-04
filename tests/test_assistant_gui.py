@@ -301,8 +301,10 @@ class AssistantGuiTests(GuiCase):
         replacement = 'For arbitrary real x, equality is reflexive, so x=x. The saved candidate received a model review.'
         self.fake.replies = [text(replacement, eval_count=61)]
         self.ok('POST', f'/api/chats/{chat}/assistant/resume', {})
-        self.wait_for(lambda: self.detail(chat).get('assistant_status') == 'complete', timeout=30,
-                      message='complete replacement synthesis')
+        # The checkpoint says complete just before the answer is committed to the transcript.
+        self.wait_for(lambda: self.detail(chat).get('assistant_status') == 'complete'
+                      and any(item.get('content') == replacement for item in self.detail(chat)['transcript']),
+                      timeout=30, message='complete replacement synthesis')
         after = self.detail(chat)
         [resumed_card] = [item for item in after['transcript'] if item['role'] == 'route']
         self.assertEqual(resumed_card['job_id'], proof_id)
@@ -398,10 +400,11 @@ class AssistantGuiTests(GuiCase):
 
     def test_offline_choice_is_inherited_by_the_delegated_literature_worker(self):
         chat = self.conversation(online=False)
+        scope = {'topic': 'Reflexivity of equality', 'subfield': 'Logic', 'msc': ['03B10'], 'intent': 'learn',
+                 'assumptions': 'Cached sources only.', 'queries': ['reflexivity of equality'], 'seeds': []}
         self.fake.replies = [delegation('literature', 'Survey reflexivity using local cached sources.'),
-                             text('Plan.'), text('Local notes.'), text('# Report\nNo cached source verifies priority.'),
-                             text('The source limitation is clear.'), text('# Report\nNo cached source verifies priority.'),
-                             text('The literature worker could not verify priority from cached sources.')]
+                             text(json.dumps(scope)),
+                             text('The literature worker found no cached source on reflexivity.')]
         self.ask(chat, 'Survey reflexivity using only cached sources.')
         self.wait_task(timeout=30)
         detail = self.detail(chat)
@@ -409,10 +412,44 @@ class AssistantGuiTests(GuiCase):
         [card] = [item for item in detail['transcript'] if item['role'] == 'route']
         research = self.ok('GET', f'/api/research/{card["job_id"]}')
         self.assertFalse(research['settings']['online'])
-        worker_tools = [item['function'] for request in self.fake.requests for item in request.get('tools', [])
-                        if item['function']['name'] == 'search_papers']
-        self.assertTrue(worker_tools)
-        self.assertTrue(all('Offline' in item['description'] for item in worker_tools))
+        self.assertEqual(research['pipeline'], 'reading-list-v1')  # the verified reading list
+        state = store.research_state(self.root, card['job_id'])
+        self.assertTrue(state['sweep_log'])
+        self.assertTrue(all(entry.get('count') in (None, 0) for entry in state['sweep_log']), state['sweep_log'])
+
+    def test_reference_request_is_delegated_to_a_literature_check(self):
+        from mathagent import refcheck
+        from tests.test_gui_features import NOT_FOUND, RECALL
+        compact = patch.dict(refcheck.EFFORTS, {'low': {**refcheck.EFFORTS['low'], 'candidates': 2, 'discover': False}})
+        compact.start()
+        self.addCleanup(compact.stop)
+        chat = self.conversation(online=False)
+        self.fake.replies = [delegation('check', 'Find a reference for H^2 regularity of the Neumann problem.'),
+                             text(json.dumps(RECALL)), text('Nothing to search.'), text(json.dumps(NOT_FOUND)),
+                             text('Brezis, Theorem 9.26, is a likely source but the check could not confirm it.')]
+        self.ask(chat, 'Where is H^2 regularity for the Neumann problem proved?')
+        self.wait_task(timeout=30)
+        detail = self.detail(chat)
+        self.assertEqual(detail['assistant_status'], 'complete')
+        delegate = next(item for item in self.fake.requests[0]['tools'] if item['function']['name'] == 'delegate')
+        self.assertIn('check', delegate['function']['parameters']['properties']['mode']['enum'])
+        self.assertIn('Use check to find one or two precise references', self.fake.requests[0]['messages'][0]['content'])
+        [card] = [item for item in detail['transcript'] if item['role'] == 'route']
+        self.assertEqual((card['mode'], card['status'], card['orchestrated']), ('check', 'done', True))
+        self.assertTrue((self.root / '.mathagent' / 'checks' / card['job_id'] / 'report.md').exists())
+        self.assertEqual(self.ok('GET', '/api/research')['jobs'], [])  # not a reading list
+        # The check sees only the objective: no conversation and no workspace files.
+        recall = self.fake.requests[1]
+        self.assertEqual(recall['format']['required'], ['statement', 'keywords', 'candidates'])
+        self.assertNotIn('Where is H^2 regularity', json.dumps(recall['messages']))
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        [result] = [json.loads(m['content']) for m in saved['messages'] if m['role'] == 'tool']
+        self.assertEqual(result['mode'], 'check')
+        self.assertIn('No reference could be confirmed', result['result']['answer'])
+        self.assertEqual(result['result']['references']['not_confirmed'][0]['level'], 'not_found')
+        self.assertIn('Online search was off', result['result']['warnings'][0])
+        self.assertEqual(next(item['content'] for item in reversed(detail['transcript']) if item['role'] == 'assistant'),
+                         'Brezis, Theorem 9.26, is a likely source but the check could not confirm it.')
 
     def test_large_previous_report_is_reference_context_not_an_oversized_literature_goal(self):
         self.hub.args.ctx = 65536  # conservative byte counting must fit the full fixture
@@ -426,10 +463,9 @@ class AssistantGuiTests(GuiCase):
                           [{'role': 'user', 'content': prior_query},
                            {'role': 'assistant', 'content': previous_report}], [], [])
         goal = 'Find literature support under the exact pinned hypotheses.'
-        report = '# Report\nNo cached source verifies priority under all the pinned hypotheses.'
-        self.fake.replies = [delegation('literature', goal, ['hypotheses.tex']),
-                             text('Plan around the supplied scope.'), text('Cached evidence is limited.'),
-                             text(report), text('Keep all hypotheses and the source limitation.'), text(report),
+        scope = {'topic': 'Support under pinned hypotheses', 'subfield': 'Analysis', 'msc': [], 'intent': 'learn',
+                 'assumptions': 'All pinned hypotheses kept.', 'queries': ['reflexivity of equality'], 'seeds': []}
+        self.fake.replies = [delegation('literature', goal, ['hypotheses.tex']), text(json.dumps(scope)),
                              text('The source limitation remains explicit.')]
         self.ask(chat, 'Find support for the previous report without weakening any hypothesis.', ['hypotheses.tex'])
         self.wait_task(timeout=30)

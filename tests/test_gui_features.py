@@ -155,6 +155,8 @@ class RouterTests(unittest.TestCase):
         [question] = router.parse(json.dumps({'tasks': [], 'question': 'Which statement?'}), 'Do the thing.')
         self.assertEqual((question['mode'], question['question']), ('clarify', 'Which statement?'))
         # The earlier single-task answer shape still reads as one suggestion.
+        [check] = router.parse(json.dumps({'tasks': [task('check', 'Find a reference for Rellich.', effort='low')], 'question': ''}), 'Ref?')
+        self.assertEqual((check['mode'], check['effort']), ('check', 'low'))
         [old] = router.parse(json.dumps({'mode': 'referee', 'request': 'Review paper.tex.', 'files': [],
                                          'reason': 'r', 'question': ''}), 'Review it.')
         self.assertEqual((old['mode'], old['effort']), ('referee', 'medium'))
@@ -386,7 +388,7 @@ class EffortTableTests(unittest.TestCase):
                     else:
                         self.assertEqual(limits['input_tokens'], 800000)
                     if item['mode'] == 'referee':
-                        self.assertEqual((limits['requests'], limits['chars']), (60, 150000))
+                        self.assertEqual((limits['requests'], limits['chars']), (160, 150000))
 
     def test_server_and_interface_use_the_same_budgets(self):
         import re
@@ -437,7 +439,8 @@ class OnlineAndEffortTests(GuiCase):
     def test_reports_record_the_online_choice(self):
         (self.root / 'paper.tex').write_text('Claim.\n')
         self.fake.replies = [text('Plan.'), text('Notes.'), text('# Report\n'), text('Review.'), text('# Report\n')]
-        started = self.ok('POST', '/api/research', {'kind': 'literature', 'goal': 'Survey.', 'online': True,
+        # No web request is allowed: the job records the online choice without reaching the network.
+        started = self.ok('POST', '/api/research', {'kind': 'literature', 'goal': 'Survey.', 'online': True, 'requests': 0,
                                                     'rounds': 1, 'tokens': 12000, 'input_tokens': 60000})
         self.wait_task(timeout=30)
         self.assertTrue(self.ok('GET', f'/api/research/{started["id"]}')['settings']['online'])
@@ -456,6 +459,44 @@ class OnlineAndEffortTests(GuiCase):
         self.assertEqual((worker['mode'], worker['status'], worker['orchestrated']), ('explore', 'done', True))
         self.assertEqual(next(item['content'] for item in reversed(transcript) if item['role'] == 'assistant'), 'Some ideas.')
         self.assertIn('Explore approaches', self.fake.requests[1]['messages'][0]['content'])
+
+
+RECALL = {'statement': 'H^2 regularity for the Neumann problem.', 'keywords': ['Neumann', 'regularity'],
+          'candidates': [{'authors': ['Brezis'], 'title': 'Functional analysis', 'year': '2011', 'locator': 'Theorem 9.26', 'why': 'Chapter 9.'}]}
+NOT_FOUND = {'level': 'not_found', 'locator': 'Theorem 9.26', 'document_id': '', 'lines': '', 'record': '',
+             'statement_found': '', 'note': 'No source tool was used.'}
+
+
+class LiteratureCheckTests(GuiCase):
+    def setUp(self):
+        super().setUp()
+        from mathagent import refcheck
+        compact = patch.dict(refcheck.EFFORTS, {'low': {**refcheck.EFFORTS['low'], 'candidates': 2, 'discover': False}})
+        compact.start()
+        self.addCleanup(compact.stop)
+
+    def test_an_answer_can_call_check_reference_only_when_online(self):
+        chat = self.ok('POST', '/api/chats', {'mode': 'critic'})['id']
+        guesses = [{'authors': ['Brezis'], 'title': 'Functional analysis', 'year': '2011', 'locator': 'Theorem 9.26'}]
+        self.fake.replies = [tool('check_reference', {'statement': 'H^2 regularity for Neumann problems', 'guesses': guesses}),
+                             text(json.dumps(RECALL)), text('Nothing to search.'), text(json.dumps(NOT_FOUND)),
+                             text('Brezis is a likely source, but Theorem 9.26 is unverified.')]
+        self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'Which theorem gives Neumann regularity?'})
+        self.wait_task(timeout=30)
+        self.assertIn('check_reference', [t['function']['name'] for t in self.fake.requests[0]['tools']])
+        nested = self.fake.requests[1]
+        self.assertIn('already suggested', nested['messages'][1]['content'])
+        self.assertNotIn('check_reference', [t['function']['name'] for r in self.fake.requests[1:4] for t in r.get('tools', [])])
+        transcript = self.ok('GET', f'/api/chats/{chat}')['transcript']
+        result = json.loads(next(i for i in transcript if i['role'] == 'tool')['content'])
+        self.assertEqual(result['references'], [])
+        self.assertEqual(result['not_confirmed'][0]['level'], 'not_found')
+        self.assertEqual(transcript[-1]['content'], 'Brezis is a likely source, but Theorem 9.26 is unverified.')
+        self.ok('POST', f'/api/chats/{chat}/settings', {'online': False})
+        self.fake.replies = [text('Offline.')]
+        self.ok('POST', f'/api/chats/{chat}/messages', {'content': 'Again?'})
+        self.wait_task()
+        self.assertNotIn('check_reference', [t['function']['name'] for t in self.fake.requests[-1]['tools']])
 
 
 class OfflineLockTests(GuiCase):

@@ -29,7 +29,8 @@ class ResearchCliTests(unittest.TestCase):
         with patch('sys.argv', ['mathagent', '--workspace', str(self.root), *args]), \
                 patch.object(cli, 'UI', return_value=self.ui), \
                 patch.object(cli, 'Ollama', return_value=self.client), \
-                patch.object(cli, 'ResearchRunner', return_value=self.runner) as runner_class:
+                patch.object(cli, 'ResearchRunner', return_value=self.runner) as runner_class, \
+                patch.object(cli, 'ReviewRunner', return_value=self.runner):
             runner_class.list.return_value = [dict(self.result, kind='literature', goal='A topic')]
             runner_class.inspect.return_value = self.result
             return cli.main()

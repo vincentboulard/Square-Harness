@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Literature check: one or two precise references for a known result, each
+  graded (read, cited, located, contradicted, not found) from the passages
+  actually read, with papers that cite the work found through Crossref, the
+  OpenCitations index and arXiv. The Assistant delegates it as a `check` worker;
+  critic and explore answers can call `check_reference`; `/check` in the terminal.
+- Literature reports are rebuilt as verified, themed reading lists: code sweeps
+  Crossref, arXiv, zbMATH and Semantic Scholar and follows citations, and the
+  model scopes, screens, organises and annotates only records a source returned.
+  OpenAlex is no longer used.
+
 - Saved conversations can be deleted from the Assistant sidebar after
   confirmation. Active and queued work is protected, other open clients update
   immediately, and saved proof/report jobs and attached files are retained.
