@@ -349,12 +349,13 @@ still be used. If a repeated blocked action is attempted, the next response must
 finish with the evidence and limitations already available.
 
 The assistant and its tasks share one generated-token and active-time allowance.
-Short controller calls use a small output ceiling without thinking; delegated
-tasks use the effort chosen for their work. Reaching a budget or context limit
+The assistant's own calls run without thinking; delegated tasks use the effort
+chosen for their work. Reaching a budget or context limit
 retains partial work and its status. The standalone Prove notebook and terminal
 proof baseline retain their existing solve, review and repair workflow.
 
-Answers after a worker returns have a larger output ceiling (8,192 tokens).
+The assistant's answers, direct or after a worker returns, have an output
+ceiling of 8,192 tokens.
 If the assistant's answer reaches its ceiling, Resume requests a complete
 replacement using the saved results, without rerunning completed workers.
 Its ceiling can grow to 16,384 tokens, within the remaining shared budget and

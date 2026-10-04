@@ -85,7 +85,9 @@ evade it. Use an available independent capability or explain the blocker.
 WEB_TOOLS = frozenset({'open_url', 'read_page', 'search_page', 'read_references', 'search_web'})
 READ_ONLY_TOOLS = frozenset({'list_files', 'read_file', 'search_text'}) | WEB_TOOLS
 STATE_VERSION = 1
-MAIN_PREDICT = 1024
+# A direct answer can be a full explanation: the first call has the same ceiling as
+# a synthesis. The model stops early when it only chooses an action.
+MAIN_PREDICT = 8192
 FINAL_PREDICT = 8192
 MAX_FINAL_PREDICT = 16384
 

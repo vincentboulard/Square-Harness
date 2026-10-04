@@ -124,7 +124,7 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual(len(self.fake.requests), 1)
         request = self.fake.requests[0]
         self.assertFalse(request['think'])
-        self.assertLessEqual(request['options']['num_predict'], 2048)
+        self.assertLessEqual(request['options']['num_predict'], 8192)  # a direct answer may be a full explanation
         self.assertIn('delegate', [schema['function']['name'] for schema in request['tools']])
         self.assertEqual(detail['assistant_budget']['tokens']['used'], 37)
         self.assertEqual(self.ok('GET', '/api/proofs')['jobs'], [])

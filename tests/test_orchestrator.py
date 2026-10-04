@@ -77,7 +77,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(self.children, [])
         self.assertEqual(len(client.requests), 1)
         self.assertFalse(client.requests[0]['think'])
-        self.assertEqual(client.requests[0]['options']['num_predict'], 1024)
+        self.assertEqual(client.requests[0]['options']['num_predict'], 8192)  # room for a full direct answer
         self.assertEqual(runner.agent.history[-1]['content'], answer)
 
     def test_parent_only_exposes_delegation_and_allowed_read_only_tools(self):
@@ -179,7 +179,7 @@ class OrchestratorTests(unittest.TestCase):
                 self.assertTrue(result['warnings'])
 
     def test_overreported_output_cap_is_unfinished(self):
-        runner, _ = self.runner([final('Candidate', eval_count=1025)])
+        runner, _ = self.runner([final('Candidate', eval_count=8193)])
         result = runner.run('Prove it')
         self.assertEqual(result['status'], 'incomplete')
         self.assertIn('output allowance', result['warnings'][0])
@@ -515,7 +515,7 @@ class OrchestratorTests(unittest.TestCase):
             final('The reviewed argument is complete.')])
         result = runner.run('Give a complete proof.')
         self.assertEqual(result['status'], 'complete')
-        self.assertEqual(client.requests[0]['options']['num_predict'], 1024)
+        self.assertEqual(client.requests[0]['options']['num_predict'], 8192)
         self.assertEqual(client.requests[1]['options']['num_predict'], 8192)
         self.assertIn('delegate', {item['function']['name'] for item in client.requests[1]['tools']})
         self.assertEqual(client.requests[2]['options']['num_predict'], 8192)
