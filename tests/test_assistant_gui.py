@@ -225,7 +225,8 @@ class AssistantGuiTests(GuiCase):
         detail = self.detail(chat)
         self.assertEqual(detail['assistant_status'], 'complete')
         cards = [item for item in detail['transcript'] if item['role'] == 'route']
-        self.assertEqual([card['mode'] for card in cards], ['critic', 'explore'])
+        # The two workers start concurrently, so either may write its card first.
+        self.assertEqual(sorted(card['mode'] for card in cards), ['critic', 'explore'])
         self.assertTrue(all(card['status'] == 'done' for card in cards))
         self.assertEqual(detail['assistant_budget']['tokens']['used'], 8 + 20 + 20 + 20)
         self.assertEqual(len(self.fake.requests), 4)
@@ -450,6 +451,23 @@ class AssistantGuiTests(GuiCase):
         self.assertIn('Online search was off', result['result']['warnings'][0])
         self.assertEqual(next(item['content'] for item in reversed(detail['transcript']) if item['role'] == 'assistant'),
                          'Brezis, Theorem 9.26, is a likely source but the check could not confirm it.')
+
+    def test_critic_worker_can_check_references_like_a_critique_chat(self):
+        chat = self.conversation(online=True)
+        self.fake.replies = [delegation('critic', 'Check that x=x for every real x.'), text('Reflexivity holds.'),
+                             text('Equality is reflexive.')]
+        self.ask(chat, 'Is x=x for every real x?')
+        self.wait_task(timeout=30)
+        self.assertEqual(self.detail(chat)['assistant_status'], 'complete')
+        names = lambda request: [item['function']['name'] for item in request.get('tools', [])]
+        self.assertNotIn('check_reference', names(self.fake.requests[0]))  # the main agent delegates a check
+        self.assertIn('check_reference', names(self.fake.requests[1]))
+        offline = self.conversation(online=False)
+        self.fake.replies = [delegation('critic', 'Check that y=y for every real y.'), text('Reflexivity holds.'),
+                             text('Equality is reflexive.')]
+        self.ask(offline, 'Is y=y for every real y?')
+        self.wait_task(timeout=30)
+        self.assertNotIn('check_reference', names(self.fake.requests[-2]))
 
     def test_large_previous_report_is_reference_context_not_an_oversized_literature_goal(self):
         self.hub.args.ctx = 65536  # conservative byte counting must fit the full fixture

@@ -912,6 +912,9 @@ class Hub:
                 self.bus.publish('activity', mutate=lambda: task.activity.append(item),
                                  task=task.id, job=mode, id=child.get('job_id'), **item)
 
+        if mode in ('critic', 'explore') and online:
+            # As in a critique or exploration chat: check_reference, charged to this worker's share.
+            agent.workspace.checker = nested_checker(agent, emit)
         try:
             if mode == 'prove':
                 if any(f.lower().endswith('.pdf') for f in files):
