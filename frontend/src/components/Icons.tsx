@@ -18,6 +18,7 @@ export const PlusIcon = (p: IconProps) => <Icon {...p}><path d="M12 5v14M5 12h14
 export const PauseIcon = (p: IconProps) => <Icon {...p}><path d="M9 6v12M15 6v12" /></Icon>
 export const PlayIcon = (p: IconProps) => <Icon {...p}><path d="M8 5.5v13l10-6.5z" /></Icon>
 export const CloseIcon = (p: IconProps) => <Icon {...p}><path d="M6 6l12 12M18 6L6 18" /></Icon>
+export const TrashIcon = (p: IconProps) => <Icon {...p}><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></Icon>
 export const ChevronIcon = (p: IconProps) => <Icon {...p}><path d="M9 6l6 6-6 6" /></Icon>
 export const SendIcon = (p: IconProps) => <Icon {...p}><path d="M5 12h13M13 6l6 6-6 6" /></Icon>
 export const SunIcon = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="4" /><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" /></Icon>

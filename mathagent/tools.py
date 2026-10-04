@@ -33,12 +33,22 @@ class Workspace:
         self.approve = approve
         self.allow_python = allow_python
         self.literature = literature
+        self.web = None
+        if literature is not None:
+            from .web import WebTools
+            self.web = WebTools(literature)
         groups = set(READ_GROUPS) if read_types is None else set(read_types)
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
         self.readable = set().union(*(READ_GROUPS[g] for g in groups)) if groups else set()
+        self.pinned = set()
         if self.literature is None:
             self.readable.discard('.pdf')  # PDF extraction uses the literature backend
+
+    def pin_files(self, files):
+        """Allow these exact source paths without broadening file discovery."""
+        paths = {self.path(filename, pdf=self.literature is not None) for filename in files}
+        self.pinned.update(paths)
 
     def path(self, filename, *, pdf=False):
         if not isinstance(filename, str) or not filename:
@@ -56,7 +66,7 @@ class Workspace:
         return p
 
     def _readable(self, p):
-        if p.suffix.lower() not in self.readable:
+        if p.suffix.lower() not in self.readable and p not in self.pinned:
             raise ValueError(f'The user has not allowed reading {p.suffix} files in this workspace; '
                              'ask them to pin the file or enable that file type')
 
@@ -169,12 +179,14 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         kinds = ', '.join(sorted(self.readable))
         result = [] if not self.readable else [
             schema('list_files', f'List nonhidden files the user allows you to read ({kinds}; scan cap 2000).', {}),
-            schema('read_file', 'Read numbered lines of an allowed file' + (', including extracted PDF text' if '.pdf' in self.readable else '')
-                   + '. At most 200 lines / 6000 characters.',
-                   {'path': string, 'start_line': integer, 'end_line': integer}, ['path']),
             schema('search_text', 'Case-insensitive literal search in allowed text files (not PDFs); max 50 matches.',
                    {'pattern': string}, ['pattern']),
         ]
+        if self.readable or self.pinned:
+            result.append(schema('read_file', 'Read numbered lines of an allowed or explicitly pinned file'
+                   + (', including extracted PDF text' if self.literature is not None else '')
+                   + '. At most 200 lines / 6000 characters.',
+                   {'path': string, 'start_line': integer, 'end_line': integer}, ['path']))
         result += [
             schema('write_file', 'Create/replace a text file ONLY when requested by the user; shows a diff for approval.',
                    {'path': string, 'content': string}, ['path', 'content']),
@@ -183,10 +195,13 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             result.append(schema('run_python', 'Run Python after explicit approval. Not sandboxed. 30s timeout.',
                                  {'code': string}, ['code']))
         if self.literature is not None:
-            result.extend(self.literature.schemas())
+            web_schemas = self.web.schemas() if self.web is not None else []
+            web_names = {item['function']['name'] for item in web_schemas}
+            result.extend(item for item in self.literature.schemas() if item['function']['name'] not in web_names)
+            result.extend(web_schemas)
         return result
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, *, on_result=None):
         allowed = {s['function']['name'] for s in self.schemas()}
         try:
             if name not in allowed:
@@ -195,6 +210,8 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                 arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError('Tool arguments must be an object')
+            if self.web is not None and name in {item['function']['name'] for item in self.web.schemas()}:
+                return self.web.execute(name, arguments, on_result=on_result)
             if self.literature is not None and name in {
                     item['function']['name'] for item in self.literature.schemas()}:
                 # The literature layer returns bounded valid JSON and handles

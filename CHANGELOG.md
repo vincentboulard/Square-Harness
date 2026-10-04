@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Saved conversations can be deleted from the Assistant sidebar after
+  confirmation. Active and queued work is protected, other open clients update
+  immediately, and saved proof/report jobs and attached files are retained.
+
 - Visual interface (`square-harness --gui`): a local web app for proof, critic,
   explore, literature and referee work, with typeset LaTeX, live model output,
   proof candidates with their whole-proof reviews, citation checks, pausing and
@@ -12,9 +16,22 @@
   status stay visible. Legacy v1 proof jobs are listed and readable, not resumable.
 - Critic and explore conversations started in the interface are saved in
   `.mathagent/chats/`.
-- Free mode: the model suggests the workflow for each request and restates it
-  self-contained; the user confirms before it runs. One conversation can mix
-  proofs, critiques and reports; jobs started while the model is busy are queued.
+- Assistant replaces Default: a main mathematical agent answers elementary
+  questions directly or delegates precise tasks to the existing modes, then
+  inspects their results and follows up. Independent workers can run concurrently
+  on vLLM (two by default, configurable from one to four), within one shared
+  token/time budget. Paused work retains child identities, results and accounting.
+  Standalone proof mode and its direct-inference benchmark are unchanged.
+- Assistant answers after delegated work have room for a full response. Resuming
+  a capped answer reuses the saved results with a larger, context-fitted output
+  ceiling, without launching the completed proof again.
+- Assistant can read supplied public web pages and their links or paginated
+  bibliographies directly, without starting a literature report. Entries without
+  hyperlinks are preserved, and extraction coverage is explicit.
+- Delegated research, review and write-up objectives are separate from their
+  exact saved conversation context. Long earlier reports no longer count toward
+  the objective length limit. Typed permanent failures persist across resume
+  and prevent repeated worker launches with paraphrased requests or more effort.
 - Write-up workflow (`--mode writeup`, `/writeup`, interface tab): LaTeX from
   notes, drafts or PDFs in the user's `.sty`/`.cls`/`.tex` template, with source
   comments checked against read lines, a sandboxed latexmk compile, one repair
@@ -27,11 +44,8 @@
 - The interface uses the model server chosen with `--backend` (Ollama, vLLM or
   llama.cpp), the sampling options and the `--proof-*` limits; pausing works
   with every backend.
-- Interface notebooks are now Default, Prove, Literature, Review and Write-up.
-  Free mode is renamed Default: for each message the model picks one or more jobs,
-  each with an effort level, and starts them at once in order, without asking for
-  confirmation; each job's card says what started and can cancel it. Critic
-  and explore are no longer notebooks; Default answers questions with them, and
+- Interface notebooks are now Assistant, Prove, Literature, Review and Write-up.
+  Critic and explore are no longer notebooks; Assistant can delegate to them, and
   earlier critique and exploration conversations stay listed and readable there.
   Referee reports are called reviews in the interface (the engine mode is still
   `referee`).

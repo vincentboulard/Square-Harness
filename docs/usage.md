@@ -1,6 +1,6 @@
 # Usage
 
-Proof mode is the default. It solves one problem, reviews the full candidate,
+Proof mode is the terminal default. It solves one problem, reviews the full candidate,
 and repairs a concrete objection when enough budget remains. It has two model
 roles—solver and verifier—and ordinary code for control and storage.
 
@@ -217,7 +217,7 @@ conversations. The logo above the notebooks opens an About page.
 
 | Mode | What the page shows |
 | --- | --- |
-| Default | A conversation where the model picks the job for each message and its effort, or answers the question itself, and starts at once; each job's card can cancel it (see below) |
+| Assistant | A mathematical conversation with direct answers and focused tasks when needed. The assistant reads their results and decides how to continue, within a shared budget (see below) |
 | Prove | The selected answer and its review status; each attempt with its written answer (and thinking), the verifier's verdict, explanation and located issues, and the exact model calls; live model output while a call runs; a side panel with budgets and every retained candidate |
 | Literature, Review | The report with clickable citations that open the exact passage read, the controller's citation checks, manuscript coverage, evidence, plan, notes and budgets. Review is the interface's name for a referee report |
 | Write-up | The LaTeX document with source marks that open the note lines each paragraph came from, compile errors, the PDF, TODOs and template macros (see [LaTeX write-ups](research.md#latex-write-ups)) |
@@ -255,17 +255,20 @@ v0.4 stay listed with their report, sources and files, but cannot be resumed.
 Every job page also lists its saved files: exact request payloads, streamed
 answers and intermediate results. Pause stops model work at the next checkpoint,
 like Ctrl+C in the terminal; Resume continues with the remaining saved budget.
-The model serves one task at a time, because time budgets count wall-clock time.
+Standalone jobs use one active job slot. An Assistant turn can include several
+focused tasks within that slot; independent tasks can run concurrently on an
+OpenAI-compatible server, within the turn's shared allowance.
 A job started while another runs, from a form, a suggestion or a Resume button,
 waits in the queue shown under the running task, where it can be cancelled; it
 starts when the model is free. Approval dialogs replace the terminal's `[y/N]`
 prompt for file writes and, with `--allow-python`, for Python.
 
-Conversations are saved in `.mathagent/chats/` so that they survive a reload. As
-in the terminal, a turn that is paused or fails never enters the model's context;
-the interface keeps it visible and marks it as discarded. Critique and
+Conversations are saved in `.mathagent/chats/` so that they survive a reload.
+Assistant turns also retain their pending work and budget for resume. In ordinary
+critique and exploration chat, a turn that is paused or fails never enters the
+model's context; the interface keeps it visible and marks it as discarded. Critique and
 exploration conversations made by earlier versions of the interface stay listed
-in the Default notebook and can be continued.
+in the Assistant notebook and can be continued.
 
 ### Folders and file access
 
@@ -292,29 +295,78 @@ What happens next depends on the page: a proof or report form pins the files, th
 write-up form puts `.sty` and `.cls` files in the template slot and the rest in
 the notes, and a conversation attaches them to your next message.
 
-### Default mode
+### Assistant mode
 
-The ∀ notebook accepts any request. For each message the model makes one short
-structured call that picks what to do (a proof, a literature report, a review of
-a manuscript, a write-up, or an answer in the conversation) with an effort level,
-and rewrites the request so that it stands on its own: proof and report jobs never
-see the conversation. The job then starts at once, with no confirmation. Its card
-says what started and at which effort, for example "Starting a proof · Low
-effort"; **Cancel** takes a waiting job out of the queue, or stops a running one at
-its next checkpoint (the job is kept, and its page can resume it). The request
-the job received is under the card's "Request given to …". When the message is
-ambiguous, the card asks one question instead and nothing starts.
+To remove a saved conversation from the left list, use its trash button and
+confirm the displayed title. This deletes the conversation history and its
+Assistant checkpoint. Saved proofs, reports and workspace files remain
+available. A running conversation must finish or be paused before deletion;
+cancel its queued work first if it is waiting for the model.
 
-One message can ask for several jobs, such as "prove this lemma and survey its
-literature": each gets its own card, and they run in order, the first now and the
-others in the queue. One conversation can also hold jobs asked for one after
-another. Jobs appear on their cards with a live status and open in
-their own notebook; later suggestions see the earlier requests and their
-outcomes. Questions are answered in the conversation itself, by the engine's
-critic or explore mode as the model suggests. Only files you attached or named
-are pinned, and a review or write-up of a file you never mentioned is not
-suggested. Reading a message is allowed while a job runs (its few seconds count
-toward that job's time budget).
+The ∀ notebook, previously called Default, is a mathematical assistant. It can
+answer directly or ask an existing mode to handle a focused task: prove a lemma,
+critique an inference, explore approaches, find literature, review a manuscript,
+or write up notes. After a task returns, the assistant sees the result and its
+unresolved issues and decides whether to answer, ask for clarification, or obtain
+more focused help. Delegation is optional; an elementary question can finish with
+one short answer.
+
+For a simple web lookup, the assistant can open a supplied public HTTPS URL,
+read page lines and links, and paginate its detected bibliography directly.
+It does not need a literature report for these requests. Bibliography entries
+without links are retained, and pagination and extraction coverage are reported
+separately. Retrieved pages are reference data, not instructions. Opening a
+supplied URL needs no search key; general web search still needs the configured
+search provider. Uncached pages cannot be fetched when online access is off.
+
+Each delegated task has a card with its request, effort and returned status.
+Proofs and reports open in their own notebooks, where their live output, sources,
+reviews and artifacts can be inspected. The conversation displays the assistant's
+own response. A returned task does not by itself mean that its mathematical
+argument is correct. In particular, direct answers receive no automatic proof
+review, and a model review remains a model opinion.
+
+Research, review and write-up workers receive the delegated objective separately
+from an exact saved copy of the conversation and its source context. The
+20,000-character objective limit therefore does not apply to a long prior
+report. Context must still fit the model window; essential reference context is
+never silently shortened. Permanent input or permission failures are saved
+and block another launch with unchanged context, even if the assistant
+paraphrases the request or raises its effort. Other available capabilities may
+still be used. If a repeated blocked action is attempted, the next response must
+finish with the evidence and limitations already available.
+
+The assistant and its tasks share one generated-token and active-time allowance.
+Short controller calls use a small output ceiling without thinking; delegated
+tasks use the effort chosen for their work. Reaching a budget or context limit
+retains partial work and its status. The standalone Prove notebook and terminal
+proof baseline retain their existing solve, review and repair workflow.
+
+Answers after a worker returns have a larger output ceiling (8,192 tokens).
+If the assistant's answer reaches its ceiling, Resume requests a complete
+replacement using the saved results, without rerunning completed workers.
+Its ceiling can grow to 16,384 tokens, within the remaining shared budget and
+context space. The unfinished fragment is retained for inspection rather than
+used as a proved premise.
+
+For an OpenAI-compatible backend such as vLLM, `--assistant-concurrency` sets the
+maximum number of simultaneous tasks, from 1 to 4 (default 2). Tasks that depend
+on earlier results still wait for those results. Ollama and llama.cpp use a limit
+of 1. All tasks use the same served model and reserve part of the parent budget;
+concurrency does not multiply that budget or guarantee a speedup. Set the limit
+to 1 to serialize inference, and measure the actual server before increasing it.
+
+The shared limits are configurable at launch: `--assistant-tokens` (60,000
+generated tokens), `--assistant-input-tokens` (240,000 input tokens), and
+`--assistant-seconds` (900 seconds). A turn can create at most four workers and
+use at most six tool actions. These limits apply across pause and resume.
+
+Use **Pause**, or **Pause assistant** on the current task's card, to stop at a
+checkpoint. **Resume assistant** continues the saved turn with its remaining
+allowance, including a pending task. Resume that turn before sending another
+message, or start a new conversation. A completed task's card stays finished
+while the assistant continues. Older Default route cards remain readable and
+retain their original start and cancel controls.
 
 ### Security and phones
 
@@ -326,7 +378,8 @@ web sites and unexpected `Host` headers are refused, and a strict
 Content-Security-Policy stops rendered model or document text from loading
 anything outside the harness. Fonts and KaTeX are bundled, so the interface itself
 never contacts another server. Online search is a switch you set per conversation
-(next to Thinking) and per report. In the interface it is on by default, so
+and per report. Assistant chooses effort automatically; ordinary critique and
+exploration chats also offer a Thinking switch. In the interface search is on by default, so
 literature tools may send short search queries to arXiv, Semantic Scholar and
 OpenAlex; untick it to keep a conversation or a report offline. Write-ups and
 proofs never search. Launching with an explicit `--offline` locks it off, which

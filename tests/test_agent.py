@@ -47,6 +47,18 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual((self.root / 'new.tex').read_text(), 'Hello\n')
         self.assertIn('+Hello', previews[0])
 
+    def test_exact_pins_do_not_enable_discovery_of_other_files(self):
+        (self.root / 'other.tex').write_text('Unattached source\n')
+        workspace = Workspace(self.root, read_types=[])
+        workspace.pin_files(['lemma.tex'])
+        self.assertIn('A flawed proof', workspace.execute('read_file', {'path': 'lemma.tex'}))
+        self.assertIn('not allowed', workspace.execute('read_file', {'path': 'other.tex'}))
+        self.assertEqual(workspace.list_files(), '(no readable files)')
+        self.assertEqual(workspace.search_text('flawed'), '(no matches in supported files scanned)')
+        for path in ('../outside.tex', '.private.txt', '/etc/passwd'):
+            with self.assertRaises(ValueError):
+                workspace.pin_files([path])
+
     def test_python_opt_in_and_approval(self):
         self.assertIn('disabled', self.ws.execute('run_python', {'code': 'print(1)'}))
         self.ws.allow_python = True

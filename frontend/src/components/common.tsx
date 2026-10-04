@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { api, type WorkspaceFile } from '../api'
 import { bytes, count } from '../format'
@@ -148,6 +148,7 @@ export function FilePicker({ selected, onChange, allowPdf = false, accept, label
 }
 
 export function Modal({ title, onClose, children, wide }: { title: ReactNode; onClose?: () => void; children: ReactNode; wide?: boolean }) {
+  const titleId = useId()
   useEffect(() => {
     if (!onClose) return
     const key = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
@@ -157,9 +158,9 @@ export function Modal({ title, onClose, children, wide }: { title: ReactNode; on
   // A portal: a dialog opened from the mobile drawer must not inherit its transform.
   return createPortal(
     <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose?.()}>
-      <div className={'modal' + (wide ? ' modal-wide' : '')} role="dialog" aria-modal="true">
+      <div className={'modal' + (wide ? ' modal-wide' : '')} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="modal-head">
-          <h2>{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           {onClose && (
             <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}><CloseIcon /></button>
           )}

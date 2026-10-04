@@ -3,24 +3,29 @@
 The engine is unchanged. For each task the hub builds the same objects as the
 terminal interface, forwards emit() callbacks as events, answers approve()
 callbacks from the browser, and pauses work by raising the KeyboardInterrupt
-that the runners already treat as a checkpointed pause. The model serves one
-task at a time; further job starts wait in a queue.
+that the runners already treat as a checkpointed pause. The hub serves one
+top-level task at a time; Assistant workers may share bounded concurrent
+inference within that task. Further job starts wait in a queue.
 """
 import collections
+import json
 from pathlib import Path
 import threading
 import time
 import uuid
 
 from ..agent import Agent, AgentError, Ollama
+from ..assistant_budget import AssistantBudget, BudgetClient
 from ..backends import LlamaCpp, OpenAICompatible, create_client
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
 from ..research import ResearchRunner
-from ..router import JOB_MODES, clarify, classify
+from ..router import JOB_MODES
+from ..orchestrator import Orchestrator
 from ..tools import Workspace
 from ..writeup import WriteupRunner
+from ..worker_errors import WorkerInputError
 from . import effort, store
 from .store import one_line
 
@@ -130,11 +135,13 @@ class Task:
         self.thread = None
         self.work = None
         self.on_update = on_update
+        self.origin_chat = target if kind == 'chat' else None
 
     def summary(self):
         return {'id': self.id, 'kind': self.kind, 'target': self.target, 'label': self.label,
                 'title': self.title[:500], 'state': self.state, 'error': self.error,
-                'result_status': self.result_status, 'started': self.started, 'finished': self.finished}
+                'result_status': self.result_status, 'started': self.started, 'finished': self.finished,
+                'origin_chat': self.origin_chat}
 
 
 class Approval:
@@ -242,7 +249,7 @@ class Hub:
         if task.on_update:
             try:
                 task.on_update(task)
-            except (OSError, ValueError):
+            except (OSError, ValueError, store.NotFound):
                 pass
 
     def _publish_queue(self):
@@ -250,12 +257,18 @@ class Hub:
 
     def _begin(self, kind, target, label, title, work, live=None, queue=False, on_update=None):
         with self._lock:
+            origin_chat = target if kind == 'chat' else getattr(on_update, '_origin_chat', None)
+            if origin_chat:
+                # Registration and deletion share this lock. An earlier read
+                # of the chat does not authorize work after it was deleted.
+                store.load_chat(self.root, origin_chat)
             busy = self.task is not None and self.task.state in RUNNING
             if busy and not queue:
                 raise Busy(f'The model is busy with a {self.task.label.lower()} ("{one_line(self.task.title, 60)}"). '
                            'Pause it or wait until it finishes: the model serves one task at a time '
                            'and time budgets count wall-clock time.')
             task = Task(kind, target, label, title, on_update)
+            task.origin_chat = origin_chat
             task.live, task.work = live, work
             if busy:
                 task.state = 'queued'
@@ -346,6 +359,27 @@ class Hub:
                     'routing': sorted(self.routing)}
         seq, value = self.bus.snapshot(read)
         return {'seq': seq, **value}
+
+    def delete_chat(self, chat_id):
+        """Delete one idle conversation after excluding every possible writer."""
+        with self._lock:
+            chat = store.load_chat(self.root, chat_id)
+            route_tasks = {item.get('task') for item in chat['transcript']
+                           if item.get('role') == 'route' and item.get('task')}
+            tasks = ([self.task] if self.task else []) + list(self.queue)
+            def belongs(task):
+                return (getattr(task, 'origin_chat', None) == chat_id
+                        or (task.kind == 'chat' and task.target == chat_id)
+                        or (task.live or {}).get('chat') == chat_id or task.id in route_tasks)
+            if chat_id in self.routing or any(belongs(task) and (
+                    task.state in RUNNING + ('queued',)
+                    or (task.thread is not None and task.thread.is_alive())) for task in tasks):
+                raise Busy('This conversation is still running or queued. Pause it and wait for it to stop, or cancel its queued work before deleting it.')
+            store.delete_chat(self.root, chat_id)
+            if self.task and belongs(self.task):
+                self.task = None
+        self.bus.publish('chat_deleted', chat=chat_id)
+        return {'deleted': chat_id}
 
     # -- workspace --------------------------------------------------------
 
@@ -635,87 +669,281 @@ class Hub:
         except (OSError, ValueError):
             pass
 
-    # -- Default mode: pick the workflows and their effort, then run them -------
+    # -- Assistant: bounded main agent and existing workers -----------------
 
     def route(self, chat_id, content, files=()):
-        session = store.load_chat(self.root, chat_id)
-        if session['mode'] != 'free':
-            raise ValueError('Only Default conversations guess the workflow')
-        if not isinstance(content, str) or not content.strip() or len(content) > 60000:
-            raise ValueError('Write a message of at most 60000 characters')
-        files = self.check_files(list(files))
-        with self._lock:
-            if chat_id in self.routing:
-                raise Busy('Still reading your previous message')
-            self.routing[chat_id] = time.time()
-        store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files,
-                                                 'time': store._now()}])
-        self.bus.publish('routing', chat=chat_id, state='running')
-        self.bus.publish('chat_saved', chat=chat_id)
-        root = self.root
-        threading.Thread(target=self._route, args=(root, chat_id, content, files), daemon=True,
-                         name='square-route').start()
+        return self._assistant_turn(chat_id, content, files)
 
-    def _route(self, root, chat_id, content, files):
-        # Deliberately outside the one-task slot: a short call (at most ROUTE_PREDICT
-        # tokens) so a guess appears even while a job runs; its seconds count for that job.
+    def resume_assistant(self, chat_id):
+        chat = store.load_chat(self.root, chat_id)
+        state = chat.get('assistant_state') or {}
+        if state.get('status') not in ('interrupted', 'running', 'incomplete'):
+            raise ValueError('This Assistant turn is not paused or recoverable.')
+        return self._assistant_turn(chat_id, state['query'], state.get('files', ()), resume=True)
+
+    def _assistant_turn(self, chat_id, content, files=(), resume=False):
+        chat = store.load_chat(self.root, chat_id)
+        if chat['mode'] != 'free':
+            raise ValueError('Only Assistant conversations orchestrate workers.')
+        if not isinstance(content, str) or not content.strip() or len(content) > 60000:
+            raise ValueError('Write a message of at most 60000 characters.')
+        files = self.check_files(list(files))
+        saved = chat.get('assistant_state') or {}
+        with self._lock:
+            store.load_chat(self.root, chat_id)
+            pending = ([self.task] if self.task else []) + list(self.queue)
+            if chat_id in self.routing or any(t.target == chat_id and t.state in RUNNING + ('queued',) for t in pending):
+                raise Busy('The Assistant is still working on this conversation.')
+            if not resume and saved.get('status') in ('interrupted', 'running', 'incomplete'):
+                raise ValueError('Resume the pending Assistant turn first, or start a new conversation.')
+            self.routing[chat_id] = time.time()
+            try:
+                if not resume:
+                    store.append_items(self.root, chat_id, [{'role': 'user', 'content': content, 'files': files, 'time': store._now()}])
+            except BaseException:
+                self.routing.pop(chat_id, None)
+                raise
+        root = self.root
+        if not resume:
+            self.bus.publish('chat_saved', chat=chat_id)
+
+        def work(task):
+            fresh = store.load_chat(root, chat_id)
+            previous = fresh.get('assistant_state') if resume else None
+            online = bool(fresh['settings'].get('online')) and not self.online_locked
+            if previous:
+                online = online and bool(previous.get('online', False))
+            main, _ = self._engine(task, mode='explore', think=False, online=online)
+            main.workspace.pin_files(files)
+            self._ensure_model(main)
+            checkpoint_lock = threading.RLock()
+            parent = None
+            budget = None
+
+            def checkpoint(state=None):
+                with checkpoint_lock:
+                    if parent is None or parent.state is None:
+                        return
+                    # Child usage and the shared total form one checkpoint;
+                    # never combine an earlier child copy with a newer refund.
+                    with budget.pool.lock:
+                        state = _copy(parent.state)
+                        state['budget'] = budget.snapshot()
+                        state['online'] = online
+                        state['web_budget'] = main.workspace.literature.snapshot()
+                        store.save_assistant(root, chat_id, state)
+                    self.bus.publish('chat_saved', chat=chat_id)
+
+            concurrency = getattr(self.args, 'assistant_concurrency', 2) if self.args.backend == 'openai' else 1
+            budget = BudgetClient(main.client, state=previous.get('budget') if previous else None,
+                                  max_tokens=getattr(self.args, 'assistant_tokens', 60000),
+                                  max_input_tokens=getattr(self.args, 'assistant_input_tokens', 240000),
+                                  max_seconds=getattr(self.args, 'assistant_seconds', 900),
+                                  checkpoint=checkpoint, concurrency=concurrency)
+            main.client = budget
+            library = main.workspace.literature
+            if previous and previous.get('web_budget'):
+                library.restore(previous['web_budget'])
+            library.deadline = time.monotonic() + budget.remaining_seconds
+            library.on_budget_change = checkpoint
+            capture = ChatCapture(self, task, chat_id, main)
+            def capture_main(kind, value):
+                if kind == 'tool':
+                    name = str(value).split(' ', 1)[0]
+                    message = ('Delegating a mathematical task…' if name == 'delegate' else
+                               'Reading web sources…' if name in ('open_url', 'read_page', 'search_page', 'read_references', 'search_web')
+                               else 'Reading mathematical sources…')
+                    capture.emit('notice', message)
+                elif kind != 'result':
+                    capture.emit(kind, value)
+            parent = Orchestrator(main, lambda action, child, save: self._assistant_worker(
+                task, root, chat_id, parent, budget, action, child, save, online, checkpoint_lock),
+                emit=capture_main, checkpoint=checkpoint, concurrency=concurrency)
+            checkpoint_lock = parent._state_lock
+            history = fresh['history']
+            if not history:
+                # Legacy chats remain useful, without the old character-capped summaries.
+                history = [{'role': i['role'], 'content': i.get('content', '')} for i in fresh['transcript']
+                           if i.get('role') in ('user', 'assistant')]
+                if not resume and history and history[-1]['role'] == 'user':
+                    history.pop()  # the current message is added by the controller
+            try:
+                result = parent.run(content, files=files, history=history, state=previous)
+            except KeyboardInterrupt:
+                checkpoint()
+                store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Assistant paused. Its workers and remaining budget are saved.', 'time': store._now()}])
+                self.bus.publish('chat_saved', chat=chat_id)
+                raise
+            except AgentError as exc:
+                exhausted = isinstance(exc, AssistantBudget) or budget.remaining_tokens <= 0 or budget.remaining_seconds <= 0
+                parent.state['status'] = 'budget_exhausted' if exhausted else 'interrupted'
+                parent.state.setdefault('warnings', []).append(str(exc))
+                checkpoint()
+                store.append_items(root, chat_id, [{'role': 'notice', 'content': str(exc), 'time': store._now()}])
+                self.bus.publish('chat_saved', chat=chat_id)
+                if exhausted:
+                    return {'status': 'budget_exhausted', 'answer': ''}
+                raise
+            if result['status'] == 'complete':
+                store.commit_turn(root, chat_id, parent.state['messages'], capture.calls, capture.notices,
+                                  echo_user=False, mode='free')
+            else:
+                store.append_items(root, chat_id, [{'role': 'assistant', 'content': result.get('answer', ''),
+                                                  'mode': 'free', 'time': store._now(),
+                                                  'stats': {'done_reason': 'length'}},
+                                                 {'role': 'notice', 'content': '\n'.join(result.get('warnings', [])), 'time': store._now()}])
+            checkpoint()
+            self.bus.publish('chat_saved', chat=chat_id)
+            return {'status': result['status'], 'answer': result.get('answer', '')}
+
+        live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'free'}
         try:
-            context = self._free_context(root, chat_id)
-            routes = classify(create_client(self.args.backend, self.args.host, timeout=180), self.args.model, content,
-                              context=context, files=files,
-                              available=[f['path'] for f in store.list_files(root, limit=200)],
-                              ctx=self.args.ctx)
-            known = set(f['path'] for f in store.list_files(root, limit=2000))
-            # Small models attach plausible-looking files; keep only files the user
-            # attached or actually named, so an unrelated statement is never pinned.
-            said = content + '\n' + context
-            items = []
-            for route in routes:
-                named = [f for f in route['files'] if f in files or f in said or Path(f).name in said]
-                if route['mode'] in ('referee', 'writeup') and route['files'] and not named:
-                    continue  # it rests only on files the user never mentioned: a guess, not a request
-                dropped = [f for f in named if f not in known]
-                route['files'] = [f for f in named if f in known]
-                item = {'role': 'route', 'status': 'proposed', **route, 'time': store._now()}
-                if dropped:
-                    item['missing'] = dropped
-                items.append(item)
-            if not items:
-                items = [{'role': 'route', 'status': 'proposed', **clarify(content, files), 'time': store._now()}]
-            first = store.append_items(root, chat_id, items)
-            # No confirmation: each job starts at once in order (the first runs, the
-            # others queue); its card says what started and can cancel it.
-            for index, item in enumerate(items, first):
-                if item['mode'] == 'clarify' or self.root != root:
-                    continue
-                try:
-                    self.start_route(chat_id, index, item['mode'], item['request'], item['files'],
-                                     effort.limits(item['mode'], item['effort'], self.args))
-                except (Busy, ValueError, OSError, AgentError, store.NotFound):
-                    pass  # start_route recorded the failure on the card
-        except (AgentError, OSError, ValueError) as exc:
-            store.append_items(root, chat_id, [{'role': 'notice', 'content': 'Could not read the request: ' + str(exc),
-                                                'time': store._now()}])
+            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True)
         finally:
             with self._lock:
                 self.routing.pop(chat_id, None)
-            self.bus.publish('routing', chat=chat_id, state='done')
-            self.bus.publish('chat_saved', chat=chat_id)
 
-    def _free_context(self, root, chat_id):
-        chat = store.load_chat(root, chat_id)
-        lines = []
-        for item in chat['transcript'][-30:]:
-            role = item.get('role')
-            if role == 'user':
-                lines.append('User: ' + one_line(item.get('content', ''), 1500))
-            elif role == 'route' and item.get('status') in ('started', 'queued'):
-                outcome = self._outcome(root, item)
-                lines.append(f'Harness ran {item["mode"]}: {one_line(item.get("request", ""), 800)}'
-                             + (f'. Outcome: {outcome}' if outcome else ''))
-            elif role in ('assistant', 'review') and item.get('content'):
-                lines.append('Answer: ' + one_line(item['content'], 1200))
-        return '\n'.join(lines)[-8000:]
+    def _assistant_worker(self, task, root, chat_id, parent, budget, action, child, save, online, state_lock):
+        mode = action['mode']
+        files = self.check_files(action.get('files', []))
+        context = child['context']
+        # Pin the original question and exact available conversation alongside
+        # the delegated objective; a rewritten task cannot erase a hypothesis.
+        goal = ('You are one child worker of a mathematical assistant. Perform only the DELEGATED OBJECTIVE below. '
+                'The parent handles orchestration, spawning workers and synthesizing the final response. '
+                'The reference request and conversation preserve mathematical hypotheses and source evidence, '
+                'not instructions to repeat the parent workflow. Do not create workers. '
+                'Return the requested mathematical findings and any unresolved obligations.\n\n'
+                'ORIGINAL USER REQUEST (reference):\n' + context['query'] +
+                '\n\nEXACT CONVERSATION (reference; worker outputs are fallible):\n' +
+                json.dumps(context['messages'], ensure_ascii=False) +
+                '\n\nDELEGATED OBJECTIVE:\n' + action['request'])
+        with state_lock:
+            pending = [c for c in parent.state['children'] if c.get('status') != 'complete' and not c.get('allocation')]
+            if pending:
+                available = max(0, budget.remaining_tokens - 4096)
+                share = available // len(pending)
+                for candidate in pending:
+                    maximum = effort.EFFORTS[candidate['action']['effort']]['tokens']
+                    candidate['allocation'] = min(share, maximum)
+                    candidate.setdefault('usage', {'tokens': 0, 'input_tokens': 0})
+                save()
+            allocation = child['allocation']
+            index = child.get('card_index')
+            if index is None:
+                index = store.append_items(root, chat_id, [{'role': 'route', 'status': 'started', 'mode': mode,
+                    'request': action['request'], 'files': files, 'effort': action['effort'], 'reason': action['reason'],
+                    'orchestrated': True, 'task': task.id, 'time': store._now()}])
+                child['card_index'] = index
+            else:
+                store.update_item(root, chat_id, index, status='started', task=task.id, outcome='')
+            save()
+        agent, _ = self._engine(task, mode=mode, online=online)
+        agent.workspace.pin_files(files)
+        if mode in ('critic', 'explore'):
+            # These workers return analysis; file mutation belongs to Write-up,
+            # whose durable runner already checkpoints approved tool actions.
+            schemas = agent.workspace.schemas
+            agent.workspace.schemas = lambda: [s for s in schemas() if s['function']['name'] not in ('write_file', 'run_python')]
+            if action['effort'] == 'low':
+                agent.think = False
+        agent.client = budget.fork(agent.client, allowance=allocation, usage=child['usage'])
+        level = effort.EFFORTS[action['effort']]
+        seconds = min(level['minutes'] * 60, budget.remaining_seconds)
+        runner = None
+
+        def emit(kind, value):
+            if runner is not None:
+                ident = runner.state['id'] if runner.state else None
+                if ident and child.get('job_id') != ident:
+                    with state_lock:
+                        child['job_id'] = ident
+                        store.update_item(root, chat_id, index, job_id=ident)
+                        save()
+            if kind in ('notice', 'tool', 'result'):
+                item = {'kind': kind, 'text': str(value)[:4000], 'time': time.time()}
+                self.bus.publish('activity', mutate=lambda: task.activity.append(item),
+                                 task=task.id, job=mode, id=child.get('job_id'), **item)
+
+        try:
+            if mode == 'prove':
+                if any(f.lower().endswith('.pdf') for f in files):
+                    raise ValueError('The proof worker needs text sources. Read the required PDF passages before delegating the precise statement.')
+                runner = ProofRunner(agent, emit)
+                if child.get('job_id'):
+                    result = runner.resume(child['job_id'])
+                else:
+                    solve = min(self.args.proof_solve_tokens, 4096) if action['effort'] == 'low' else self.args.proof_solve_tokens
+                    verify = min(self.args.proof_verify_tokens, 2048) if action['effort'] == 'low' else self.args.proof_verify_tokens
+                    if allocation < 256:
+                        raise AssistantBudget('No budget remains for a proof worker and its review.')
+                    if solve + verify > allocation:
+                        solve = max(128, allocation * solve // (solve + verify))
+                        verify = max(128, min(verify, allocation - solve))
+                    repair = min(solve, self.args.proof_repair_tokens or solve)
+                    minimum = min(repair, self.args.proof_min_solve_tokens or min(16384, repair))
+                    result = runner.start(goal, source_files=files, max_rounds=level['tries'],
+                        max_tokens=allocation, max_seconds=max(0.1, seconds), max_predict=solve,
+                        verify_tokens=verify, repair_tokens=repair, min_solve_tokens=minimum,
+                        verify_temperature=self.args.proof_verify_temperature)
+                outcome = {'candidate_complete': 'The model review found no issue.', 'uncertain': 'The model review is uncertain.',
+                           'review_unavailable': 'Review unavailable; the candidate is preserved.'}.get(result['status'], result['stop_reason'] or result['status'])
+                result = {'status': result['status'], 'answer': result['answer'], 'job_id': result['id'],
+                          'review_status': result['status'], 'warnings': [result['stop_reason']],
+                          'artifact': str(Path(result['proof_path']).relative_to(root))}
+            elif mode in ('literature', 'referee', 'writeup'):
+                runner = (WriteupRunner if mode == 'writeup' else ResearchRunner)(agent, emit)
+                if child.get('job_id'):
+                    result = runner.resume(child['job_id'])
+                else:
+                    kwargs = dict(source_files=files, max_rounds=level['tries'], max_tokens=allocation,
+                        max_input_tokens=min(level['input'], budget.pool.state['max_input_tokens']),
+                        max_seconds=max(0.1, seconds), max_requests=level['requests'], max_chars=level['chars'])
+                    if mode != 'writeup':
+                        kwargs['kind'] = mode
+                    result = runner.start(action['request'], reference_context=context, **kwargs)
+                outcome = result['status'].replace('_', ' ').capitalize() + '; see the saved report.'
+                worker_error = result.get('worker_error')
+                result = {'status': result['status'], 'answer': result['report'], 'job_id': result['id'],
+                          'artifact': str(Path(result['report_path']).relative_to(root))}
+                if worker_error:
+                    result['error'] = worker_error
+            else:
+                agent.predict = min(self.args.predict, 2048 if action['effort'] == 'low' else 4096, agent.client.remaining_tokens)
+                agent.max_rounds = min(level['tries'], 4)
+                answer = agent.run(goal, emit, fresh=True)
+                complete = (agent.last_stats.get('done_reason') in ('stop', 'tool_calls') and bool(answer.strip())
+                            and all(type(agent.last_stats.get(key)) is int and agent.last_stats[key] >= 0
+                                    for key in ('eval_count', 'prompt_eval_count')))
+                result = {'status': 'complete' if complete else 'incomplete', 'answer': answer,
+                          'job_id': child['id'], 'warnings': [] if complete else ['The worker answer is incomplete.']}
+                outcome = 'Worker finished.' if complete else 'Worker reached its output limit.'
+            if task.cancel.is_set() or result['status'] == 'paused':
+                store.update_item(root, chat_id, index, status='stopped', outcome='Paused; work is saved.')
+                save()
+                raise KeyboardInterrupt
+            store.update_item(root, chat_id, index, status='done', outcome=outcome, job_id=result['job_id'] if mode not in ('critic', 'explore') else None)
+            self.bus.publish('chat_saved', chat=chat_id)
+            return result
+        except KeyboardInterrupt:
+            store.update_item(root, chat_id, index, status='stopped', outcome='Paused; work is saved.')
+            self.bus.publish('chat_saved', chat=chat_id)
+            raise
+        except (AgentError, ValueError, OSError) as exc:
+            store.update_item(root, chat_id, index, status='failed', outcome=str(exc), error=str(exc))
+            self.bus.publish('chat_saved', chat=chat_id)
+            if isinstance(exc, WorkerInputError):
+                error = exc.as_dict()
+            elif isinstance(exc, ValueError):
+                error = WorkerInputError(str(exc), details={'mode': mode}).as_dict()
+            elif isinstance(exc, AssistantBudget):
+                error = {'code': 'worker_budget_exhausted', 'message': str(exc), 'retryable': False,
+                         'scope': 'budget', 'details': {'mode': mode}}
+            else:
+                error = {'code': 'worker_operation_failed', 'message': str(exc), 'retryable': True,
+                         'scope': 'operation', 'details': {'mode': mode}}
+            return {'status': 'failed', 'answer': '', 'warnings': [str(exc)], 'error': error,
+                    'job_id': child.get('job_id') or child['id']}
 
     def _outcome(self, root, item):
         job = item.get('job_id')
@@ -768,6 +996,7 @@ class Hub:
             self.bus.publish('chat_saved', chat=chat_id)
 
         limits = dict(limits or {})
+        on_update._origin_chat = chat_id
         online = bool(chat['settings'].get('online')) and not self.online_locked
         store.update_item(root, chat_id, index, mode=mode, request=request, files=files, status='starting', error=None)
         try:

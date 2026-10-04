@@ -12,7 +12,7 @@ checking remains necessary.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/interface-dark.png">
-  <img alt="The Square Harness visual interface on its default page: the Default notebook, with the Prove, Literature, Review and Write-up notebooks in the left rail" src="docs/images/interface-light.png">
+  <img alt="The Square Harness visual interface with a conversation notebook and the Prove, Literature, Review and Write-up notebooks in the left rail" src="docs/images/interface-light.png">
 </picture>
 
 ## Quick start
@@ -60,14 +60,24 @@ square-harness --gui --workspace ~/research/square-workspace
 ```
 
 Your browser opens on `http://127.0.0.1:8765`. Each mode is a notebook in the left
-rail, and the Default notebook picks and starts the right job for each request,
-with an effort level, or answers the question itself. Proofs, answers, reports, reviews
+rail. The **Assistant** answers short questions directly and can delegate focused
+proof, critique, exploration, literature, review or writing tasks when needed.
+It reads their results and continues the conversation, within a shared budget.
+For simple web requests it can open a supplied URL and read its page, links or
+paginated bibliography directly, including references without hyperlinks.
+Delegated work has its own card and saved artifacts; pause and resume the
+assistant to continue with the remaining allowance. Proofs, answers, reports, reviews
 and write-ups appear as the model writes them, with typeset LaTeX, each proof
 attempt with its review, budgets, citation checks and approval dialogs for file
 writes. Jobs started while the model is busy wait in a queue. Drop files onto the
 window and switch folders from the sidebar. It uses the same engine, settings and saved jobs as the terminal, including
 jobs started there, and works in phone browsers too: see the
 [usage guide](docs/usage.md#visual-interface) before exposing it to your network.
+
+Assistant can run independent tasks in parallel on an OpenAI-compatible server
+such as vLLM: `--assistant-concurrency 2` is the default, and the limit can be
+set from 1 to 4. Other backends run one task at a time. Parallel calls share the
+same model and parent allowance; their speed depends on the server and workload.
 
 ## Proof mode
 

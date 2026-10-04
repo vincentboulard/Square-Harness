@@ -81,6 +81,15 @@
 .side-item-active { background: var(--sheet); box-shadow: 0 0 0 1px var(--line), var(--shadow-sm); }
 .side-item > .sq { margin-top: 3px; }
 .side-item-chat { padding-left: 12px; }
+.side-chat-row { display: flex; align-items: center; border-radius: 7px; margin-bottom: 2px; }
+.side-chat-row:hover { background: var(--hover); }
+.side-chat-row .side-item { flex: 1; min-width: 0; margin-bottom: 0; padding-right: 4px; }
+.side-chat-row .side-item:hover { background: transparent; }
+.side-delete { width: 36px; height: 40px; margin-right: 3px; color: var(--text-3); }
+.side-delete:hover:not(:disabled) { background: var(--red-soft); color: var(--red); }
+.side-delete:disabled { opacity: 0.4; cursor: default; background: transparent; }
+.delete-chat-title { margin-top: 0; overflow-wrap: anywhere; }
+@media (pointer: coarse) { .side-delete { width: 44px; height: 44px; } }
 .side-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
 .side-name {
   font-size: 14px; line-height: 1.35; overflow: hidden;
@@ -164,6 +173,8 @@
 .btn-primary:disabled:hover { background: var(--ink); }
 .btn-quiet { background: transparent; border-color: transparent; color: var(--ink); }
 .btn-quiet:hover { background: var(--ink-soft); }
+.btn-delete { color: var(--red); border-color: var(--red); }
+.btn-delete:hover:not(:disabled) { color: var(--red); background: var(--red-soft); border-color: var(--red); }
 .btn-small { min-height: 30px; padding: 0 10px; font-size: 13px; }
 .btn-large { min-height: 44px; padding: 0 22px; font-size: 15px; }
 .btn-block { width: 100%; }

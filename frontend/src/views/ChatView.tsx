@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
 import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
+import { assistantResumable, routeActivity } from '../assistant'
 import { Collapse, ErrorNote, Loading, Toggle, useLoad } from '../components/common'
-import { CloseIcon, FileIcon, PauseIcon, SendIcon } from '../components/Icons'
+import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
-import { ago, count } from '../format'
+import { ago, count, duration } from '../format'
 import { MODES } from '../modes'
 import { go, href } from '../router'
 import { useApp, useTick } from '../store'
@@ -17,7 +18,7 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Describe the task in your own words. The model picks the workflow (a proof, a literature report, a review of a manuscript, a write-up, or an answer right here) and its effort, and starts at once; you can cancel it from its card. One message can ask for several jobs: they run one after another.',
+    text: 'Ask a question, share an argument, or describe what you want to work on. The assistant can answer directly, call on focused help when needed, and use the results to continue the discussion.',
     examples: [
       'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
       'Review manuscript.tex, and find the literature on compact Sobolev embeddings it should cite.',
@@ -78,6 +79,7 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const [attachments, setAttachments] = useState<string[]>([])
   const [sendError, setSendError] = useState('')
   const [sending, setSending] = useState(false)
+  const [resuming, setResuming] = useState(false)
   const [think, setThink] = useState<boolean>(app.status?.defaults.think ?? true)
   // Online search is on for new conversations unless the interface was launched --offline.
   const [online, setOnline] = useState<boolean>(app.status ? app.status.online : true)
@@ -96,9 +98,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   }, [data, liveSize, routing])
 
   const free = mode === 'free'
+  const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
     const content = (text ?? draft).trim()
-    if (!content || sending) return
+    if (!content || sending || resuming || paused || (free && (routing || ours)) || (!free && busy)) return
     setSending(true)
     setSendError('')
     try {
@@ -128,11 +131,17 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
     setOnline(value)
     if (id) api.chatSettings(id, { online: value }).catch((reason: Error) => { setOnline(!value); setSendError(reason.message) })
   }
+  const resume = async () => {
+    if (!id || resuming) return
+    setResuming(true)
+    setSendError('')
+    try { await api.resumeAssistant(id) } catch (reason) { setSendError((reason as Error).message) } finally { setResuming(false) }
+  }
   const transcript = data?.transcript || []
   const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route')
-  const canReview = !!id && !busy && !!last && last.role === 'assistant' && !!last.content
-  // Free mode may read a new message while a job runs; jobs it starts wait in the queue.
-  const blocked = free ? routing : busy
+  const canReview = !!id && !busy && !paused && !!last && last.role === 'assistant' && !!last.content
+  // Another conversation's work can be queued; this conversation has one active turn.
+  const blocked = free ? routing || ours || paused : busy
 
   return (
     <div className="chat">
@@ -144,13 +153,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           {id && !data && !error && <Loading />}
           {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => setDraft(text)} />}
           {id && <Transcript items={transcript} mode={mode} chatId={id} />}
-          {routing && (
+          {routing && !live && (
             <div className="entry message message-model">
               <span className="in-margin speaker speaker-model mode-free">∀</span>
-              <p className="muted routing"><Square variant="running" size={12} /> Reading your request to suggest a workflow…</p>
+              <p className="muted routing"><Square variant="running" size={12} /> Reading your request…</p>
             </div>
           )}
           {live && <LiveTurnView live={live} mode={mode} />}
+          {free && assistantResumable(data) && !ours && (
+            <div className="entry message message-model">
+              <span className="in-margin speaker speaker-model mode-free">{MODES.free.glyph}</span>
+              <p className="notice">The assistant is paused. Resume with the remaining budget, or start a new conversation for another request.</p>
+            </div>
+          )}
         </div>
       </div>
       <form className="composer" onSubmit={submit}>
@@ -173,19 +188,31 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             aria-label="Message" />
           {ours ? (
             <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause().catch((reason: Error) => setSendError(reason.message))}>
-              <PauseIcon size={16} /> Stop
+              <PauseIcon size={16} /> {free ? 'Pause' : 'Stop'}
             </button>
           ) : (
-            <button type="submit" className="btn btn-primary composer-send" disabled={blocked || sending || !draft.trim()} aria-label="Send">
+            <button type="submit" className="btn btn-primary composer-send" disabled={blocked || sending || resuming || !draft.trim()} aria-label="Send">
               <SendIcon size={16} /> Send
             </button>
           )}
         </div>
         <div className="composer-bar">
-          <Toggle label="Thinking" checked={think} onChange={changeThink} />
+          {free ? <span className="muted small" title="Short questions get a direct answer; harder tasks receive more effort as needed.">Adaptive effort</span>
+            : <Toggle label="Thinking" checked={think} onChange={changeThink} />}
           <span title={locked ? 'Launched with --offline: online search stays off' : online ? 'Search queries leave this computer' : 'Local and cached sources only'}>
             <Toggle label="Search online" checked={online && !locked} onChange={changeOnline} disabled={locked} />
           </span>
+          {free && assistantResumable(data) && (
+            <button type="button" className="btn btn-quiet btn-small" disabled={busy || resuming || sending} onClick={resume}>
+              <PlayIcon size={14} /> {resuming ? 'Resuming…' : 'Resume assistant'}
+            </button>
+          )}
+          {free && data?.assistant_budget && (
+            <span className="muted small" title="Shared allowance for the assistant and all focused tasks in this turn">
+              {count(data.assistant_budget.tokens.used)} / {count(data.assistant_budget.tokens.limit)} tokens
+              {' · '}{duration(data.assistant_budget.seconds.used)} / {duration(data.assistant_budget.seconds.limit)}
+            </span>
+          )}
           {canReview && (
             <button type="button" className="btn btn-quiet btn-small" onClick={() => api.review(id!).catch((reason: Error) => setSendError(reason.message))}>
               Fresh review of the last answer
@@ -263,7 +290,7 @@ function UserMessage({ item }: { item: TranscriptItem }) {
 function ModelSteps({ steps, mode, chatId }: { steps: Step[]; mode: ChatMode; chatId: string }) {
   const out: ReactElement[] = []
   let blocks: ReactElement[] = []
-  // A Default conversation answers with one voice, whichever engine mode wrote it;
+  // An Assistant conversation answers with one voice, whichever engine mode wrote it;
   // older critique and exploration chats keep their own mark.
   const glyph: ChatMode = mode
   const flush = (key: number) => {
@@ -342,7 +369,11 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   }
   const mode = item.mode as RouteMode
   const kind = kindOf(mode)
-  const info = KINDS[kind]
+  const info = item.orchestrated && mode === 'critic'
+    ? { noun: 'a critique', label: 'Critique', glyph: MODES.critic.glyph, cover: 'critic' }
+    : item.orchestrated && mode === 'explore'
+      ? { noun: 'an exploration', label: 'Exploration', glyph: MODES.explore.glyph, cover: 'explore' }
+      : KINDS[kind]
   const effort = kind === 'answer' ? '' : `${effortLabel(item.effort)} effort`
   const act = async (action: () => Promise<unknown>) => {
     setActing(true)
@@ -357,25 +388,26 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   })
 
   const task = app.snapshot.task
-  const queued = !!item.task && app.snapshot.queue.some((waiting) => waiting.id === item.task)
-  const running = !!item.task && task?.id === item.task && ['starting', 'running', 'pausing'].includes(task.state)
+  const { queued, running } = routeActivity(item, app.snapshot)
   let status = ''
-  let variant: Variant = 'running'
+  let variant: Variant = 'ready'
   if (item.job_id && mode === 'prove') {
     const job = app.proofs?.find((proof) => proof.id === item.job_id)
-    if (job) ({ variant, label: status } = proofLook(job.status, job.running))
+    if (job) ({ variant, label: status } = proofLook(job.status, job.running && (!item.orchestrated || running)))
   } else if (item.job_id) {
     const job = app.research?.find((report) => report.id === item.job_id)
-    if (job) ({ variant, label: status } = researchLook(job.status, job.running))
+    if (job) ({ variant, label: status } = researchLook(job.status, job.running && (!item.orchestrated || running)))
   }
   let headline: string
   if (item.status === 'proposed') { headline = `${info.label} suggested`; status = 'Not started'; variant = 'ready' }
-  else if (item.status === 'failed') { headline = `Could not start ${info.noun}`; variant = 'error' }
+  else if (item.status === 'failed') { headline = item.orchestrated ? `${info.label} did not finish` : `Could not start ${info.noun}`; variant = 'error' }
   else if (item.status === 'cancelled') { headline = `${info.label} cancelled`; status = 'Removed from the queue'; variant = 'spent' }
   else if (queued) { headline = `${info.label} queued`; status = 'Starts when the model is free'; variant = 'ready' }
-  else if (running && task?.state === 'pausing') { headline = `Stopping ${info.noun}`; status = 'At the next checkpoint' }
-  else if (running) { headline = kind === 'answer' ? 'Answering here' : `${item.job_id ? 'Running' : 'Starting'} ${info.noun}`; status = '' }
-  else if (item.status === 'stopped') { headline = kind === 'answer' ? 'The answer was stopped' : `${info.label} stopped`; status = status || 'Paused' }
+  else if (running && task?.state === 'pausing') { headline = `Stopping ${info.noun}`; status = 'At the next checkpoint'; variant = 'running' }
+  else if (running) { headline = kind === 'answer' && !item.orchestrated ? 'Answering here' : `${item.job_id || item.orchestrated ? 'Running' : 'Starting'} ${info.noun}`; status = ''; variant = 'running' }
+  else if (item.status === 'stopped') { headline = kind === 'answer' && !item.orchestrated ? 'The answer was stopped' : `${info.label} stopped`; status = status || 'Paused'; variant = 'paused' }
+  else if (item.orchestrated && item.status === 'done') { headline = `${info.label} returned`; if (!item.job_id) { status = ''; variant = 'ready' } }
+  else if (item.orchestrated) { headline = `${info.label} awaiting resume`; status = 'Paused'; variant = 'paused' }
   else if (kind === 'answer') { headline = 'Answered below'; status = ''; variant = 'complete' }
   else { headline = info.label }
   return (
@@ -391,18 +423,18 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
         <div className="route-actions">
           {(queued || running) && (
             <button type="button" className="btn btn-small" disabled={acting || task?.state === 'pausing'}
-              title={queued ? 'Take it out of the queue' : 'Stop at the next checkpoint; the job is kept and can be resumed from its page'}
-              onClick={() => act(() => api.cancelRoute(chatId, index))}>
-              <CloseIcon size={14} /> Cancel
+              title={item.orchestrated ? 'Pause the assistant and its current task; resume with the remaining budget' : queued ? 'Take it out of the queue' : 'Stop at the next checkpoint; the job is kept and can be resumed from its page'}
+              onClick={() => act(() => item.orchestrated ? api.pause() : api.cancelRoute(chatId, index))}>
+              {item.orchestrated ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
           {item.job_id && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id)}>Open the {info.label.toLowerCase()}</a>}
-          {['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
+          {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}
             </button>
           )}
-          <Collapse className="route-details" summary={kind === 'answer' ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
+          <Collapse className="route-details" summary={kind === 'answer' && !item.orchestrated ? 'Question as the model sees it' : `Request given to the ${info.label.toLowerCase()}`}>
             <div className="route-summary"><Inline limit={1200}>{item.request || ''}</Inline></div>
             {item.files && item.files.length > 0 && (
               <div className="attachments">{item.files.map((path) => <span key={path} className="chip chip-static"><FileIcon size={13} /><span>{path}</span></span>)}</div>
@@ -411,6 +443,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
             {item.reason && <p className="muted small">Why: {item.reason}</p>}
           </Collapse>
         </div>
+        {item.outcome && item.outcome !== error && <p className="muted small">{item.outcome}</p>}
         <ErrorNote>{error}</ErrorNote>
       </div>
     </div>

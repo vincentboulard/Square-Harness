@@ -174,121 +174,8 @@ class RouterTests(unittest.TestCase):
 UNCERTAIN = {'explanation': 'The review cannot decide whether the argument is complete.', 'issues': [], 'verdict': 'uncertain'}
 
 
-class FreeModeTests(GuiCase):
-    """Default mode: the model picks the workflows and their effort, and they start at once."""
-
-    def route(self, chat, content, files=(), count=1):
-        before = len([i for i in self.ok('GET', f'/api/chats/{chat}')['transcript'] if i['role'] == 'route'])
-        self.ok('POST', f'/api/chats/{chat}/route', {'content': content, 'files': list(files)})
-        self.wait_for(lambda: chat not in self.ok('GET', '/api/task')['routing'], message='routing to finish')
-        cards = [i for i in self.ok('GET', f'/api/chats/{chat}')['transcript'] if i['role'] == 'route'][before:]
-        self.assertEqual(len(cards), count, cards)
-        return cards[-1] if count == 1 else cards
-
-    def index(self, chat, card):
-        return next(n for n, item in enumerate(self.ok('GET', f'/api/chats/{chat}')['transcript'])
-                    if item['role'] == 'route' and item['time'] == card['time'] and item['request'] == card['request'])
-
-    def test_one_conversation_mixes_a_proof_an_answer_and_a_review(self):
-        (self.root / 'paper.tex').write_text('Claim: x=x.\nProof: reflexivity.\n')
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        # The routing answer, then the proof it starts at once (solve, then review).
-        self.fake.replies = [route_reply('prove', 'Prove that every real x satisfies x=x.', effort='low'),
-                             text('Unfinished attempt.'), text(json.dumps(UNCERTAIN))]
-        card = self.route(chat, 'Show that x equals itself')
-        routing = self.fake.requests[0]
-        self.assertIn('writeup', routing['format']['properties']['tasks']['items']['properties']['mode']['enum'])
-        self.assertFalse(routing['think'])
-        self.assertEqual((card['mode'], card['effort']), ('prove', 'low'))
-        self.assertIn(card['status'], ('starting', 'started'))
-        self.wait_task(timeout=30)
-        card = self.ok('GET', f'/api/chats/{chat}')['transcript'][self.index(chat, card)]
-        self.assertEqual(card['status'], 'started')
-        proof = self.ok('GET', f'/api/proofs/{card["job_id"]}')
-        self.assertTrue(proof['goal'].startswith('Prove that every real x'))
-        self.assertEqual((proof['status'], proof['answer']), ('uncertain', 'Unfinished attempt.'))
-        # The Low effort's budget reached the job: 1 attempt, 30000 tokens, 1 minute.
-        settings = proof['settings']
-        self.assertEqual((settings['max_rounds'], settings['max_tokens'], settings['max_seconds']), (1, 30000, 60))
-        self.assertEqual(self.request('POST', f'/api/chats/{chat}/routes/{self.index(chat, card)}/start',
-                                      {'mode': 'prove', 'request': 'again', 'files': []})[0], 400)
-
-        # The router sees the earlier proof; a question is answered in the conversation at once.
-        self.fake.replies = [route_reply('critic', 'Is reflexivity enough here?'), text('Yes: reflexivity is an axiom of equality.')]
-        self.route(chat, 'Is that argument enough?')
-        self.wait_task()
-        routing = [r for r in self.fake.requests if r.get('format')][-1]['messages'][1]['content']
-        self.assertIn('Harness ran prove', routing)
-        self.assertIn('Outcome: uncertain', routing)
-        transcript = self.ok('GET', f'/api/chats/{chat}')['transcript']
-        self.assertEqual((transcript[-1]['content'], transcript[-1]['mode']), ('Yes: reflexivity is an axiom of equality.', 'critic'))
-        self.assertEqual([i['role'] for i in transcript].count('user'), 2)  # no duplicated message
-
-        slow = [{'message': {'thinking': 'step '}, 'done': False}] * 300 + text('Plan.')
-        self.fake.replies = [route_reply('referee', 'Referee paper.tex.', ['paper.tex', 'missing.tex', 'other.tex']), (slow, 0.02)]
-        (self.root / 'other.tex').write_text('An unrelated statement.\n')
-        review = self.route(chat, 'Now referee paper.tex and missing.tex')
-        # Files the user never named are not attached, even when they exist.
-        self.assertEqual((review['files'], review['missing']), (['paper.tex'], ['missing.tex']))
-        self.wait_for(lambda: self.ok('GET', '/api/task')['task']['label'] == 'Review', message='the review to run')
-        # Cancelling a running job pauses it: the work is kept and resumable from its page.
-        self.ok('POST', f'/api/chats/{chat}/routes/{self.index(chat, review)}/cancel')
-        self.assertEqual(self.wait_task()['state'], 'paused')
-        card = self.ok('GET', f'/api/chats/{chat}')['transcript'][self.index(chat, review)]
-        self.assertEqual(card['status'], 'stopped')
-        self.assertEqual(self.request('POST', f'/api/chats/{chat}/routes/{self.index(chat, review)}/cancel')[0], 400)
-
-    def test_one_message_starts_several_jobs_in_order(self):
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        slow = [{'message': {'thinking': 'step '}, 'done': False}] * 300 + text('Attempt.')
-        self.fake.replies = [text(json.dumps({'tasks': [task('prove', 'Prove 1=1.', effort='low'),
-                                                        task('literature', 'Survey reflexivity.', effort='high')],
-                                              'question': ''})), (slow, 0.02)]
-        proof, report = self.route(chat, 'Prove 1=1 and survey reflexivity', count=2)
-        self.assertEqual([(c['mode'], c['effort']) for c in (proof, report)], [('prove', 'low'), ('literature', 'high')])
-        # The proof runs (a slow solve); the report waits in the queue with its own effort.
-        self.assertEqual(self.ok('GET', '/api/task')['task']['kind'], 'proof')
-        self.assertEqual(report['status'], 'queued')
-        [waiting] = self.ok('GET', '/api/task')['queue']
-        self.assertEqual((waiting['label'], waiting['id']), ('Literature report', report['task']))
-        # Cancelling a waiting job takes it out of the queue.
-        self.ok('POST', f'/api/chats/{chat}/routes/{self.index(chat, report)}/cancel')
-        self.assertEqual(self.ok('GET', '/api/task')['queue'], [])
-        self.assertEqual(self.ok('GET', f'/api/chats/{chat}')['transcript'][self.index(chat, report)]['status'], 'cancelled')
-        self.ok('POST', f'/api/chats/{chat}/routes/{self.index(chat, proof)}/cancel')
-        self.wait_task()
-
-    def test_reviews_and_write_ups_of_files_never_mentioned_are_dropped(self):
-        (self.root / 'other.tex').write_text('An unrelated statement.\n')
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        self.fake.replies = [text(json.dumps({'tasks': [task('referee', 'Review other.tex.', ['other.tex']),
-                                                        task('critic', 'Is x=x?')], 'question': ''})), text('Yes.')]
-        card = self.route(chat, 'Is x equal to itself?')
-        self.assertEqual(card['mode'], 'critic')
-        self.wait_task()
-        self.fake.replies = [text(json.dumps({'tasks': [task('writeup', 'Write up other.tex.', ['other.tex'])], 'question': ''}))]
-        question = self.route(chat, 'Hmm, what next?')
-        self.assertEqual((question['mode'], question['status']), ('clarify', 'proposed'))
-        self.assertTrue(question['question'])
-
-    def test_jobs_picked_while_busy_wait_in_the_queue(self):
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        blocker = self.ok('POST', '/api/chats', {'mode': 'critic'})['id']
-        self.fake.replies = [([{'message': {'content': 'w '}, 'done': False}] * 600 + text('end'), 0.02)]
-        self.ok('POST', f'/api/chats/{blocker}/messages', {'content': 'Long.'})
-        self.wait_for(lambda: self.ok('GET', '/api/task')['task']['state'] == 'running', message='running')
-        self.wait_for(lambda: not self.fake.replies, message='the long answer to start streaming')
-        self.fake.replies = [route_reply('prove', 'Prove 1=1.')]
-        proof = self.route(chat, 'Prove 1=1')
-        self.fake.replies = [route_reply('critic', 'Is 1=1 obvious?')]
-        answer = self.route(chat, 'Is it obvious?')
-        self.assertEqual((proof['status'], answer['status']), ('queued', 'queued'))
-        self.assertEqual([t['kind'] for t in self.ok('GET', '/api/task')['queue']], ['proof', 'chat'])
-        for card in (proof, answer):
-            self.ok('POST', f'/api/chats/{chat}/routes/{self.index(chat, card)}/cancel')
-        self.assertEqual(self.ok('GET', '/api/task')['queue'], [])
-        self.ok('POST', '/api/task/pause')
-        self.wait_task()
+class LegacyRouteTests(GuiCase):
+    """Old saved suggestion cards remain usable after the Assistant upgrade."""
 
     def test_suggestions_saved_before_auto_start_can_still_start_with_their_effort(self):
         chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
@@ -325,19 +212,7 @@ class FreeModeTests(GuiCase):
         self.wait_task()
         self.assertEqual(self.ok('GET', '/api/task')['queue'], [])
 
-    def test_clarifying_questions_and_validation(self):
-        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        self.fake.replies = [text('garbage')]
-        self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Hmm'})
-        card = self.wait_for(lambda: [i for i in self.ok('GET', f'/api/chats/{chat}')['transcript'] if i['role'] == 'route'],
-                             message='a route')[0]
-        self.assertEqual(card['mode'], 'clarify')
-        index = self.ok('GET', f'/api/chats/{chat}')['transcript'].index(card)
-        self.assertEqual(self.request('POST', f'/api/chats/{chat}/routes/{index}/start',
-                                      {'mode': 'clarify', 'request': 'x', 'files': []})[0], 400)
-        self.assertEqual(self.ok('POST', f'/api/chats/{chat}/routes/{index}/dismiss')['item']['status'], 'dismissed')
-        critic = self.ok('POST', '/api/chats', {'mode': 'critic'})['id']
-        self.assertEqual(self.request('POST', f'/api/chats/{critic}/route', {'content': 'x'})[0], 400)
+
 
 
 OUTLINE = {'title': 'Compactness notes', 'sections': [
@@ -567,16 +442,20 @@ class OnlineAndEffortTests(GuiCase):
         self.wait_task(timeout=30)
         self.assertTrue(self.ok('GET', f'/api/research/{started["id"]}')['settings']['online'])
 
-    def test_default_answers_record_the_workflow_that_answered(self):
+    def test_assistant_records_the_worker_and_then_its_own_answer(self):
         chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
-        self.fake.replies = [text(json.dumps({'mode': 'explore', 'request': 'Ideas?', 'files': [], 'reason': 'r', 'question': ''})),
-                             text('Some ideas.')]
+        self.fake.replies = [tool('delegate', {'mode': 'explore', 'request': 'Explore these ideas.', 'files': [],
+                                               'reason': 'Explore an alternative.', 'effort': 'low'}),
+                             text('Some worker ideas.'), text('Some ideas.')]
         self.ok('POST', f'/api/chats/{chat}/route', {'content': 'Ideas?'})
-        self.wait_for(lambda: self.ok('GET', f'/api/chats/{chat}')['transcript'][-1].get('content') == 'Some ideas.',
+        self.wait_for(lambda: any(item.get('role') == 'assistant' and item.get('content') == 'Some ideas.'
+                                 for item in self.ok('GET', f'/api/chats/{chat}')['transcript']),
                       timeout=20, message='the answer')
-        answer = self.ok('GET', f'/api/chats/{chat}')['transcript'][-1]
-        self.assertEqual((answer['content'], answer['mode']), ('Some ideas.', 'explore'))
-        self.assertIn('Explore approaches', self.fake.requests[-1]['messages'][0]['content'])
+        transcript = self.ok('GET', f'/api/chats/{chat}')['transcript']
+        [worker] = [item for item in transcript if item['role'] == 'route']
+        self.assertEqual((worker['mode'], worker['status'], worker['orchestrated']), ('explore', 'done', True))
+        self.assertEqual(next(item['content'] for item in reversed(transcript) if item['role'] == 'assistant'), 'Some ideas.')
+        self.assertIn('Explore approaches', self.fake.requests[1]['messages'][0]['content'])
 
 
 class OfflineLockTests(GuiCase):

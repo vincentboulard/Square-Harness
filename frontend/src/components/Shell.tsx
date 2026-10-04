@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react'
-import { api, type TaskSummary } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { api, type ChatListItem, type TaskSummary } from '../api'
+import { chatDeleteBlocked } from '../chatDeletion'
 import { ago, duration } from '../format'
 import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
 import { href, notebook, RAIL, type Mode, type Route } from '../router'
-import { applyTheme, readTheme, useApp, type AppState, type Theme } from '../store'
-import { Modal } from './common'
+import { applyTheme, deleteConversation, readTheme, useApp, type AppState, type Theme } from '../store'
+import { ErrorNote, Modal } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline } from './Markdown'
-import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon } from './Icons'
+import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
 
 export function BrandMark({ size = 32 }: { size?: number }) {
@@ -166,26 +167,7 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
     )
   }
   if (info.kind === 'chat' || info.kind === 'free') {
-    if (!app.chats) return <p className="side-empty muted">Loading…</p>
-    // Every conversation lives here, including critiques and explorations from earlier versions.
-    const chats = app.chats
-    if (!chats.length) return <p className="side-empty muted">{info.empty}</p>
-    return (
-      <>
-        {chats.map((chat) => (
-          <a key={chat.id} href={href(chat.kind, chat.id)} className={'side-item side-item-chat' + (route.id === chat.id ? ' side-item-active' : '')}>
-            <span className="side-body">
-              <span className="side-name"><Inline limit={110}>{chat.title}</Inline></span>
-              <span className="side-meta">
-                {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
-                <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
-                <span className="side-time">{ago(chat.updated_at)}</span>
-              </span>
-            </span>
-          </a>
-        ))}
-      </>
-    )
+    return <ChatSideList route={route} app={app} />
   }
   if (!app.research) return <p className="side-empty muted">Loading…</p>
   const jobs = app.research.filter((job) => job.kind === info.mode)
@@ -208,6 +190,99 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
         )
       })}
     </>
+  )
+}
+
+function ChatSideList({ route, app }: { route: Route; app: AppState }) {
+  const [selected, setSelected] = useState<ChatListItem | null>(null)
+  const opener = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (selected && app.chats && !app.chats.some((chat) => chat.id === selected.id)) setSelected(null)
+  }, [app.chats, selected])
+  // Every conversation lives here, including critiques and explorations from earlier versions.
+  if (!app.chats) return <p className="side-empty muted">Loading…</p>
+  return (
+    <>
+      {!app.chats.length && <p className="side-empty muted">{MODES.free.empty}</p>}
+      {app.chats.map((chat) => {
+        const blocked = chatDeleteBlocked(app.snapshot, chat.id)
+        return (
+          <div key={chat.id} className={'side-chat-row' + (route.id === chat.id ? ' side-item-active' : '')}>
+            <a href={href(chat.kind, chat.id)} className="side-item side-item-chat" aria-current={route.id === chat.id ? 'page' : undefined}>
+              <span className="side-body">
+                <span className="side-name"><Inline limit={110}>{chat.title}</Inline></span>
+                <span className="side-meta">
+                  {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
+                  <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
+                  <span className="side-time">{ago(chat.updated_at)}</span>
+                </span>
+              </span>
+            </a>
+            <button type="button" className="icon-btn side-delete" disabled={blocked}
+              aria-label={`Delete conversation: ${chat.title}${blocked ? '. Pause or cancel its work first.' : ''}`}
+              title={blocked ? 'Pause this conversation or cancel its queued work before deleting it.' : 'Delete conversation'}
+              onClick={(event) => { opener.current = event.currentTarget; setSelected(chat) }}>
+              <TrashIcon size={17} />
+            </button>
+          </div>
+        )
+      })}
+      {selected && <DeleteChatDialog key={selected.id} chat={selected} app={app} opener={opener.current} onClose={() => setSelected(null)} />}
+    </>
+  )
+}
+
+function DeleteChatDialog({ chat, app, opener, onClose }: { chat: ChatListItem; app: AppState; opener: HTMLButtonElement | null; onClose: () => void }) {
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState('')
+  const body = useRef<HTMLDivElement>(null)
+  const cancel = useRef<HTMLButtonElement>(null)
+  const blocked = chatDeleteBlocked(app.snapshot, chat.id)
+  useEffect(() => {
+    if (deleting) body.current?.closest<HTMLElement>('[role="dialog"]')?.focus()
+  }, [deleting])
+  useEffect(() => {
+    const dialog = body.current?.closest<HTMLElement>('[role="dialog"]')
+    if (!dialog) return
+    dialog.tabIndex = -1
+    cancel.current?.focus()
+    const trap = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const buttons = [...dialog.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
+      const first = buttons[0]
+      const last = buttons[buttons.length - 1]
+      if (!first) { event.preventDefault(); dialog.focus() }
+      else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault(); last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+        event.preventDefault(); first.focus()
+      }
+    }
+    dialog.addEventListener('keydown', trap)
+    return () => { dialog.removeEventListener('keydown', trap); if (opener?.isConnected) opener.focus() }
+  }, [opener])
+  async function remove() {
+    if (blocked || deleting) return
+    setDeleting(true)
+    setError('')
+    try { await deleteConversation(chat.id); onClose() }
+    catch (reason) { setError((reason as Error).message); setDeleting(false) }
+  }
+  return (
+    <Modal title="Delete conversation?" onClose={deleting ? undefined : onClose}>
+      <div ref={body}>
+        <p className="delete-chat-title"><strong><Inline>{chat.title}</Inline></strong></p>
+        <p>The conversation and its messages will be permanently deleted. Saved proofs, reports and files will remain.</p>
+        {blocked && <p className="muted">Pause this conversation or cancel its queued work before deleting it.</p>}
+        <ErrorNote>{error}</ErrorNote>
+        <div className="modal-actions">
+          <button ref={cancel} type="button" className="btn" disabled={deleting} onClick={onClose}>Cancel</button>
+          <button type="button" className="btn btn-delete" disabled={blocked || deleting} onClick={remove}>
+            <TrashIcon size={16} /> {deleting ? 'Deleting…' : 'Delete conversation'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 

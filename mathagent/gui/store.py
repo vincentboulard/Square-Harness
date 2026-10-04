@@ -15,7 +15,7 @@ import tempfile
 import threading
 import uuid
 
-from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now
+from ..ledger import ProofStore, _ID, _ARTIFACT, _atomic_write, _directory, _read, _regular, _now, _sync_directory
 from ..research import _job_directory, _read_state as _read_research
 from ..tools import READ_GROUPS, SKIP, TEXT
 from ..writeup import TEMPLATE_SUFFIXES
@@ -460,6 +460,39 @@ def load_chat(root, chat_id):
 
 
 @_locked_chat
+def delete_chat(root, chat_id):
+    """Remove one saved conversation, preserving jobs and workspace sources.
+
+    Chat calls have no separate disk streams: their transcript and Assistant
+    checkpoint live in this JSON. Proof/research stream files belong to jobs.
+    The Hub guards active work before calling this storage operation.
+    """
+    if not isinstance(chat_id, str) or not _ID.fullmatch(chat_id):
+        raise ValueError('Invalid chat ID')
+    private = Path(root) / '.mathagent'
+    # Check dangling directory links too; _chats normally treats an absent
+    # chats directory as a workspace with no saved conversations.
+    if private.is_symlink() or (private / 'chats').is_symlink():
+        raise ValueError('Refusing symlink in chat storage')
+    base = _chats(root)
+    if base is None:
+        raise NotFound('Unknown chat')
+    path = base / (chat_id + '.json')
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        raise NotFound('Unknown chat') from None
+    _regular(path)
+    load_chat(root, chat_id)  # Validate the record's identity before deletion.
+    path.unlink()
+    _sync_directory(base)
+    with _cache_lock:
+        for key in [key for key in _cache if key[0] == str(path)]:
+            del _cache[key]
+    return {'id': chat_id, 'deleted': True}
+
+
+@_locked_chat
 def update_chat_settings(root, chat_id, *, think=None, online=None):
     chat = load_chat(root, chat_id)
     if think is not None:
@@ -575,6 +608,24 @@ def update_item(root, chat_id, index, **fields):
     chat['transcript'][index].update(fields)
     _save_chat(root, chat)
     return chat['transcript'][index]
+
+
+@_locked_chat
+def save_assistant(root, chat_id, state):
+    """Checkpoint the parent and its child identities in the same atomic chat file."""
+    chat = load_chat(root, chat_id)
+    chat['assistant_state'] = state
+    _save_chat(root, chat)
+
+
+def assistant_view(chat):
+    state = chat.get('assistant_state') or {}
+    status = state.get('status')
+    status = 'paused' if status in ('interrupted', 'incomplete') else status
+    budget = state.get('budget') or {}
+    return {'assistant_status': status,
+            'assistant_budget': {'tokens': _budget(budget.get('tokens', 0), budget.get('max_tokens', 60000)),
+                                 'seconds': _budget(round(budget.get('seconds', 0), 1), budget.get('max_seconds', 900))}}
 
 
 # -- workspace settings, folders, uploads and templates -------------------------------

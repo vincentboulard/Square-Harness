@@ -62,6 +62,7 @@ export type TaskSummary = {
   id: string
   kind: 'proof' | 'research' | 'chat'
   target: string | null
+  origin_chat?: string | null
   label: string
   title: string
   state: TaskState
@@ -84,7 +85,7 @@ export type LiveStep =
   | { type: 'call'; thinking: string; text: string }
   | { type: 'tool' | 'result' | 'notice'; text: string }
 
-export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' }
+export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' | 'free' }
 
 export type Activity = { kind: 'notice' | 'tool' | 'result'; text: string; time: number }
 
@@ -300,16 +301,18 @@ export type TranscriptItem = {
   tool_name?: string
   discarded?: boolean
   files?: string[]
-  mode?: RouteMode | 'clarify'
+  mode?: RouteMode | 'clarify' | 'free'
   request?: string
   reason?: string
   question?: string
-  status?: 'proposed' | 'starting' | 'queued' | 'started' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
+  status?: 'proposed' | 'starting' | 'queued' | 'started' | 'done' | 'failed' | 'cancelled' | 'stopped' | 'dismissed'
   job_id?: string
   task?: string
   error?: string | null
   missing?: string[]
   effort?: string
+  orchestrated?: boolean
+  outcome?: string
 }
 
 export type Chat = {
@@ -321,6 +324,8 @@ export type Chat = {
   updated_at: string
   transcript: TranscriptItem[]
   context_messages: number
+  assistant_status?: 'running' | 'paused' | 'complete' | 'incomplete' | 'budget_exhausted'
+  assistant_budget?: { tokens: Budget; seconds: Budget }
 }
 
 export type StreamChunk = {
@@ -431,12 +436,14 @@ export const api = {
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
   route: (id: string, content: string, files: string[]) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files }),
+  resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),
   cancelRoute: (id: string, index: number) => post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/cancel`),
   dismissRoute: (id: string, index: number) => post<{ item: TranscriptItem }>(`/api/chats/${id}/routes/${index}/dismiss`),
   chats: () => get<{ chats: ChatListItem[] }>('/api/chats'),
   chat: (id: string) => get<Chat>(`/api/chats/${id}`),
+  deleteChat: (id: string) => request<{ deleted: string }>('DELETE', `/api/chats/${id}`),
   createChat: (mode: string, think?: boolean, online?: boolean) => post<Chat>('/api/chats', { mode, think, online }),
   chatSettings: (id: string, settings: { think?: boolean; online?: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
   send: (id: string, content: string, files: string[] = []) => post<{ task: TaskSummary }>(`/api/chats/${id}/messages`, { content, files }),

@@ -323,7 +323,19 @@ def chat_create(h, body):
 
 @route('GET', '/api/chats/' + UUID)
 def chat(h, body, id):
-    return _chat_view(store.load_chat(h.server.hub.root, id))
+    hub = h.server.hub
+    result = _chat_view(store.load_chat(hub.root, id))
+    if result['assistant_status'] == 'running':
+        snapshot = hub.snapshot()
+        tasks = ([snapshot['task']] if snapshot['task'] else []) + snapshot['queue']
+        if not any(task['target'] == id and task['state'] in ('starting', 'running', 'pausing', 'queued') for task in tasks):
+            result['assistant_status'] = 'paused'
+    return result
+
+
+@route('DELETE', '/api/chats/' + UUID)
+def chat_delete(h, body, id):
+    return h.server.hub.delete_chat(id)
 
 
 @route('POST', '/api/chats/' + UUID + '/settings')
@@ -346,6 +358,11 @@ def chat_message(h, body, id):
 def chat_route(h, body, id):
     h.server.hub.route(id, _text(body, 'content', 60000), _files(body, 'files'))
     return {'ok': True}
+
+
+@route('POST', '/api/chats/' + UUID + '/assistant/resume')
+def assistant_resume(h, body, id):
+    return {'task': h.server.hub.resume_assistant(id).summary()}
 
 
 @route('POST', '/api/chats/' + UUID + r'/routes/(?P<index>\d{1,6})/start')
@@ -460,7 +477,7 @@ def chat_review(h, body, id):
 def _chat_view(chat):
     return {'id': chat['id'], 'mode': chat['mode'], 'title': chat['title'], 'settings': chat['settings'],
             'created_at': chat['created_at'], 'updated_at': chat['updated_at'],
-            'transcript': chat['transcript'], 'context_messages': len(chat['history'])}
+            'transcript': chat['transcript'], 'context_messages': len(chat['history']), **store.assistant_view(chat)}
 
 
 # -- HTTP plumbing ------------------------------------------------------------

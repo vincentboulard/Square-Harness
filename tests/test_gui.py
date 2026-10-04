@@ -24,16 +24,17 @@ from mathagent.ledger import ProofStore
 MODEL = 'test-model:latest'
 
 
-def text(content, eval_count=20, chunks=1):
+def text(content, eval_count=20, chunks=1, prompt_eval_count=200):
     size = max(1, len(content) // chunks)
     parts = [content[i:i + size] for i in range(0, len(content), size)] or ['']
     events = [{'message': {'content': part}, 'done': False} for part in parts[:-1]]
-    return events + [{'message': {'content': parts[-1]}, 'done': True, 'done_reason': 'stop', 'eval_count': eval_count}]
+    return events + [{'message': {'content': parts[-1]}, 'done': True, 'done_reason': 'stop',
+                      'eval_count': eval_count, 'prompt_eval_count': prompt_eval_count}]
 
 
 def tool(name, arguments):
     return [{'message': {'content': '', 'tool_calls': [{'function': {'name': name, 'arguments': arguments}}]},
-             'done': True, 'done_reason': 'stop', 'eval_count': 8}]
+             'done': True, 'done_reason': 'stop', 'eval_count': 8, 'prompt_eval_count': 200}]
 
 
 class FakeOllama:

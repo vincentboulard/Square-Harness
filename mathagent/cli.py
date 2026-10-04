@@ -143,6 +143,11 @@ def parser():
     p.add_argument('--predict', type=int, default=4096,
                    help='Ordinary-chat output limit, including thinking; proof has separate limits')
     p.add_argument('--max-rounds', type=int, default=8, help='Tool rounds per ordinary chat query (not proof rounds)')
+    p.add_argument('--assistant-concurrency', type=int, default=2,
+                   help='Simultaneous Assistant workers on vLLM/OpenAI-compatible servers (1–4; other backends use 1)')
+    p.add_argument('--assistant-tokens', type=int, default=60000, help='Shared generated-token budget per Assistant turn')
+    p.add_argument('--assistant-input-tokens', type=int, default=240000, help='Shared input-token budget per Assistant turn')
+    p.add_argument('--assistant-seconds', type=float, default=900, help='Shared active-time budget per Assistant turn')
     p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
     p.add_argument('--proof-tokens', type=int, default=120000, help='Total generated-token ceiling, including all thinking and verification')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
@@ -222,6 +227,10 @@ def main():
         p.error('Use temperature 0–2, top-p in (0, 1], and seed in [0, 2**31)')
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         p.error('Request timeout must be finite and positive')
+    if (not 1 <= args.assistant_concurrency <= 4 or args.assistant_tokens < 4096
+            or args.assistant_input_tokens < 4096 or not math.isfinite(args.assistant_seconds)
+            or args.assistant_seconds <= 0):
+        p.error('Use assistant-concurrency 1–4, assistant token budgets >= 4096, and finite assistant-seconds > 0')
     if args.ctx < 2048 or not 0 < args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
         p.error('Use ctx >= 2048, 0 < predict < ctx - 1024, and 1 <= max-rounds <= 32')
     if (not 1 <= args.proof_rounds <= 100 or args.proof_tokens < 512

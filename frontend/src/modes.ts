@@ -14,8 +14,8 @@ export type ModeInfo = {
 // ∃ search for existence, [1] a citation, ¶ an edited manuscript, § a written section.
 export const MODES: Record<Mode, ModeInfo> = {
   free: {
-    mode: 'free', label: 'Default', glyph: '∀', kind: 'free',
-    summary: 'Ask anything. The model picks the workflow and its effort and starts at once; cancel it if needed.',
+    mode: 'free', label: 'Assistant', glyph: '∀', kind: 'free',
+    summary: 'Discuss mathematics, get a quick answer, or work through a harder task with focused help.',
     newLabel: 'New conversation', empty: 'No conversations yet.',
   },
   prove: {
@@ -23,7 +23,7 @@ export const MODES: Record<Mode, ModeInfo> = {
     summary: 'Solve the whole problem, review the written proof, repair a concrete objection.',
     newLabel: 'New proof', empty: 'No proofs yet in this workspace.',
   },
-  // Not in the rail: the Default notebook answers with these, and older chats stay readable.
+  // Not in the rail: the Assistant can use these, and older chats stay readable.
   critic: {
     mode: 'critic', label: 'Critique', glyph: '⊥', kind: 'chat',
     summary: 'Look for the first unjustified step and try counterexamples.',

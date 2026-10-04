@@ -5,6 +5,7 @@ import {
   type ChatListItem, type LiveStep, type ProofListItem, type ResearchListItem,
   type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity,
 } from './api'
+import { chatDeleteBlocked, deletedChatDestination, withoutDeletedChat } from './chatDeletion'
 
 export type Connection = 'connecting' | 'open' | 'reconnecting'
 
@@ -26,6 +27,7 @@ type ServerEvent =
   | { type: 'approval'; seq: number; state: 'pending' | 'approved' | 'denied'; approval: Approval | { id: string; task: string } }
   | { type: 'chat'; seq: number; chat: string; task: string; kind: 'start' | 'delta' | 'end' | 'tool' | 'result' | 'notice'; thinking?: string; text?: string }
   | { type: 'chat_saved'; seq: number; chat: string }
+  | { type: 'chat_deleted'; seq: number; chat: string }
   | { type: 'job'; seq: number; job: 'proof' | 'research'; id: string; status: string; phase: string | null }
   | ({ type: 'stream'; seq: number; job: 'proof' | 'research'; id: string; role: string } & StreamChunk)
   | { type: 'queue'; seq: number; queue: TaskSummary[] }
@@ -87,21 +89,58 @@ export function onStream(job: string, id: string, file: string, listener: Stream
 // -- lists ---------------------------------------------------------------------
 
 let listTimer: number | undefined
+let listGeneration = 0
+const deletedChats = new Set<string>()
+function resetChatDeletionCache() {
+  deletedChats.clear()
+  ++listGeneration
+}
 export function refreshLists(delay = 0) {
   window.clearTimeout(listTimer)
+  const generation = ++listGeneration
   listTimer = window.setTimeout(async () => {
     try {
       const [proofs, research, chats] = await Promise.all([api.proofs(), api.researches(), api.chats()])
-      set({ proofs: proofs.jobs, research: research.jobs, chats: chats.chats })
+      if (generation !== listGeneration) return
+      set({ proofs: proofs.jobs, research: research.jobs, chats: chats.chats.filter((chat) => !deletedChats.has(chat.id)) })
     } catch (error) {
       if (!(error instanceof ApiError && error.status === 401)) console.warn(error)
     }
   }, delay)
 }
 
+function forgetChat(id: string, seq?: number) {
+  deletedChats.add(id)
+  set((s) => {
+    const ticks = { ...s.ticks }
+    delete ticks[id]
+    return {
+      chats: s.chats?.filter((chat) => chat.id !== id) ?? null,
+      ticks,
+      snapshot: { ...withoutDeletedChat(s.snapshot, id), seq: Math.max(s.snapshot.seq, seq || 0) },
+    }
+  })
+  const destination = deletedChatDestination(window.location.hash, id)
+  if (destination) window.location.hash = destination
+  refreshLists()
+}
+
+export async function deleteConversation(id: string) {
+  if (chatDeleteBlocked(state.snapshot, id)) {
+    throw new Error('Pause this conversation or cancel its queued work before deleting it.')
+  }
+  const result = await api.deleteChat(id)
+  forgetChat(result.deleted)
+}
+
 export async function refreshStatus() {
   try {
-    set({ status: await api.status() })
+    const status = await api.status()
+    if (state.status && state.status.workspace !== status.workspace) {
+      resetChatDeletionCache()
+      refreshLists()
+    }
+    set({ status })
   } catch {
     /* connection state already tells the user */
   }
@@ -117,7 +156,7 @@ async function refreshSnapshot() {
     const snapshot = await api.task()
     const pending = buffered || []
     buffered = null
-    set({ snapshot })
+    set({ snapshot: [...deletedChats].reduce(withoutDeletedChat, snapshot) })
     pending.filter((event) => event.seq > snapshot.seq).forEach(handle)
   } catch {
     buffered = null
@@ -146,13 +185,14 @@ let instance = ''
 
 function handle(event: ServerEvent) {
   // A task event (such as a new job's ID) may be newer than the snapshot being fetched.
-  if (buffered && (event.type === 'chat' || event.type === 'activity' || event.type === 'approval' || event.type === 'task')) {
+  if (buffered && (event.type === 'chat' || event.type === 'chat_deleted' || event.type === 'activity' || event.type === 'approval' || event.type === 'task')) {
     buffered.push(event)
     return
   }
   switch (event.type) {
     case 'hello':
       if (event.resync || (instance && instance !== event.instance)) {
+        if (instance && instance !== event.instance) resetChatDeletionCache()
         refreshAll()
       }
       instance = event.instance
@@ -201,6 +241,9 @@ function handle(event: ServerEvent) {
       refreshLists(100)
       bump(event.chat)
       break
+    case 'chat_deleted':
+      forgetChat(event.chat, event.seq)
+      break
     case 'job':
       refreshLists(400)
       bump(event.id)
@@ -222,6 +265,7 @@ function handle(event: ServerEvent) {
       break
     case 'workspace':
       // Jobs and chats belong to a folder: leave any page from the previous one.
+      resetChatDeletionCache()
       window.location.hash = window.location.hash.split('/').slice(0, 2).join('/') || '#/free'
       refreshAll()
       break
