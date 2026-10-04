@@ -8,7 +8,7 @@ several separate jobs; each becomes its own suggestion with a suggested effort.
 import json
 import re
 
-JOB_MODES = ('prove', 'critic', 'explore', 'literature', 'referee', 'writeup')
+JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'writeup')
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'poincare')
 MAX_TASKS = 4
@@ -40,10 +40,15 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   given argument, proof or claim for gaps and counterexamples.
 - explore: open discussion of approaches, ideas, background or connections.
 - prove: a bounded proof search for one precise mathematical statement to be proved.
-- literature: a bibliographical report comparing published results on a topic.
+- check: find one or two precise references (a book or paper and the theorem or section) for a
+  specific known result, or check a given citation, e.g. "find a reference for elliptic regularity
+  with Neumann conditions", "where is the Rellich theorem proved?", "is Theorem 9.26 of Brezis about this?".
+- literature: a reading list or map of the literature on a topic (what to read, surveys, core papers by
+  theme, recent developments), e.g. "what should I read on…", "survey the literature on…".
 - referee: a review report assessing a manuscript file the user names or attaches.
 - writeup: turn notes, a draft or a PDF the user names or attaches into a clean LaTeX document.
-A question (why, what, how, is it true that) is answered with critic or explore. Choose
+A question (why, what, how, is it true that) is answered with critic or explore. A request for a
+reference or citation to a known result is a check, not a literature report. Choose
 prove, literature, referee or writeup only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
 Return one task per separate piece of work, in the order they should run. A single question,
@@ -61,8 +66,8 @@ poincare only when the user asks for the maximum effort.
 When the message is too ambiguous to choose, return no tasks and ask one short `question`;
 otherwise `question` is empty. Return only JSON matching the schema."""
 
-FALLBACK_QUESTION = ('Should I prove a statement, check an argument, explore an idea, write a '
-                     'literature report or a review of a manuscript, or write up notes in LaTeX?')
+FALLBACK_QUESTION = ('Should I prove a statement, check an argument, explore an idea, find a reference, '
+                     'write a literature report or a review of a manuscript, or write up notes in LaTeX?')
 
 
 # In JSON, "\frac" written with one backslash reads as a form feed and "rac"; small models

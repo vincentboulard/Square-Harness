@@ -17,6 +17,8 @@ from ..backends import LlamaCpp, OpenAICompatible, create_client
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
+from ..litreview import ReviewRunner
+from ..refcheck import CheckRunner, nested_checker
 from ..research import ResearchRunner
 from ..router import JOB_MODES, clarify, classify
 from ..tools import Workspace
@@ -26,7 +28,7 @@ from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
 # Task labels shown in the interface; the engine's kind stays 'referee'.
-LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up'}
+LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'check': 'Literature check'}
 
 
 class Busy(Exception):
@@ -523,6 +525,10 @@ class Hub:
         def work(task):
             agent, _ = self._engine(task, mode=kind, online=online)
             self._ensure_model(agent)
+            if kind == 'literature':  # a verified, themed reading list
+                runner = ReviewRunner(agent)
+                runner.emit = self._job_emit(task, runner, 'research')
+                return runner.start(goal, source_files=list(source_files), **budgets)
             runner = ResearchRunner(agent)
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.start(goal, kind=kind, source_files=list(source_files), **budgets)
@@ -547,7 +553,8 @@ class Hub:
 
     def resume_research(self, job_id, queue=False):
         state = store.research_state(self.root, job_id)
-        runner_class = WriteupRunner if state['kind'] == 'writeup' else ResearchRunner
+        runner_class = (WriteupRunner if state['kind'] == 'writeup' else
+                        ReviewRunner if state.get('pipeline') == ReviewRunner.PIPELINE else ResearchRunner)
         # A job keeps the network choice it started with (never more, per the runner).
         online = bool(state['settings'].get('online')) and not self.online_locked
 
@@ -582,6 +589,8 @@ class Hub:
             agent.history = fresh['history']
             self._ensure_model(agent)
             capture = ChatCapture(self, task, chat_id, agent)
+            if agent.workspace.literature.online:
+                agent.workspace.checker = nested_checker(agent, capture.emit)
             try:
                 answer = agent.run(prompt, capture.emit)
             except BaseException as exc:
@@ -594,6 +603,44 @@ class Hub:
         live = {'chat': chat_id, 'kind': 'message', 'user': content if echo_user else '', 'steps': [], 'mode': mode}
         label = 'Critique' if mode == 'critic' else 'Exploration'
         return self._begin('chat', chat_id, label, content, work, live, queue=queue, on_update=on_update)
+
+    def check(self, chat_id, question, *, effort='medium', on_update=None, queue=False):
+        """A literature check answered in a Default conversation (its evidence stays in .mathagent/checks)."""
+        store.load_chat(self.root, chat_id)
+        if not isinstance(question, str) or not question.strip() or len(question) > 8000:
+            raise ValueError('Describe the result to find a reference for, in at most 8000 characters')
+        root = self.root
+
+        def work(task):
+            fresh = store.load_chat(root, chat_id)
+            online = bool(fresh['settings'].get('online')) and not self.online_locked
+            agent, _ = self._engine(task, mode='check', online=online)
+            self._ensure_model(agent)
+            capture = ChatCapture(self, task, chat_id, agent)
+
+            def emit(kind, value):
+                # Steps and tool calls only: raw search results would flood the conversation.
+                if kind in ('notice', 'tool'):
+                    capture.emit(kind, value)
+            runner = CheckRunner(agent, emit=emit)
+            try:
+                result = runner.start(question, effort=effort)
+            except BaseException as exc:
+                self._discarded(chat_id, '', exc)
+                raise
+            state = runner.state
+            answer = state.get('answer') or runner._compose()
+            if state['status'] in ('paused', 'error', 'budget_exhausted', 'budget_violation'):
+                answer = f'*The check stopped early ({state.get("stop_reason", state["status"])}).*\n\n' + answer
+            if not online:
+                answer = '*Online search is off for this conversation, so only cached sources were used.*\n\n' + answer
+            answer += f'\n\nFull log: `.mathagent/checks/{result["id"]}/report.md`'
+            history = fresh['history'] + [{'role': 'user', 'content': question}, {'role': 'assistant', 'content': answer}]
+            store.commit_turn(root, chat_id, history, [], [], echo_user=False, mode='check')
+            self.bus.publish('chat_saved', chat=chat_id)
+            return {'status': 'done', 'answer': answer}
+        live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'check'}
+        return self._begin('chat', chat_id, LABELS['check'], question, work, live, queue=queue, on_update=on_update)
 
     def review(self, chat_id):
         def last_exchange(session):
@@ -744,7 +791,7 @@ class Hub:
         if chat['transcript'][index].get('status') not in ('proposed', 'failed', 'cancelled'):
             raise ValueError('This suggestion has already started')
         if mode not in JOB_MODES:
-            raise ValueError('Choose prove, critic, explore, literature, referee or writeup')
+            raise ValueError('Choose prove, critic, explore, check, literature, referee or writeup')
         if not isinstance(request, str) or not request.strip():
             raise ValueError('The request cannot be empty')
         files = self.check_files(list(files))
@@ -779,6 +826,9 @@ class Hub:
             elif mode in ('literature', 'referee'):
                 task = self.start_research(mode, request, source_files=files, online=online, queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
+            elif mode == 'check':
+                task = self.check(chat_id, request, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',
+                                  queue=True, on_update=on_update)
             elif mode == 'writeup':
                 task = self.start_writeup(request, source_files=files, notes='' if files else request,
                                           queue=True, on_update=on_update,

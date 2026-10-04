@@ -1,7 +1,7 @@
 // A small stroke icon set; everything else in the interface is typographic.
 import type { ReactNode } from 'react'
 
-type IconProps = { size?: number; title?: string }
+type IconProps = { size?: number | string; title?: string }
 
 function Icon({ size = 18, title, children }: IconProps & { children: ReactNode }) {
   return (
@@ -27,6 +27,8 @@ export const FileIcon = (p: IconProps) => <Icon {...p}><path d="M7 3h7l4 4v14H7z
 export const PinIcon = (p: IconProps) => <Icon {...p}><path d="M9 4h6l-1 6 3 3H7l3-3z" /><path d="M12 13v7" /></Icon>
 export const CheckIcon = (p: IconProps) => <Icon {...p}><path d="M5 12.5l4.5 4.5L19 7" /></Icon>
 export const PhoneIcon = (p: IconProps) => <Icon {...p}><rect x="7" y="2.5" width="10" height="19" rx="2" /><path d="M11 18.5h2" /></Icon>
+// A magnifying glass: the Literature notebook's cover.
+export const SearchIcon = (p: IconProps) => <Icon {...p}><circle cx="10.5" cy="10.5" r="6" /><path d="M15 15l5.5 5.5" /></Icon>
 export const BackIcon = (p: IconProps) => <Icon {...p}><path d="M15 6l-6 6 6 6" /></Icon>
 // A panel with its edge: the side a panel slides to (left list, right overview).
 export const PanelLeftIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M9.5 4.5v15" /><path d="M16 10l-2 2 2 2" /></Icon>

@@ -2,9 +2,9 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../api'
 import { Collapse, ErrorNote, FilePicker, NumberField, Toggle } from '../components/common'
 import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effort'
-import { MODES } from '../modes'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
+import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
 import { BusyNote, queuedMessage } from './shared'
 
@@ -12,10 +12,10 @@ type Kind = 'literature' | 'referee'
 
 const COPY: Record<Kind, { title: string; lede: string; placeholder: string; pinHint: string }> = {
   literature: {
-    title: 'Write a literature report',
-    lede: 'The harness plans a few searches, reads exact passages, and drafts a Markdown report that cites the lines it read. A fresh model pass then reviews the draft. The result is a draft for you to check, not an exhaustive survey.',
-    placeholder: 'Review observability inequalities for strongly continuous semigroups. Compare hypotheses and conclusions, and say which papers were actually read.',
-    pinHint: 'Optional. Pinned notes or papers are read locally and never uploaded.',
+    title: 'Build a reading list',
+    lede: 'The harness searches Crossref, arXiv, zbMATH and Semantic Scholar, follows the citations of the key works, and lets the model screen the candidates, group them into entry points and themes, and say why each one is there. Every entry is a real record with its identifier; nothing is recalled from memory.',
+    placeholder: 'Observability and control of the heat equation: what should a graduate student read, from the classical results to recent work?',
+    pinHint: 'Optional. A pinned manuscript helps scope the topic; it is read locally and never uploaded.',
   },
   referee: {
     title: 'Review a manuscript',
@@ -103,7 +103,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
     <div className="sheet paper">
       <form className="sheet-inner compose" onSubmit={submit} noValidate>
         <div className="entry">
-          <span className="in-margin margin-glyph" aria-hidden="true">{MODES[kind].glyph}</span>
+          <span className="in-margin margin-glyph" aria-hidden="true"><Glyph mode={kind} /></span>
           <div>
             <h1 className="page-title">{copy.title}</h1>
             <p className="lede">{copy.lede}</p>
@@ -134,7 +134,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
           <div>
             {d && <EffortSlider kind="research" defaults={d} level={level} onLevel={chooseLevel} custom={custom} />}
             <Toggle label="Search online" checked={searching} onChange={setOnline} disabled={status?.online_locked}
-              hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : 'arXiv, Semantic Scholar and OpenAlex; web search needs a Brave key.'} />
+              hint={status?.online_locked ? 'Launched with --offline: online search stays off.' : (kind === 'literature' ? 'Crossref, arXiv, zbMATH and Semantic Scholar.' : 'arXiv, Semantic Scholar and zbMATH; web search needs a Brave key.')} />
             <Collapse summary="Advanced limits">
               <div className="field-grid">
                 <NumberField label="Investigation rounds" value={rounds} onChange={setRounds} min={1} max={100} />

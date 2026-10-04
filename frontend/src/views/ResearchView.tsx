@@ -11,9 +11,12 @@ import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
 
-const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done'] as const
+const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
+// A literature review builds a reading list: code searches and follows citations, the model screens and organises.
+const LIST_STEPS = ['scope', 'sweep', 'graph', 'screen', 'organise', 'annotate', 'write', 'done']
 const STEP_NAMES: Record<string, string> = {
   plan: 'Plan', investigate: 'Investigate', draft: 'Draft', review: 'Review', revise: 'Revise', done: 'Done',
+  scope: 'Scope', sweep: 'Search', graph: 'Citations', screen: 'Screen', organise: 'Organise', annotate: 'Annotate', write: 'Write',
 }
 type Sources = { id: string; path: string; sha256: string; content: string }[]
 
@@ -86,17 +89,18 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const current = STEPS.indexOf(data.phase as typeof STEPS[number])
+  const steps = data.pipeline ? LIST_STEPS : STEPS
+  const current = steps.indexOf(data.phase === 'plan' && data.pipeline ? 'scope' : data.phase)
   return (
     <header className="job-head">
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">{data.kind === 'referee' ? 'Review' : 'Literature report'}</span>
+        <span className="job-stop">{data.kind === 'referee' ? 'Review' : data.pipeline ? 'Reading list' : 'Literature report'}</span>
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">
-        {STEPS.map((step, index) => {
+        {steps.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
           return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{STEP_NAMES[step]}</li>
         })}
@@ -130,18 +134,20 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
       {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} />}
       {issues.length > 0 && (
         <div className="checks-note">
-          <p className="objection-label">The controller could not confirm every citation</p>
+          <p className="objection-label">{data.pipeline ? 'The self-check found gaps' : 'The controller could not confirm every citation'}</p>
           <ul>{issues.slice(0, 6).map((issue) => <li key={issue}>{issue}</li>)}</ul>
           {issues.length > 6 && <p className="small">{issues.length - 6} more in Checks.</p>}
         </div>
       )}
       {data.draft ? (
         <>
-          <p className="caveat">Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.</p>
+          <p className="caveat">{data.pipeline
+            ? 'Every entry is a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as returned. The model chose, grouped and annotated them from titles and abstracts.'
+            : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
           <Markdown className="report-text" onCite={onCite} flagged={flagged}>{data.draft}</Markdown>
         </>
       ) : (
-        <p className="empty-note">No draft yet. {data.running ? 'The draft follows the investigation.' : 'The plan and working notes are under Plan and notes.'}</p>
+        <p className="empty-note">No draft yet. {data.running ? (data.pipeline ? 'The list is written once the candidates are screened and organised.' : 'The draft follows the investigation.') : 'The plan and working notes are under Plan and notes.'}</p>
       )}
     </div>
   )
@@ -276,12 +282,12 @@ function Notes({ data }: { data: ResearchDetail }) {
   return (
     <div className="notes">
       <section>
-        <h3 className="section-title">Plan</h3>
+        <h3 className="section-title">{data.pipeline ? 'Scope' : 'Plan'}</h3>
         {data.plan ? <Markdown>{data.plan}</Markdown> : <p className="empty-note">No plan yet.</p>}
       </section>
       {data.notes.filter((note) => note.text.trim()).map((note, index) => (
         <section key={index}>
-          <h3 className="section-title">Working note, round {note.round}{note.complete ? '' : ', unfinished'}</h3>
+          <h3 className="section-title">{note.title || `Working note, round ${note.round}`}{note.complete ? '' : ', unfinished'}</h3>
           <Markdown>{note.text}</Markdown>
         </section>
       ))}

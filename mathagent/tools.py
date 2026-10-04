@@ -33,6 +33,9 @@ class Workspace:
         self.approve = approve
         self.allow_python = allow_python
         self.literature = literature
+        # Set by the interface for answers: runs a literature check (a nested,
+        # separately budgeted verifier) and returns its compact JSON result.
+        self.checker = None
         groups = set(READ_GROUPS) if read_types is None else set(read_types)
         if groups - set(READ_GROUPS):
             raise ValueError('Unknown file group; use tex, pdf, py or text')
@@ -163,6 +166,13 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
             output = out.read(MAX_RESULT).decode('utf-8', errors='replace')
         return f'Exit {p.returncode}; timeout={timed_out}\n{output}\n[output capped at 6000 bytes]'
 
+    def check_reference(self, statement, guesses=None):
+        if not isinstance(statement, str) or not statement.strip() or len(statement) > 2000:
+            raise ValueError('Describe the result to find a reference for, in at most 2000 characters')
+        if guesses is not None and (not isinstance(guesses, list) or not all(isinstance(g, dict) for g in guesses)):
+            raise ValueError('guesses must be a list of objects')
+        return self.checker(statement.strip(), (guesses or [])[:3])
+
     def schemas(self):
         string = {'type': 'string'}
         integer = {'type': 'integer'}
@@ -184,6 +194,16 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
                                  {'code': string}, ['code']))
         if self.literature is not None:
             result.extend(self.literature.schemas())
+        if self.checker is not None and self.literature is not None and self.literature.online:
+            guess = {'type': 'object', 'properties': {
+                'authors': {'type': 'array', 'items': string}, 'title': string, 'year': string,
+                'locator': {'type': 'string', 'description': 'Theorem, proposition or section, e.g. "Theorem 9.26"'}}}
+            result.append(schema('check_reference',
+                'Find and verify a precise reference (book or paper, and the theorem or section) for a known result. '
+                'Give the result and your best guesses of where it is stated; a separate verifier checks them against '
+                'zbMATH, Crossref, OpenCitations and open papers and returns how far each was confirmed (read, cited, located, not '
+                'found). Takes a few minutes. Use it before giving a theorem number from memory.',
+                {'statement': string, 'guesses': {'type': 'array', 'items': guess}}, ['statement']))
         return result
 
     def execute(self, name, arguments):

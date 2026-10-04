@@ -25,10 +25,12 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
 BACKEND_VERSION = 'literature-v1'
+QUOTA_HOSTS = {'api.semanticscholar.org': 'semantic_scholar'}
 MAX_BYTES = 10_000_000
 MAX_TEXT = 4_000_000
 MAX_RESULT = 8000
-TOOL_NAMES = {'search_papers', 'search_web', 'open_paper', 'read_paper', 'search_paper'}
+TOOL_NAMES = {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper'}
+PROVIDERS = ('arxiv', 'semantic_scholar', 'zbmath')
 ARXIV_ID = re.compile(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', re.I)
 DOC_ID = re.compile(r'doc-[0-9a-f]{24}')
 
@@ -55,6 +57,166 @@ def _schema(name, description, properties, required):
     return {'type': 'function', 'function': {'name': name, 'description': description,
         'parameters': {'type': 'object', 'properties': properties,
                        'required': required, 'additionalProperties': False}}}
+
+
+PLACE_WORDS = r'(?:theorem|thm|lemma|lem|proposition|prop|corollary|cor|section|sect|sec|chapter|chap|ch|remark|rem|§)'
+
+
+def _fold(text):
+    import unicodedata
+    text = unicodedata.normalize('NFKD', str(text or ''))
+    return ''.join(c for c in text if not unicodedata.combining(c)).casefold()
+
+
+def _num(number):
+    return r'(?<![\d.])' + re.escape(number) + r'(?![\d])'
+
+
+TITLE_STOP = {'theory', 'equations', 'equation', 'introduction', 'methods', 'problems', 'applications', 'second',
+              'order', 'their', 'which', 'about', 'between', 'classical', 'modern', 'edition', 'volume', 'lectures'}
+
+
+def title_words(title):
+    """Distinctive words of a title, to tell a work from the same author's other works."""
+    return [w for w in re.findall(r'[a-z]{5,}', _fold(title)) if w not in TITLE_STOP][:8]
+
+
+def bibliography_entries(lines):
+    """(key, text) for each bibliography entry such as "[5] D. Gilbarg …" or "[GT]" on its own line,
+    the text running to the next entry (at most five lines)."""
+    entries = []
+    for i, line in enumerate(lines):
+        match = re.match(r'\s*\[([^\[\]]{1,12})\]\s*(.*)', line)
+        if not match:
+            continue
+        parts = [match.group(2)] if match.group(2).strip() else []
+        for following in lines[i + 1:i + 6]:
+            if re.match(r'\s*\[[^\[\]]{1,12}\]', following):
+                break
+            parts.append(following.strip())
+        text = ' '.join(' '.join(parts).split())[:500]
+        if text:
+            entries.append((match.group(1).strip(), text))
+    return entries
+
+
+def bibliography_keys(lines, surname, title=''):
+    """Citation keys of the bibliography entries naming the author, with a year.
+    With a title, only entries sharing one of its distinctive words count (not the author's other works)."""
+    name, words, keys = _fold(surname), title_words(title), []
+    for key, text in bibliography_entries(lines):
+        folded = _fold(text)
+        if (name in folded and re.search(r'(?:19|20)\d\d', text) and (not words or any(w in folded for w in words))
+                and key not in keys):
+            keys.append(key)
+    return keys
+
+
+def bibliography_entry(lines, key):
+    """The text of the bibliography entry for a key such as 1 or Bre11 (up to the next entry)."""
+    for i, line in enumerate(lines):
+        match = re.match(r'\s*\[' + re.escape(key) + r'\]\s*(.*)', line)
+        if not match:
+            continue
+        parts = [match.group(1)] if match.group(1).strip() else []
+        for following in lines[i + 1:i + 5]:
+            if re.match(r'\s*\[[^\]]{1,12}\]', following):
+                break
+            parts.append(following.strip())
+        entry = ' '.join(' '.join(parts).split())[:400]
+        if entry:
+            return entry
+    return ''
+
+
+def cited_keys(text, number, surname, keys=()):
+    """The bibliography keys under which the text cites this number."""
+    found = [key for key, place in keyed_citations(text, keys) if re.search(_num(number), place)]
+    for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
+        for part in bracket.split(';'):
+            key, comma, place = part.partition(',')
+            if comma and _author_key(key.strip(), surname) and re.search(_num(number), place):
+                found.append(key.strip())
+    match = re.search(PLACE_WORDS + r'\.?\s*' + _num(number) + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I)
+    if match:
+        found.append(match.group(1).strip())
+    return list(dict.fromkeys(found))
+
+
+def _author_key(key, surname):
+    """An alphabetic key built from the surname, such as Bre11 or Bre for Brezis."""
+    key, name = _fold(key), _fold(surname)
+    return len(name) >= 3 and bool(re.fullmatch(r'[a-z]{2,4}[+]?\d{0,4}[a-z]?', key)) and key[:3] == name[:3]
+
+
+def keyed_citations(text, keys):
+    """(key, place) for in-text citations such as [5, Theorem 9.26] or [GT, Thm. 8.12; 7]."""
+    found = []
+    for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
+        for part in bracket.split(';'):
+            key, comma, place = part.partition(',')
+            if comma and key.strip() in keys and re.search(r'\d', place):
+                found.append((key.strip(), ' '.join(place.split())[:60]))
+    return found
+
+
+def cites_place(text, number, surname, keys=()):
+    """Whether the text cites the author's work at this number (not merely an equation (9.26))."""
+    n = _num(number)
+    if any(re.search(n, place) for _, place in keyed_citations(text, keys)):
+        return True
+    for bracket in re.findall(r'\[([^\[\]]{1,120})\]', text):
+        for part in bracket.split(';'):
+            key, comma, place = part.partition(',')
+            if comma and _author_key(key.strip(), surname) and re.search(n, place):
+                return True
+    if re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I):
+        key = re.search(PLACE_WORDS + r'\.?\s*' + n + r'\s*(?:of|in)\s*\[([^\]]{1,12})\]', text, re.I).group(1).strip()
+        return not keys or key in keys
+    return _fold(surname) in _fold(text) and re.search(PLACE_WORDS + r'\.?\s*\(?' + n, text, re.I) is not None
+
+
+def _s2_record(p):
+    ids = p.get('externalIds') or {}
+    return {'identifier': 's2:' + str(p.get('paperId', '')), 'title': _plain(p.get('title'), 300),
+            'authors': [_plain(a.get('name'), 80) for a in p.get('authors') or [] if isinstance(a, dict)][:15],
+            'year': p.get('year'), 'abstract': _plain(p.get('abstract'), 900),
+            'url': p.get('url'), 'external_ids': ids, 'doi': (ids.get('DOI') or '').lower() or None,
+            'arxiv_id': ids.get('ArXiv'), 'cited_by': p.get('citationCount'),
+            'open_access_url': (p.get('openAccessPdf') or {}).get('url')}
+
+
+def _review(text, size=2500):
+    """A zbMATH review, keeping the part that lists the chapters when it is long."""
+    text = _plain(re.sub(r'\\textit\{([^}]*)\}', r'\1', text or ''), 20000)
+    if len(text) <= size:
+        return text
+    found = re.search(r'chapter|contents|consists of|divided into|is organized', text, re.I)
+    if not found or found.start() < size - 600:
+        return text[:size]
+    start = max(600, found.start() - 200)
+    return text[:600] + ' [...] ' + text[start:start + size - 600]
+
+
+ZBMATH_HIDDEN = 'contents unavailable'  # zbMATH Open's placeholder for records it may not show
+
+
+def _zbmath_record(r):
+    source = r.get('source') or {}
+    hidden = lambda value: '' if ZBMATH_HIDDEN in str(value or '') else value
+    book = (source.get('book') or [{}])[0] or {}
+    links = [x for x in r.get('links') or [] if isinstance(x, dict)]
+    doi = next((x.get('identifier') for x in links if x.get('type') == 'doi' and x.get('identifier')), None)
+    reviews = [e.get('text') for e in r.get('editorial_contributions') or [] if isinstance(e, dict) and e.get('text')
+               and 'contents unavailable' not in e['text']]
+    return {'identifier': 'zbl:' + str(r.get('identifier') or r.get('id') or ''),
+            'title': _plain(hidden((r.get('title') or {}).get('title')), 300),
+            'authors': [_plain(a.get('name'), 80) for a in (r.get('contributors') or {}).get('authors') or []
+                        if isinstance(a, dict) and hidden(a.get('name'))][:15],
+            'year': r.get('year'), 'type': (r.get('document_type') or {}).get('description'),
+            'source': _plain(hidden(source.get('source')), 300), 'publisher': _plain(hidden(book.get('publisher')), 120) or None,
+            'doi': doi, 'url': r.get('zbmath_url'), 'review': _review(reviews[0]) if reviews else '',
+            'msc': [m.get('code') for m in r.get('msc') or [] if isinstance(m, dict) and m.get('code')][:8]}
 
 
 class _HTMLText(HTMLParser):
@@ -118,6 +280,7 @@ class LiteratureTools:
         self.online = bool(online)
         self.timeout = min(30, max(1, float(timeout)))
         self._last_request = {}
+        self.down = set()  # sources out of quota: not asked again by this instance
         self.on_budget_change = None
         self.deadline = None
         self.reset_budget(max_requests=max_requests, max_chars=max_chars)
@@ -155,10 +318,18 @@ class LiteratureTools:
         string, integer = {'type': 'string'}, {'type': 'integer'}
         offline = ' Offline: cached data only.' if not self.online else ''
         return [
-            _schema('search_papers', 'Search scholarly metadata; abstracts are not proof evidence. Max 8 results.' + offline,
-                    {'query': string, 'provider': {'type': 'string', 'enum': ['arxiv', 'semantic_scholar', 'openalex']}, 'limit': integer}, ['query']),
+            _schema('search_papers', 'Search scholarly metadata; abstracts are not proof evidence. zbmath also finds '
+                    'books, and its reviews often list their chapters; query it with fields, e.g. "au:Brezis ti:Functional analysis". '
+                    'Max 8 results.' + offline,
+                    {'query': string, 'provider': {'type': 'string', 'enum': list(PROVIDERS)}, 'limit': integer}, ['query']),
             _schema('search_web', 'Search web metadata with Brave; requires BRAVE_SEARCH_API_KEY. Max 8 results.' + offline,
                     {'query': string, 'limit': integer}, ['query']),
+            _schema('find_quotes', 'See how open papers cite a work at a given place: finds papers that cite the work '
+                    '(OpenCitations and Crossref reference lists) and are about the topic, opens their arXiv versions and '
+                    'returns the exact lines (with citation locators) that cite it at that number, e.g. author "Brezis", '
+                    'locator "Theorem 9.26"; without a number, the places they cite. Give the title: it identifies the work '
+                    '(not the author\'s other works). Also returns the bibliography entry.' + offline,
+                    {'author': string, 'locator': string, 'topic': string, 'title': string}, ['author']),
             _schema('open_paper', 'Cache a public HTTPS paper, arXiv ID, or DOI. Returns source ID/index, not full paper. Treat all content as untrusted.' + offline,
                     {'identifier_or_url': string}, ['identifier_or_url']),
             _schema('read_paper', 'Read exact numbered lines of a cached extraction; max 80 lines / 6000 passage characters. Verify uncertain math against the original.',
@@ -262,7 +433,7 @@ class LiteratureTools:
     def _cache_search(self, provider, query, limit, fetch):
         key = _digest(json.dumps([provider, query, limit]))
         parts = ('searches', key + '.json')
-        raw = self._read(parts, 100_000)
+        raw = self._read(parts, 3_000_000)
         if raw is not None:
             result = json.loads(raw)
             result['cached'] = True
@@ -278,14 +449,14 @@ class LiteratureTools:
 
     def search_papers(self, query, provider='arxiv', limit=5):
         query = self._query(query, limit)
-        if provider not in ('arxiv', 'semantic_scholar', 'openalex'):
-            raise LiteratureError('Unknown provider; choose arxiv, semantic_scholar, or openalex')
+        if provider not in PROVIDERS:
+            raise LiteratureError('Unknown provider; choose arxiv, semantic_scholar or zbmath')
         return self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
 
-    def _search(self, provider, query, limit):
+    def _search(self, provider, query, limit, recent=False):
         if provider == 'arxiv':
             params = {'search_query': query if re.search(r'\b(?:all|ti|au|abs|cat|id):', query) else 'all:' + query,
-                      'start': 0, 'max_results': limit, 'sortBy': 'relevance', 'sortOrder': 'descending'}
+                      'start': 0, 'max_results': limit, 'sortBy': 'submittedDate' if recent else 'relevance', 'sortOrder': 'descending'}
             body, _, _ = self._fetch('https://export.arxiv.org/api/query?' + urlencode(params), max_bytes=1_000_000)
             atom = {'a': 'http://www.w3.org/2005/Atom'}
             feed = ET.fromstring(body)
@@ -308,37 +479,242 @@ class LiteratureTools:
             if os.environ.get('SEMANTIC_SCHOLAR_API_KEY'):
                 headers['x-api-key'] = os.environ['SEMANTIC_SCHOLAR_API_KEY']
             params = {'query': query, 'limit': limit,
-                      'fields': 'title,authors,year,abstract,url,externalIds,openAccessPdf'}
+                      'fields': 'title,authors,year,abstract,url,externalIds,openAccessPdf,citationCount'}
             body, _, _ = self._fetch('https://api.semanticscholar.org/graph/v1/paper/search?' + urlencode(params), headers=headers, max_bytes=1_000_000)
-            records = json.loads(body).get('data', [])
-            return [{'identifier': 's2:' + str(p.get('paperId', '')), 'title': _plain(p.get('title'), 300),
-                     'authors': [_plain(a.get('name'), 80) for a in p.get('authors', [])][:15],
-                     'year': p.get('year'), 'abstract': _plain(p.get('abstract'), 900),
-                     'url': p.get('url'), 'external_ids': p.get('externalIds') or {},
-                     'open_access_url': (p.get('openAccessPdf') or {}).get('url')}
-                    for p in records[:limit]]
-        headers = {}
-        if os.environ.get('OPENALEX_API_KEY'):
-            headers['Authorization'] = 'Bearer ' + os.environ['OPENALEX_API_KEY']
-        params = {'search': query, 'per-page': limit,
-                  'select': 'id,doi,title,publication_year,authorships,primary_location,best_oa_location,abstract_inverted_index'}
-        body, _, _ = self._fetch('https://api.openalex.org/works?' + urlencode(params), headers=headers, max_bytes=1_000_000)
-        results = []
-        for p in json.loads(body).get('results', [])[:limit]:
-            inv = p.get('abstract_inverted_index') or {}
-            words = {}
-            for word, positions in inv.items():
-                for pos in positions:
-                    if type(pos) is int and 0 <= pos < 10000:
-                        words[pos] = word
-            oa, primary = p.get('best_oa_location') or {}, p.get('primary_location') or {}
-            results.append({'identifier': p.get('id'), 'doi': p.get('doi'),
-                'title': _plain(p.get('title'), 300), 'year': p.get('publication_year'),
-                'authors': [_plain((a.get('author') or {}).get('display_name'), 80) for a in p.get('authorships', [])][:15],
-                'abstract': _plain(' '.join(words[i] for i in sorted(words)), 900),
-                'url': primary.get('landing_page_url') or p.get('doi'),
-                'open_access_url': oa.get('pdf_url') or oa.get('landing_page_url')})
-        return results
+            return [_s2_record(p) for p in json.loads(body).get('data', [])[:limit] if isinstance(p, dict)]
+        if provider == 'zbmath':
+            params = {'search_string': query, 'page': 0, 'results_per_page': limit}
+            try:
+                body, _, _ = self._fetch('https://api.zbmath.org/v1/document/_search?' + urlencode(params), max_bytes=2_000_000)
+            except LiteratureError as exc:
+                if 'HTTP 404' in str(exc):
+                    return []  # zbMATH answers an empty search with 404
+                raise
+            return [_zbmath_record(r) for r in (json.loads(body).get('result') or [])[:limit] if isinstance(r, dict)]
+        raise LiteratureError('Unknown provider')
+
+    def arxiv_recent(self, query, limit=6):
+        """The newest arXiv preprints matching a query, for controller code (the research frontier)."""
+        query = self._query(query, limit)
+        return self._cache_search('arxiv-recent', query, limit, lambda: self._search('arxiv', query, limit, recent=True))['results']
+
+    def citing(self, doi, limit=10):
+        """Works citing a DOI, from Semantic Scholar, for controller code ("cited by"). Without a key its
+        shared quota is small; a refusal marks it unavailable for this session."""
+        if not isinstance(doi, str) or not re.fullmatch(r'10\.\d{4,9}/\S+', doi.strip()) or type(limit) is not int or not 1 <= limit <= 50:
+            raise LiteratureError('Give a DOI and a limit from 1 to 50')
+        doi = doi.strip().lower()
+
+        def fetch():
+            headers = {}
+            if os.environ.get('SEMANTIC_SCHOLAR_API_KEY'):
+                headers['x-api-key'] = os.environ['SEMANTIC_SCHOLAR_API_KEY']
+            params = {'fields': 'title,authors,year,abstract,url,externalIds,openAccessPdf,citationCount', 'limit': limit}
+            body, _, _ = self._fetch(f'https://api.semanticscholar.org/graph/v1/paper/DOI:{quote(doi, safe="/().-_;:")}/citations?'
+                                     + urlencode(params), headers=headers, max_bytes=2_000_000)
+            return [_s2_record(item['citingPaper']) for item in json.loads(body).get('data', [])[:limit]
+                    if isinstance(item, dict) and isinstance(item.get('citingPaper'), dict)]
+        return self._cache_search('s2-citations', doi, limit, fetch)['results']
+
+    def crossref(self, *, query=None, dois=(), limit=10, texts=False, offset=0):
+        """Crossref works for controller code: a bibliographic search, or a batch of DOIs. Free and
+        uncapped; records carry open reference lists (DOIs), used to follow citations backwards."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise LiteratureError('Crossref batches hold 1 to 100 works')
+        params = {'rows': limit, 'select': 'DOI,title,author,issued,type,container-title,is-referenced-by-count,reference,abstract'}
+        if type(offset) is int and 0 < offset <= 900:
+            params['offset'] = offset
+        if dois:
+            clean = [d.strip().lower() for d in dois if isinstance(d, str) and re.fullmatch(r'10\.\d{4,9}/\S+', d.strip())][:limit]
+            if not clean:
+                return []
+            params['filter'] = ','.join('doi:' + d.replace(',', '') for d in clean)
+        elif isinstance(query, str) and query.strip():
+            params['query.bibliographic'] = query.strip()[:300]
+        else:
+            raise LiteratureError('Give a Crossref query or DOIs')
+
+        def fetch():
+            body, _, _ = self._fetch('https://api.crossref.org/works?' + urlencode(params), max_bytes=4_000_000)
+            out = []
+            for r in (json.loads(body).get('message') or {}).get('items', [])[:limit]:
+                year = ((r.get('issued') or {}).get('date-parts') or [[None]])[0][0]
+                refs = [str(x['DOI']).lower() for x in r.get('reference') or [] if isinstance(x, dict) and x.get('DOI')]
+                out.append({'identifier': 'doi:' + str(r.get('DOI', '')).lower(), 'doi': str(r.get('DOI', '')).lower() or None,
+                            'title': _plain((r.get('title') or [''])[0], 300), 'type': r.get('type'), 'year': year,
+                            'authors': [_plain(' '.join(x for x in (a.get('given'), a.get('family')) if x), 80)
+                                        for a in r.get('author') or [] if isinstance(a, dict)][:15],
+                            'venue': _plain((r.get('container-title') or [''])[0], 120) or None,
+                            'cited_by': r.get('is-referenced-by-count'), 'references': ['doi:' + d for d in refs][:150],
+                            **({'reference_texts': [_plain(' '.join(str(x.get(k) or '') for k in (
+                                'unstructured', 'author', 'volume-title', 'article-title', 'year')), 300)
+                                for x in r.get('reference') or [] if isinstance(x, dict)][:200]} if texts else {}),
+                            'abstract': _plain(re.sub(r'<[^>]+>', ' ', r.get('abstract') or ''), 900),
+                            'url': 'https://doi.org/' + str(r.get('DOI', ''))})
+            return out
+        key = json.dumps([params.get('query.bibliographic'), params.get('filter'), params.get('offset', 0)] + (['texts'] if texts else []))
+        return self._cache_search('crossref', key, limit, fetch)['results']
+
+    def citations_of(self, doi):
+        """DOIs of the works citing a DOI, from the OpenCitations index (open, no key)."""
+        if not isinstance(doi, str) or not re.fullmatch(r'10\.\d{4,9}/\S+', doi.strip()):
+            raise LiteratureError('Give a DOI')
+        doi = doi.strip().lower()
+
+        def fetch():
+            body, _, _ = self._fetch('https://api.opencitations.net/index/v2/citations/doi:' + quote(doi, safe='/().-_;:'),
+                                     max_bytes=10_000_000)
+            found = []
+            for item in json.loads(body):
+                match = re.search(r'(?:^|\s)doi:(\S+)', str(item.get('citing') or '')) if isinstance(item, dict) else None
+                if match:
+                    found.append(match.group(1).lower())
+            return list(dict.fromkeys(found))[:20000]
+        return self._cache_search('opencitations', doi, 1, fetch)['results']
+
+    def arxiv_by_titles(self, titles):
+        """arXiv versions of several papers in one request: a few distinctive title words each."""
+        groups = []
+        for title in titles:
+            words = [w for w in re.findall(r'[A-Za-z]{4,}', re.sub(r'\$.*?\$', ' ', str(title)))
+                     if w.lower() not in TITLE_STOP and w.lower() not in ('with', 'from', 'that', 'this', 'into')][:4]
+            if len(words) >= 2:
+                group = '(' + ' AND '.join('ti:' + w for w in words) + ')'
+                if len(' OR '.join(groups + [group])) > 900:
+                    break
+                groups.append(group)
+        if not groups:
+            return []
+        query = ' OR '.join(groups)
+        return self._cache_search('arxiv-titles', query, 20, lambda: self._search('arxiv', query, 20))['results']
+
+    def _chain(self, surname, title, topic):
+        """Papers that cite the work and are about the topic, with an arXiv version (no full-text search).
+
+        The work's DOI comes from Crossref; who cites it from OpenCitations and from the reference lists of
+        Crossref's papers on the topic; their arXiv versions from one grouped title search."""
+        info = {'work_dois': [], 'citing_known': 0, 'topic_papers': 0, 'topic_citing': 0, 'on_arxiv': 0}
+        words, name = title_words(title), _fold(surname)
+        if title:
+            def fits(r):
+                found = set(title_words(r.get('title')))
+                return (words and len(set(words) & found) >= max(1, (len(words) + 1) // 2)
+                        and name in _fold(' '.join(r.get('authors') or [])))
+            info['work_dois'] = [r['doi'] for r in self.crossref(query=f'{title} {surname}', limit=6) if r.get('doi') and fits(r)][:3]
+        citing = set()
+        for doi in info['work_dois']:
+            try:
+                citing.update(self.citations_of(doi))
+            except LiteratureError:
+                pass
+        info['citing_known'] = len(citing)
+        works = {'doi:' + d for d in info['work_dois']}
+
+        def cites(r):
+            if r.get('doi') in citing or works & set(r.get('references') or []):
+                return True
+            return any(name in _fold(t) and (not words or any(w in _fold(t) for w in words)) for t in r.get('reference_texts') or [])
+        papers, chosen = [], []
+        for offset in (0, 100, 200):  # further pages when the first holds too few citing papers
+            page = self.crossref(query=topic or title or surname, limit=100, texts=True, offset=offset)
+            papers += page
+            chosen += [r for r in page if cites(r)]
+            if len(chosen) >= 4 or len(page) < 100:
+                break
+        info['topic_papers'] = len(papers)
+        # Crossref's relevance order, recent papers first (likelier to have an arXiv version with HTML).
+        chosen.sort(key=lambda r: not (str(r.get('year') or '').isdigit() and int(r['year']) >= 2010))
+        info['topic_citing'] = len(chosen)
+        found = self.arxiv_by_titles([r['title'] for r in chosen[:10]]) if chosen else []
+        hits = []
+        for r in chosen[:10]:
+            mine = set(re.findall(r'[a-z]{4,}', _fold(re.sub(r'\$.*?\$', ' ', r['title']))))
+            for a in found:
+                theirs = set(re.findall(r'[a-z]{4,}', _fold(re.sub(r'\$.*?\$', ' ', a['title']))))
+                if mine and len(mine & theirs) / len(mine | theirs) >= 0.6:
+                    hits.append({'arxiv_id': a['identifier'][6:], 'title': r['title'], 'year': r.get('year'), 'doi': r.get('doi')})
+                    break
+        info['on_arxiv'] = len(hits)
+        return hits, info
+
+    def find_quotes(self, author, locator='', topic='', title=''):
+        """Find papers that cite the work, open them, and read the lines that cite it.
+
+        The citation chain: papers citing the work (OpenCitations, Crossref reference lists) and about the topic,
+        read through their arXiv versions. Failing that, papers on the topic from arXiv."""
+        if not isinstance(author, str) or not re.fullmatch(r"[^\W\d_][\w'\-. ]{1,60}", author.strip()):
+            raise LiteratureError('Give the author\'s surname, e.g. "Brezis"')
+        surname = author.strip().split()[-1]
+        locator = locator.strip() if isinstance(locator, str) else ''
+        topic = ' '.join(topic.split())[:120] if isinstance(topic, str) else ''
+        title = ' '.join(title.split())[:300] if isinstance(title, str) else ''
+        # A theorem-like number wins over a section number when the locator names both.
+        named = re.findall(r'(?:theorem|thm|lemma|proposition|prop|corollary|cor|remark)\.?\s*(\d+(?:\.\d+)+[a-z]?)', locator, re.I)
+        found = named or re.findall(r'\d+(?:\.\d+)+[a-z]?', locator)
+        number = found[0] if found else None
+        if not number and not topic:
+            raise LiteratureError('Give a numbered locator (e.g. "Theorem 9.26") or a topic phrase')
+        hits, chain, searched, opens = [], None, '', 4
+        if topic or title:
+            try:
+                hits, chain = self._chain(surname, title, topic)
+            except LiteratureError as exc:  # e.g. Crossref unreachable: fall through to the last resort
+                hits, chain = [], {'error': str(exc)[:200]}
+            searched = 'citation chain: papers citing the work on the topic, via arXiv'
+        if not hits:
+            # Last resort: papers on the topic, scanned for citations of the work.
+            searched = 'arXiv topic search'
+            hits = [{**h, 'arxiv_id': h['identifier'][6:]} for h in self.search_papers(topic or surname, 'arxiv', 6)['results']]
+            opens = 3
+        quotes, opened, failures, others = [], [], 0, 0
+        # arXiv first: it is reliably readable and its HTML keeps citation brackets. Publisher
+        # links often refuse robots, so at most one is tried.
+        for hit in sorted(hits, key=lambda h: not h.get('arxiv_id')):
+            url = hit.get('arxiv_id') or hit.get('open_access_url')
+            if len(opened) == opens or not url or any('passage' in q for q in quotes) or (not hit.get('arxiv_id') and others):
+                continue
+            others += not hit.get('arxiv_id')
+            try:
+                document = self.open_paper(url)
+                doc = document['document_id']
+                _, lines = self._document(doc)
+            except LiteratureError:
+                failures += 1
+                continue
+            opened.append({'document_id': doc, 'title': hit.get('title'), 'year': hit.get('year'), 'source_url': document['source_url']})
+            keys = bibliography_keys(lines, surname, title)
+            # Scan the whole cached text locally; only the lines returned are charged.
+            hits_here = []
+            words = [w for w in re.findall(r'[^\W\d_]{5,}', _fold(topic))][:4]
+            for i in range(len(lines)):
+                window = ' '.join(lines[max(0, i - 1):i + 2])
+                if number:
+                    if re.search(_num(number), lines[i]) and cites_place(window, number, surname, keys):
+                        hits_here.append(i + 1)
+                elif keyed_citations(lines[i], keys) or (
+                        _fold(surname) in _fold(lines[i]) and re.search(PLACE_WORDS + r'\.?\s*\d+(?:\.\d+)+', window, re.I)
+                        and not re.search(r'(?:19|20)\d\d', lines[i])):
+                    hits_here.append(i + 1)
+                if len(hits_here) == (2 if number else 12):
+                    break
+            if not number:  # citations near the topic words first
+                near = lambda n: any(w in _fold(' '.join(lines[max(0, n - 3):n + 2])) for w in words)
+                hits_here = sorted(hits_here, key=lambda n: not near(n))[:3]
+            for line in hits_here:
+                passage = self.read_paper(doc, max(1, line - 1), line + 1)
+                passage['passage'] = passage['passage'][:900]
+                cited = [place for _, place in keyed_citations(passage['passage'], keys)]
+                quotes.append({'title': hit.get('title'), 'cited_as': cited[:3], **{k: passage[k] for k in (
+                    'document_id', 'source_url', 'citation', 'start_line', 'end_line', 'passage', 'truncated')}})
+            entry = bibliography_entry(lines, keys[0]) if keys else ''
+            if entry:  # how this paper lists the work: its edition matters for the numbering
+                quotes.append({'title': hit.get('title'), 'document_id': doc, 'bibliography_entry': entry[:400],
+                               'bibliography_keys': keys})
+        return {'author': surname, 'searched_with': searched, 'number': number,
+                **({'citation_chain': chain} if chain else {}), 'papers_found': len(hits), 'papers_opened': opened,
+                'unreadable_papers': failures, 'quotes': quotes,
+                'evidence_kind': 'untrusted_cached_extraction',
+                'note': 'Quotes show how other papers cite the work; check that the cited statement is the result sought.'}
 
     def search_web(self, query, limit=5):
         query = self._query(query, limit)
@@ -671,8 +1047,11 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             raise LiteratureError('Offline mode: internet access is disabled')
         headers = dict(headers or {})
         original_host = self._url(url).hostname
+        provider = QUOTA_HOSTS.get(original_host)
+        if provider in self.down:
+            raise LiteratureError(f'{provider} refused earlier in this session (quota used up); not asked again')
         auth_headers = {'authorization', 'x-api-key', 'x-subscription-token'}
-        if any(k.casefold() in auth_headers for k in headers) and original_host not in ('api.openalex.org', 'api.semanticscholar.org', 'api.search.brave.com'):
+        if any(k.casefold() in auth_headers for k in headers) and original_host not in ('api.semanticscholar.org', 'api.search.brave.com'):
             raise LiteratureError('API credentials may only be sent to their fixed provider host')
         retries, redirects = 0, 0
         while True:
@@ -702,11 +1081,15 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
                 retry = response_headers.get('retry-after', '')
                 delay = float(retry) if retry.isdigit() else 2.0
                 if delay > 5:
+                    if provider:
+                        self.down.add(provider)
                     raise LiteratureError('Provider rate limited this request; try later or use a different provider')
                 self._pause(max(1, delay))
                 retries += 1
                 continue
             if not 200 <= status < 300:
+                if status == 429 and provider:
+                    self.down.add(provider)
                 raise LiteratureError(f'Source returned HTTP {status}; check provider access or use another public source')
             if response_headers.get('content-encoding', 'identity') not in ('', 'identity'):
                 raise LiteratureError('Unsupported compressed response; source ignored identity encoding')

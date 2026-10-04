@@ -327,8 +327,8 @@ Content-Security-Policy stops rendered model or document text from loading
 anything outside the harness. Fonts and KaTeX are bundled, so the interface itself
 never contacts another server. Online search is a switch you set per conversation
 (next to Thinking) and per report. In the interface it is on by default, so
-literature tools may send short search queries to arXiv, Semantic Scholar and
-OpenAlex; untick it to keep a conversation or a report offline. Write-ups and
+literature tools may send short search queries to arXiv, Semantic Scholar, zbMATH,
+Crossref and OpenCitations; untick it to keep a conversation or a report offline. Write-ups and
 proofs never search. Launching with an explicit `--offline` locks it off, which
 keeps unaided benchmarks unaided. A document or a model answer can never turn it
 on. Python stays a launch-time permission (`--allow-python`), and proof jobs have

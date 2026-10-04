@@ -84,7 +84,7 @@ export type LiveStep =
   | { type: 'call'; thinking: string; text: string }
   | { type: 'tool' | 'result' | 'notice'; text: string }
 
-export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' }
+export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string; steps: LiveStep[]; mode?: 'critic' | 'explore' | 'check' }
 
 export type Activity = { kind: 'notice' | 'tool' | 'result'; text: string; time: number }
 
@@ -250,7 +250,8 @@ export type ResearchDetail = {
   budget: { rounds: Budget; tokens: Budget; input_tokens: Budget; seconds: Budget; requests: Budget; chars: Budget }
   sources: { id: string; path: string; sha256: string; lines: number }[]
   plan: string
-  notes: { round: number; text: string; complete: boolean }[]
+  notes: { round: number; title?: string; text: string; complete: boolean }[]
+  pipeline?: string | null
   evidence: Evidence[]
   draft: string
   review: string
@@ -288,7 +289,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'critic' | 'explore' | 'literature' | 'referee' | 'writeup'
+export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'writeup'
 
 export type TranscriptItem = {
   role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route'

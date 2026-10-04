@@ -38,9 +38,12 @@
 .mode-critic { background: #c22f3d; }
 .mode-explore { background: #1b7f5a; }
 .mode-literature { background: #a0660f; }
+.mode-check { background: #7c4a0a; } /* a literature check in Default: the Literature family, deeper */
 .mode-referee { background: #6c43a8; }
 .mode-glyph { font-family: var(--font-math); font-size: 22px; line-height: 1; transform: translateY(-1px); }
-.mode-literature .mode-glyph { font-family: var(--font-text); font-size: 16px; font-weight: 700; letter-spacing: -0.02em; }
+/* Drawn marks (the Literature magnifying glass) take the glyph's font size. */
+.mode-glyph svg, .speaker-model svg, .route-cover svg, .about-cover svg { display: block; }
+.margin-glyph svg { display: inline-block; vertical-align: -0.12em; }
 .mode-label { font-size: 11px; font-weight: 700; letter-spacing: 0.01em; }
 .mode-active .mode-label { color: var(--text); }
 .mode:hover .mode-cover { box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.16), 0 0 0 3px var(--ink-soft-strong); }
