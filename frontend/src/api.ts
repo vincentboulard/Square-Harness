@@ -225,7 +225,12 @@ export type ResearchListItem = {
   running: boolean
   sources: string[]
   tokens: Budget
+  variant?: ReviewVariant | null
+  verdict?: string | null
 }
+
+/** The three kinds of review behind the Review notebook (engine kind 'referee'). */
+export type ReviewVariant = 'quick' | 'review' | 'journal' | 'explain'
 
 export type WriteupSection = { title: string; sources: string[]; goal: string; latex: string; complete: boolean; truncated: boolean }
 
@@ -253,6 +258,10 @@ export type ResearchDetail = {
   plan: string
   notes: { round: number; title?: string; text: string; complete: boolean }[]
   pipeline?: string | null
+  variant?: ReviewVariant | null
+  verdict?: string | null
+  level?: string | null
+  unit?: string | null
   evidence: Evidence[]
   draft: string
   review: string
@@ -290,7 +299,7 @@ export type ChatListItem = {
 
 export type ToolCall = { id?: string; function: { name: string; arguments: Record<string, unknown> | string } }
 
-export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'writeup'
+export type RouteMode = 'prove' | 'critic' | 'explore' | 'check' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup'
 
 export type TranscriptItem = {
   role: 'user' | 'assistant' | 'tool' | 'review' | 'notice' | 'route'

@@ -85,6 +85,20 @@ export const ROLES: Record<string, { active: string; name: string; structured?: 
   outline: { active: 'Planning the sections from your notes', name: 'Outline', structured: true },
   section: { active: 'Writing a section from your notes', name: 'Section' },
   repair: { active: 'Repairing the sections named in LaTeX errors', name: 'Repair' },
+  // Review variants (quick check, journal report, explanation): small structured calls.
+  check: { active: 'A fresh verifier is checking one proof', name: 'Check', structured: true },
+  confirm: { active: 'An independent re-check of an alleged issue', name: 'Re-check', structured: true },
+  extract: { active: 'Finding the statement and the proof', name: 'Extract', structured: true },
+  pick: { active: 'Finding the result the request names', name: 'Pick', structured: true },
+  read: { active: 'Reading a part of the paper: what it does, typos and presentation', name: 'Reading', structured: true },
+  scope: { active: 'Writing an overview of the paper from the reading notes', name: 'Overview', structured: true },
+  novelty: { active: 'Comparing the contribution with the search results', name: 'Novelty', structured: true },
+  presentation: { active: 'Reading for presentation', name: 'Presentation', structured: true },
+  write: { active: 'Writing the prose of the report', name: 'Write', structured: true },
+  explain: { active: 'Writing the explanation', name: 'Explanation', structured: true },
+  fill: { active: 'Explaining the lines still missing', name: 'Fill', structured: true },
+  'explain-check': { active: 'Checking the explanation against the source', name: 'Accuracy check', structured: true },
+  'explain-fix': { active: 'Correcting the explanation', name: 'Correction', structured: true },
 }
 
 export type LiveText = { text: string; thinking: string; tool_calls: ToolCall[]; done: boolean; loaded: boolean }

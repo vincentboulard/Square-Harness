@@ -12,16 +12,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class ResearchHttpTests(unittest.TestCase):
     def test_offline_referee_reads_manuscript_and_exports_reviewed_markdown(self):
         requests = []
-        draft = '# Referee report\n\nThe manuscript states reflexivity [M1:L1-L2].\n\n## Literature\nNo external search was performed; novelty is unassessed.\n'
-        replies = [
-            {'content': 'Read the manuscript, assess its argument, and report offline limitations.'},
-            {'content': '', 'tool_calls': [{'function': {'name': 'read_manuscript',
-                'arguments': {'source_id': 'M1', 'start_line': 1, 'end_line': 2}}}]},
-            {'content': 'The source is read. Reflexivity is the stated argument; external comparisons remain unavailable.'},
-            {'content': draft},
-            {'content': 'The cited manuscript passage supports the description. External novelty remains unchecked; retain that limitation.'},
-            {'content': draft},
-        ]
+        read = {'summary': 'States reflexivity and proves it.', 'comments': []}
+        scope = {'overview': 'A note on reflexivity.', 'field': 'logic', 'contribution': 'Reflexivity of equality.', 'main': [], 'notation': [],
+                 'closest': [], 'queries': []}
+        check = {'explanation': 'The argument is reflexivity of equality.', 'issues': [], 'verdict': 'no_issue_found'}
+        write = {'summary': 'The manuscript states reflexivity.', 'significance': 'No external search was performed; novelty is unassessed.',
+                 'correctness': 'The one proof was checked.', 'presentation': 'Brief.', 'recommendation': 'minor_revision',
+                 'reasons': 'Add context.', 'confidential': 'Offline review.'}
+        # /referee is a review: reading, overview and write-up, no proof checks.
+        replies = [{'content': json.dumps(read)}, {'content': json.dumps(scope)}, {'content': json.dumps(write)}]
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -53,16 +52,15 @@ class ResearchHttpTests(unittest.TestCase):
                 proc = subprocess.run(command, capture_output=True, text=True, timeout=30,
                                       cwd=Path(__file__).resolve().parents[1])
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                self.assertEqual(len(requests), 6, proc.stdout)
+                self.assertEqual(len(requests), 3, proc.stdout)
                 report = (root / 'referee.md').read_text()
-                self.assertIn('[M1:L1-L2]', report)
+                self.assertIn('Proofs were not checked.', report)
                 self.assertIn('novelty is unassessed', report)
                 state_path = next((root / '.mathagent/research').glob('*/state.json'))
                 state = json.loads(state_path.read_text())
-                self.assertIn('(' + state_path.parent.relative_to(root).as_posix() + '/artifacts/', report)
-                self.assertEqual(state['status'], 'reviewed', proc.stdout)
+                self.assertEqual((state['status'], state['variant']), ('reviewed', 'review'), proc.stdout)
                 self.assertEqual(state['literature_snapshot']['stats']['requests'], 0)
-                self.assertTrue(all(request['think'] is False for request in requests))
+                self.assertTrue(all(request.get('format') for request in requests))  # every call answers in JSON
                 inspected = subprocess.run([sys.executable, '-m', 'mathagent', '--workspace', tmp,
                     '--prompt', '/research-report ' + state['id']], capture_output=True, text=True,
                     timeout=10, cwd=Path(__file__).resolve().parents[1])

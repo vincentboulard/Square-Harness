@@ -20,6 +20,7 @@ from .literature import LiteratureTools
 from .litreview import ReviewRunner
 from .refcheck import CheckRunner, nested_checker
 from .research import ResearchRunner
+from .review import runner_class as review_runner, variant_for_state
 from .writeup import WriteupRunner
 from . import __version__
 
@@ -102,7 +103,11 @@ HELP = '''Commands
   /critic, /explore [query]            Ordinary conversational modes
   /check [result]                     Quick literature check: 1-2 precise references, verified online
   /literature [topic]                 Saved bibliographical research and Markdown report
-  /referee [task or manuscript]       Saved manuscript review with literature checks
+  /referee [task]                     Review of the --research-file manuscript: overview, typos, presentation
+  /detailed_review [task]             The same review plus a check of the proofs (more tokens and time)
+  /quick_review [statement + proof]   Is this proof correct? Verdict and located issues; or name a
+                                      result of the --research-file manuscript, e.g. "Lemma 3.2"
+  /explain [result + proof]           Precise step-by-step explanation of a result and its proof
   /writeup [instructions]             LaTeX write-up of --research-file notes in the --template-file style
   /researches                        List saved research/report jobs
   /research-report <id>               Read a saved Markdown report without inference
@@ -348,6 +353,10 @@ def main():
         else:
             ui.say(f'Inspect: /proof-report {result["id"]}. A new /prove starts a separate job.')
 
+    def review_concurrency():
+        # Independent review calls run together only on a server that batches requests (vLLM).
+        return args.assistant_concurrency if args.backend == 'openai' else 1
+
     def research_result(result, export=True):
         nonlocal last_research_id
         last_research_id = result['id']
@@ -396,14 +405,18 @@ def main():
             proof_result(result)
             agent.history.extend([{'role': 'user', 'content': query},
                                   {'role': 'assistant', 'content': result.get('answer') or result.get('report', '')}])
-        elif agent.mode in {'literature', 'referee'}:
+        elif agent.mode in {'literature', 'referee', 'detailed_review', 'quick_review', 'explain'}:
             if args.output and workspace.path(args.output).suffix.lower() != '.md':
                 raise ValueError('--output must be a workspace-relative .md file')
             ensure_model()
             research_running = True
             last_research_id = ''
-            runner = ReviewRunner(agent, ui.emit) if agent.mode == 'literature' else ResearchRunner(agent, ui.emit)
-            result = runner.start(query, kind=agent.mode,
+            if agent.mode == 'literature':
+                runner, kind = ReviewRunner(agent, ui.emit), 'literature'
+            else:
+                variant = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}[agent.mode]
+                runner, kind = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency()), 'referee'
+            result = runner.start(query, kind=kind,
                 source_files=args.research_file, max_rounds=args.research_rounds,
                 max_tokens=args.research_tokens, max_input_tokens=args.research_input_tokens,
                 max_seconds=args.research_seconds, max_requests=args.research_requests,
@@ -460,7 +473,7 @@ def main():
                     agent.history = []
                     ui.say('Conversation cleared.')
                 elif command == '/skills':
-                    for name in ('literature', 'referee', 'writeup'):
+                    for name in ('literature', 'review', 'referee', 'review-quick', 'explain', 'writeup'):
                         ui.say(f'{name}: {Path(__file__).parent / "skills" / name / "SKILL.md"}')
                 elif command == '/researches':
                     jobs = ResearchRunner.list(workspace.root)
@@ -481,9 +494,13 @@ def main():
                     job_id = rest or last_research_id
                     saved = ResearchRunner.inspect(workspace.root, job_id)
                     writeup = saved.get('kind') == 'writeup'
-                    runner_class = (WriteupRunner if writeup else ReviewRunner if saved.get('pipeline') == ReviewRunner.PIPELINE
-                                    else ResearchRunner)
-                    result = runner_class(agent, ui.emit).resume(job_id)
+                    variant = variant_for_state(saved)
+                    if variant:
+                        runner = review_runner(variant)(agent, ui.emit, concurrency=review_concurrency())
+                    else:
+                        runner = (WriteupRunner if writeup else ReviewRunner if saved.get('pipeline') == ReviewRunner.PIPELINE
+                                  else ResearchRunner)(agent, ui.emit)
+                    result = runner.resume(job_id)
                     research_running = False
                     model_checked = False
                     research_result(result, export=not writeup)

@@ -219,7 +219,8 @@ conversations. The logo above the notebooks opens an About page.
 | --- | --- |
 | Assistant | A mathematical conversation with direct answers and focused tasks when needed. The assistant reads their results and decides how to continue, within a shared budget (see below) |
 | Prove | The selected answer and its review status; each attempt with its written answer (and thinking), the verifier's verdict, explanation and located issues, and the exact model calls; live model output while a call runs; a side panel with budgets and every retained candidate |
-| Literature, Review | The report with clickable citations that open the exact passage read, the controller's citation checks, manuscript coverage, evidence, plan, notes and budgets. Review is the interface's name for a referee report |
+| Literature | The report with clickable citations that open the exact passage read, the controller's citation checks, evidence, plan, notes and budgets |
+| Review | Four kinds behind one switch: a quick check of a proof (verdict and located issues), a review of a manuscript (overview, typos and presentation), a detailed review that also checks the proofs, and an explanation of a result; links open the lines each comment or step concerns (see [Reviews](research.md#reviews-quick-check-journal-report-explanation)) |
 | Write-up | The LaTeX document with source marks that open the note lines each paragraph came from, compile errors, the PDF, TODOs and template macros (see [LaTeX write-ups](research.md#latex-write-ups)) |
 
 On a wide screen, the job list and a job's side panel (budgets, candidates,

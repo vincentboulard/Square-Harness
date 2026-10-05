@@ -10,6 +10,7 @@ import { go } from '../router'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
+import { VARIANT_CAVEATS, VARIANT_NAMES, VARIANT_STEP_NAMES, VARIANT_STEPS, VERDICTS } from '../review'
 
 const STEPS = ['plan', 'investigate', 'draft', 'review', 'revise', 'done']
 // A literature review builds a reading list: code searches and follows citations, the model screens and organises.
@@ -51,7 +52,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
             { id: 'report', label: 'Report' },
             { id: 'checks', label: 'Checks', badge: issues.length || undefined, narrowOnly: true },
             { id: 'review', label: 'Model review', hidden: !data.review },
-            { id: 'notes', label: 'Plan and notes' },
+            { id: 'notes', label: 'Plan and notes', hidden: !!data.variant },
             { id: 'evidence', label: 'Evidence', badge: data.evidence.length || undefined },
             { id: 'sources', label: 'Sources', badge: data.sources.length || undefined },
             { id: 'files', label: 'Files', badge: data.artifacts.length || undefined },
@@ -89,24 +90,27 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
-  const steps = data.pipeline ? LIST_STEPS : STEPS
-  const current = steps.indexOf(data.phase === 'plan' && data.pipeline ? 'scope' : data.phase)
+  const steps = data.variant ? VARIANT_STEPS[data.variant] : data.pipeline ? LIST_STEPS : STEPS
+  const names = data.variant ? VARIANT_STEP_NAMES : STEP_NAMES
+  const current = steps.indexOf(data.phase === 'plan' && data.pipeline && !data.variant ? 'scope' : data.phase)
   return (
     <header className="job-head">
       <div className="job-status">
         <Square variant={look.variant} size={18} label={look.label} />
         <span className="job-status-label">{look.label}</span>
-        <span className="job-stop">{data.kind === 'referee' ? 'Review' : data.pipeline ? 'Reading list' : 'Literature report'}</span>
+        <span className="job-stop">{data.variant ? VARIANT_NAMES[data.variant] : data.kind === 'referee' ? 'Review' : data.pipeline ? 'Reading list' : 'Literature report'}</span>
       </div>
       <div className="job-goal"><Markdown>{data.goal}</Markdown></div>
       <ol className="phases phases-wide" aria-label="Workflow">
         {steps.map((step, index) => {
           const variant: Variant = index < current || data.phase === 'done' ? 'complete' : index === current ? (data.running ? 'running' : 'paused') : 'ready'
-          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{STEP_NAMES[step]}</li>
+          return <li key={step} className={'phase phase-' + variant}><Square variant={variant} size={10} />{names[step]}</li>
         })}
       </ol>
       <div className="job-facts">
-        {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path}</span>)}
+        {data.sources.map((source) => <span key={source.id} className="fact-file">{source.id} {source.path === 'pasted-text.md' ? 'pasted text' : source.path}</span>)}
+        {data.unit && <span>{data.unit}</span>}
+        {data.level && <span>{data.level === 'poincare' ? 'Poincaré' : data.level === 'xhigh' ? 'Extra high' : data.level.charAt(0).toUpperCase() + data.level.slice(1)} effort</span>}
         <span>{String(data.settings.model)}</span>
         <span>{data.settings.online ? 'Online' : 'Offline'}</span>
         <span>Started {ago(data.created_at)}</span>
@@ -134,14 +138,19 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
       {data.running && data.live && <LiveResearch id={data.id} role={data.live.role} file={data.live.file} />}
       {issues.length > 0 && (
         <div className="checks-note">
-          <p className="objection-label">{data.pipeline ? 'The self-check found gaps' : 'The controller could not confirm every citation'}</p>
+          <p className="objection-label">{data.variant ? 'Notes from the controller' : data.pipeline ? 'The self-check found gaps' : 'The controller could not confirm every citation'}</p>
           <ul>{issues.slice(0, 6).map((issue) => <li key={issue}>{issue}</li>)}</ul>
           {issues.length > 6 && <p className="small">{issues.length - 6} more in Checks.</p>}
         </div>
       )}
+      {data.variant === 'quick' && data.verdict && VERDICTS[data.verdict] && (
+        <p className={'verdict verdict-' + VERDICTS[data.verdict].variant}>
+          <Square variant={VERDICTS[data.verdict].variant} size={20} /> {VERDICTS[data.verdict].label}
+        </p>
+      )}
       {data.draft ? (
         <>
-          <p className="caveat">{data.pipeline
+          <p className="caveat">{data.variant ? VARIANT_CAVEATS[data.variant] : data.pipeline
             ? 'Every entry is a record returned by Crossref, arXiv, zbMATH or Semantic Scholar, with its identifier as returned. The model chose, grouped and annotated them from titles and abstracts.'
             : 'Model draft. Citations link to the passages the harness recorded; red ones cite lines that were never read.'}</p>
           <Markdown className="report-text" onCite={onCite} flagged={flagged}>{data.draft}</Markdown>
@@ -195,9 +204,9 @@ function Checks({ data, sources, issues, cite, onCite }: {
         <Meter label="Generated tokens" used={b.tokens.used} limit={b.tokens.limit} />
         <Meter label="Input tokens" used={b.input_tokens.used} limit={b.input_tokens.limit} />
         <Meter label="Time, minutes" used={b.seconds.used / 60} limit={b.seconds.limit / 60} decimals={1} />
-        <Meter label="Rounds" used={b.rounds.used} limit={b.rounds.limit} />
-        <Meter label="Web requests" used={b.requests.used} limit={b.requests.limit} />
-        <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />
+        {!data.variant && <Meter label="Rounds" used={b.rounds.used} limit={b.rounds.limit} />}
+        {(!data.variant || data.variant === 'journal') && <Meter label="Web requests" used={b.requests.used} limit={b.requests.limit} />}
+        {(!data.variant || data.variant === 'journal') && <Meter label="Evidence characters" used={b.chars.used} limit={b.chars.limit} />}
       </section>
     </div>
   )

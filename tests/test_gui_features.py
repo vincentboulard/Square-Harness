@@ -40,6 +40,15 @@ class WorkspaceReadTests(unittest.TestCase):
             self.assertIn('2: Proof.', workspace.read_file('paper.pdf'))
         self.assertIn('\\newcommand', workspace.read_file('macros.sty'))
 
+    def test_search_reaches_pinned_or_readable_pdf_text(self):
+        with patch.object(LiteratureTools, '_pdf', return_value=('Lemma 8. A bound.\nProof. Easy.', 'mock')):
+            pinned = Workspace(self.root, literature=LiteratureTools(self.root), read_types=['tex'])
+            self.assertNotIn('paper.pdf', pinned.search_text('Lemma 8'))
+            pinned.pin_files(['paper.pdf'])
+            self.assertEqual(pinned.search_text('lemma 8'), 'paper.pdf:1: Lemma 8. A bound.')
+            readable = Workspace(self.root, literature=LiteratureTools(self.root))
+            self.assertIn('paper.pdf:1: Lemma 8.', readable.search_text('Lemma 8'))
+
     def test_unticked_types_are_invisible_and_unreadable(self):
         workspace = Workspace(self.root, literature=LiteratureTools(self.root), read_types=['tex'])
         self.assertEqual(sorted(workspace.list_files().splitlines()), ['lemma.tex', 'macros.sty'])
@@ -160,6 +169,11 @@ class RouterTests(unittest.TestCase):
         [old] = router.parse(json.dumps({'mode': 'referee', 'request': 'Review paper.tex.', 'files': [],
                                          'reason': 'r', 'question': ''}), 'Review it.')
         self.assertEqual((old['mode'], old['effort']), ('referee', 'medium'))
+        # The quick proof check and the explanation are routed like the journal review.
+        routes = router.parse(json.dumps({'tasks': [task('quick_review', 'Check: Lemma. A. Proof. B.', effort='medium'),
+                                                    task('explain', 'Explain Lemma 2 in notes.md.', effort='low')],
+                                          'question': ''}), 'Check and explain.')
+        self.assertEqual([r['mode'] for r in routes], ['quick_review', 'explain'])
         schema = router.ROUTE_SCHEMA['properties']['tasks']
         self.assertEqual(schema['maxItems'], router.MAX_TASKS)
         self.assertEqual(schema['items']['properties']['effort']['enum'], list(router.EFFORTS))
@@ -193,6 +207,23 @@ class LegacyRouteTests(GuiCase):
         job = self.ok('GET', f'/api/chats/{chat}')['transcript'][index]['job_id']
         settings = self.ok('GET', f'/api/proofs/{job}')['settings']
         self.assertEqual((settings['max_rounds'], settings['max_tokens'], settings['max_seconds']), (1, 7000, 90.0))
+
+    def test_a_quick_review_card_starts_a_quick_check(self):
+        chat = self.ok('POST', '/api/chats', {'mode': 'free'})['id']
+        index = store.append_items(self.root, chat, [{'role': 'route', 'status': 'proposed', 'mode': 'quick_review',
+                                                      'request': 'Lemma. x = x.\nProof. Reflexivity.', 'files': [],
+                                                      'effort': 'low', 'reason': '', 'question': '', 'time': store._now()}])
+        self.fake.replies = [text(json.dumps({'explanation': 'Fine.', 'issues': [], 'verdict': 'no_issue_found'}))]
+        self.ok('POST', f'/api/chats/{chat}/routes/{index}/start', {'mode': 'quick_review', 'request': 'Lemma. x = x.\nProof. Reflexivity.',
+                                                                  'files': [], 'limits': {'rounds': 1, 'tokens': 7000, 'seconds': 90}})
+        self.wait_task(timeout=30)
+        job = self.ok('GET', f'/api/chats/{chat}')['transcript'][index]['job_id']
+        detail = self.ok('GET', f'/api/research/{job}')
+        self.assertEqual((detail['kind'], detail['variant'], detail['verdict']), ('referee', 'quick', 'no_issue_found'))
+        from mathagent.gui import effort
+        self.assertEqual(effort.limits('explain', 'low', self.hub.args)['rounds'], 1)
+        plain, detailed = effort.limits('referee', 'high', self.hub.args), effort.limits('detailed_review', 'high', self.hub.args)
+        self.assertEqual((detailed['tokens'], detailed['seconds']), (2 * plain['tokens'], 2 * plain['seconds']))
 
     def test_forms_and_resumes_queue_behind_a_running_job(self):
         blocker = self.ok('POST', '/api/chats', {'mode': 'critic'})['id']

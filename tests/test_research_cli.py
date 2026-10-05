@@ -30,7 +30,8 @@ class ResearchCliTests(unittest.TestCase):
                 patch.object(cli, 'UI', return_value=self.ui), \
                 patch.object(cli, 'Ollama', return_value=self.client), \
                 patch.object(cli, 'ResearchRunner', return_value=self.runner) as runner_class, \
-                patch.object(cli, 'ReviewRunner', return_value=self.runner):
+                patch.object(cli, 'ReviewRunner', return_value=self.runner), \
+                patch.object(cli, 'review_runner', return_value=Mock(return_value=self.runner)):
             runner_class.list.return_value = [dict(self.result, kind='literature', goal='A topic')]
             runner_class.inspect.return_value = self.result
             return cli.main()

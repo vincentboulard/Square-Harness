@@ -24,7 +24,8 @@ CHAT_MODES = ('critic', 'explore', 'free')
 # How the interface names a suggestion in chat previews: critic and explore answers
 # are both answers in the conversation, and the referee workflow is called Review.
 ROUTE_NAMES = {'prove': 'Proof', 'critic': 'Answer', 'explore': 'Answer', 'literature': 'Literature report',
-               'referee': 'Review', 'writeup': 'Write-up', 'clarify': 'Question'}
+               'referee': 'Review', 'detailed_review': 'Detailed review', 'quick_review': 'Quick review', 'explain': 'Explanation',
+               'writeup': 'Write-up', 'clarify': 'Question'}
 UPLOAD_SUFFIXES = {'.tex', '.sty', '.cls', '.bib', '.md', '.txt', '.pdf', '.py'}
 UPLOAD_BYTES = 20 * 1024 * 1024
 _chat_lock = threading.RLock()
@@ -299,6 +300,7 @@ def list_research(root, active=None):
                      'phase': state['phase'], 'title': one_line(state['goal'], 140),
                      'updated_at': state['updated_at'], 'created_at': state['created_at'],
                      'running': running, 'sources': [s['path'] for s in state['sources']],
+                     'variant': state.get('variant'), 'verdict': state.get('verdict') or None,
                      'tokens': _budget(state['tokens_charged'], state['settings']['max_tokens'])})
     return sorted(jobs, key=lambda job: job['updated_at'], reverse=True)
 
@@ -324,7 +326,8 @@ def research_detail(root, job_id, active=None):
         'sources': [{'id': src['id'], 'path': src['path'], 'sha256': src['sha256'],
                      'lines': len(src['content'].splitlines())} for src in s['sources']],
         'plan': s['plan'], 'notes': s['notes'], 'evidence': s['evidence'], 'draft': s['draft'],
-        'pipeline': s.get('pipeline'),
+        'pipeline': s.get('pipeline'), 'variant': s.get('variant'), 'verdict': s.get('verdict') or None,
+        'level': s.get('level'), 'unit': (s.get('unit') or {}).get('name'),
         'review': s['review'], 'draft_complete': s.get('draft_complete'),
         'review_complete': s.get('review_complete'), 'warnings': s.get('warnings', []),
         'citation_issues': s.get('citation_issues', []),

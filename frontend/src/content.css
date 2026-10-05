@@ -39,6 +39,8 @@
 .network-online { background: var(--ochre-soft); border-left-color: var(--ochre); }
 .empty-note { margin: 8px 0 18px; font: italic 16.5px/1.5 var(--font-text); color: var(--text-3); }
 .caveat { margin: 0 0 14px; font-size: 13.5px; color: var(--text-3); }
+/* A quick check's verdict on the proof, in the notebook's squares. */
+.verdict { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; font: 700 17px/1.3 var(--font-ui); }
 .section-title { margin: 22px 0 8px; font: 700 18px/1.3 var(--font-text); }
 
 /* Typeset writing */

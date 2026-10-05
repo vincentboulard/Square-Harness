@@ -21,6 +21,7 @@ from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
 from ..litreview import ReviewRunner
+from ..review import ReviewBase, runner_class as review_runner, runner_for_state
 from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker
 from ..research import ResearchRunner
 from ..router import JOB_MODES
@@ -33,7 +34,12 @@ from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
 # Task labels shown in the interface; the engine's kind stays 'referee'.
-LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'check': 'Literature check'}
+LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Write-up', 'check': 'Literature check',
+          'quick_review': 'Review · quick check', 'explain': 'Review · explanation'}
+# Assistant and router modes that run as review variants of the referee kind.
+REVIEW_MODES = {'referee': 'review', 'detailed_review': 'journal', 'quick_review': 'quick', 'explain': 'explain'}
+LABELS['detailed_review'] = 'Review · detailed'
+VARIANT_LABELS = {'review': 'Review', 'journal': LABELS['detailed_review'], 'quick': LABELS['quick_review'], 'explain': LABELS['explain']}
 
 
 class Busy(Exception):
@@ -550,11 +556,17 @@ class Hub:
                     max_requests=args.research_requests if requests is None else requests,
                     max_chars=args.research_chars if chars is None else chars)
 
-    def start_research(self, kind, goal, *, source_files=(), online=None, queue=False, on_update=None, **limits):
+    def review_concurrency(self):
+        """Independent review calls run together only on a server that batches requests (vLLM)."""
+        return getattr(self.args, 'assistant_concurrency', 2) if self.args.backend == 'openai' else 1
+
+    def start_research(self, kind, goal, *, source_files=(), online=None, queue=False, on_update=None,
+                       variant=None, target='', **limits):
         if kind not in ('literature', 'referee'):
             raise ValueError('Research kind must be literature or referee')
         budgets = self._research_budgets(**limits)
         online = self.online(online)
+        variant = (variant or 'review') if kind == 'referee' else None
 
         def work(task):
             agent, _ = self._engine(task, mode=kind, online=online)
@@ -563,10 +575,11 @@ class Hub:
                 runner = ReviewRunner(agent)
                 runner.emit = self._job_emit(task, runner, 'research')
                 return runner.start(goal, source_files=list(source_files), **budgets)
-            runner = ResearchRunner(agent)
+            runner = review_runner(variant)(agent, concurrency=self.review_concurrency())
             runner.emit = self._job_emit(task, runner, 'research')
-            return runner.start(goal, kind=kind, source_files=list(source_files), **budgets)
-        return self._started(self._begin('research', None, LABELS[kind], goal, work, queue=queue, on_update=on_update))
+            return runner.start(goal, source_files=list(source_files), target=target, **budgets)
+        label = VARIANT_LABELS[variant] if variant else LABELS[kind]
+        return self._started(self._begin('research', None, label, goal, work, queue=queue, on_update=on_update))
 
     def start_writeup(self, goal, *, source_files=(), template_files=(), template=None, save_template=None,
                       notes='', output='', queue=False, on_update=None, **limits):
@@ -588,16 +601,18 @@ class Hub:
     def resume_research(self, job_id, queue=False):
         state = store.research_state(self.root, job_id)
         runner_class = (WriteupRunner if state['kind'] == 'writeup' else
-                        ReviewRunner if state.get('pipeline') == ReviewRunner.PIPELINE else ResearchRunner)
+                        ReviewRunner if state.get('pipeline') == ReviewRunner.PIPELINE else runner_for_state(state))
         # A job keeps the network choice it started with (never more, per the runner).
         online = bool(state['settings'].get('online')) and not self.online_locked
 
         def work(task):
             agent, _ = self._engine(task, mode=state['kind'], online=online)
-            runner = runner_class(agent)
+            runner = (runner_class(agent, concurrency=self.review_concurrency()) if issubclass(runner_class, ReviewBase)
+                      else runner_class(agent))
             runner.emit = self._job_emit(task, runner, 'research')
             return runner.resume(job_id)
-        task = self._begin('research', job_id, LABELS.get(state['kind'], LABELS['writeup']), state['goal'], work, queue=queue)
+        label = VARIANT_LABELS.get(state.get('variant')) or LABELS.get(state['kind'], LABELS['writeup'])
+        task = self._begin('research', job_id, label, state['goal'], work, queue=queue)
         task.ready.set()
         return task
 
@@ -962,20 +977,23 @@ class Hub:
                           'references': json.loads(runner.result_for_agent()), 'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root)),
                           'warnings': [] if online else ['Online search was off; only cached sources were used.']}
-            elif mode in ('literature', 'referee', 'writeup'):
+            elif mode in ('literature', 'writeup') or mode in REVIEW_MODES:
                 # Literature is the verified reading-list pipeline; the exact conversation sets its scope.
-                runner = (WriteupRunner if mode == 'writeup' else ReviewRunner if mode == 'literature'
-                          else ResearchRunner)(agent, emit)
+                # Review variants run one call at a time here: the Assistant already shares its budget.
+                runner = (WriteupRunner(agent, emit) if mode == 'writeup' else ReviewRunner(agent, emit) if mode == 'literature'
+                          else review_runner(REVIEW_MODES[mode])(agent, emit))
                 if child.get('job_id'):
                     result = runner.resume(child['job_id'])
                 else:
                     kwargs = dict(source_files=files, max_rounds=level['tries'], max_tokens=allocation,
                         max_input_tokens=min(level['input'], budget.pool.state['max_input_tokens']),
                         max_seconds=max(0.1, seconds), max_requests=level['requests'], max_chars=level['chars'])
-                    if mode != 'writeup':
+                    if mode == 'literature':
                         kwargs['kind'] = mode
                     result = runner.start(action['request'], reference_context=context, **kwargs)
-                outcome = result['status'].replace('_', ' ').capitalize() + '; see the saved report.'
+                verdict = (runner.state or {}).get('verdict')
+                outcome = (result['status'].replace('_', ' ').capitalize() + (f' ({verdict.replace("_", " ")})' if verdict else '')
+                           + '; see the saved report.')
                 worker_error = result.get('worker_error')
                 result = {'status': result['status'], 'answer': result['report'], 'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root))}
@@ -1028,10 +1046,11 @@ class Hub:
                 if detail['status'] == 'candidate_complete' and detail['answer']:
                     return 'the model review found no issue in this answer: ' + one_line(detail['answer'], 600)
                 return detail['status'] + (f'; {one_line(detail["stop_reason"], 300)}' if detail.get('stop_reason') else '')
-            if item['mode'] in ('literature', 'referee', 'writeup'):
+            if item['mode'] in ('literature', 'writeup') or item['mode'] in REVIEW_MODES:
                 state = store.research_state(root, job)
                 text = state.get('document') or state.get('draft') or ''
-                return f'{state["status"]}' + (': ' + one_line(text, 600) if text else '')
+                verdict = f' ({state["verdict"].replace("_", " ")})' if state.get('verdict') else ''
+                return f'{state["status"]}{verdict}' + (': ' + one_line(text, 600) if text else '')
         except (store.NotFound, OSError, ValueError, KeyError):
             return ''
         return ''
@@ -1045,7 +1064,7 @@ class Hub:
         if chat['transcript'][index].get('status') not in ('proposed', 'failed', 'cancelled'):
             raise ValueError('This suggestion has already started')
         if mode not in JOB_MODES:
-            raise ValueError('Choose prove, critic, explore, check, literature, referee or writeup')
+            raise ValueError('Choose prove, critic, explore, check, literature, referee, detailed_review, quick_review, explain or writeup')
         if not isinstance(request, str) or not request.strip():
             raise ValueError('The request cannot be empty')
         files = self.check_files(list(files))
@@ -1078,8 +1097,9 @@ class Hub:
                 task = self.start_proof(request, source_files=text_files, queue=True, on_update=on_update,
                                         **{k: v for k, v in limits.items()
                                            if k in ('rounds', 'tokens', 'seconds', 'solve_tokens', 'verify_tokens')})
-            elif mode in ('literature', 'referee'):
-                task = self.start_research(mode, request, source_files=files, online=online, queue=True, on_update=on_update,
+            elif mode == 'literature' or mode in REVIEW_MODES:
+                task = self.start_research('literature' if mode == 'literature' else 'referee', request, source_files=files,
+                                           variant=REVIEW_MODES.get(mode), online=online, queue=True, on_update=on_update,
                                            **{k: v for k, v in limits.items() if k in ('rounds', 'tokens', 'input_tokens', 'seconds', 'requests', 'chars')})
             elif mode == 'check':
                 task = self.check(chat_id, request, effort=limits.get('effort') or chat['transcript'][index].get('effort') or 'medium',

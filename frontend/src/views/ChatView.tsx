@@ -47,7 +47,7 @@ const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] 
 
 // How a card names what the model started. Critic and explore are both an answer here;
 // a literature check also answers here, with its evidence.
-type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'writeup'
+type Kind = 'answer' | 'check' | 'prove' | 'literature' | 'referee' | 'detailed_review' | 'quick_review' | 'explain' | 'writeup'
 // `cover` names the mark (components/Glyph.tsx) and its colour class.
 const KINDS: Record<Kind, { noun: string; label: string; cover: 'free' | 'check' | 'prove' | 'literature' | 'referee' | 'writeup' }> = {
   answer: { noun: 'an answer', label: 'Answer', cover: 'free' },
@@ -55,11 +55,16 @@ const KINDS: Record<Kind, { noun: string; label: string; cover: 'free' | 'check'
   prove: { noun: 'a proof', label: 'Proof', cover: 'prove' },
   literature: { noun: 'a literature report', label: 'Literature report', cover: 'literature' },
   referee: { noun: 'a review', label: 'Review', cover: 'referee' },
+  detailed_review: { noun: 'a detailed review', label: 'Detailed review', cover: 'referee' },
+  quick_review: { noun: 'a quick review', label: 'Quick review', cover: 'referee' },
+  explain: { noun: 'an explanation', label: 'Explanation', cover: 'referee' },
   writeup: { noun: 'a write-up', label: 'Write-up', cover: 'writeup' },
 }
 const kindOf = (mode: RouteMode): Kind => (mode === 'critic' || mode === 'explore' ? 'answer' : mode)
 const effortKind = (mode: RouteMode): EffortKind | null =>
-  mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : mode === 'literature' || mode === 'referee' ? 'research' : null
+  mode === 'prove' ? 'proof' : mode === 'writeup' ? 'writeup' : ['literature', 'referee', 'detailed_review', 'quick_review', 'explain'].includes(mode) ? 'research' : null
+// Quick reviews and explanations are pages of the Review notebook.
+const pageOf = (mode: Exclude<RouteMode, 'check'>) => (mode === 'quick_review' || mode === 'explain' || mode === 'detailed_review' ? 'referee' : mode)
 const effortLabel = (effort?: string) => EFFORTS.find((item) => item.id === (isLevel(effort) ? effort : 'medium'))!.label
 
 export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
@@ -437,7 +442,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
               {item.orchestrated ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && mode !== 'check' && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id)}>Open the {info.label.toLowerCase()}</a>}
+          {item.job_id && mode !== 'check' && <a className="btn btn-small btn-quiet" href={href(pageOf(mode), item.job_id)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}

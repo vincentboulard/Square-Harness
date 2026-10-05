@@ -8,7 +8,7 @@ several separate jobs; each becomes its own suggestion with a suggested effort.
 import json
 import re
 
-JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'writeup')
+JOB_MODES = ('prove', 'critic', 'explore', 'check', 'literature', 'referee', 'detailed_review', 'quick_review', 'explain', 'writeup')
 ROUTE_MODES = JOB_MODES + ('clarify',)
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'poincare')
 MAX_TASKS = 4
@@ -45,11 +45,20 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   with Neumann conditions", "where is the Rellich theorem proved?", "is Theorem 9.26 of Brezis about this?".
 - literature: a reading list or map of the literature on a topic (what to read, surveys, core papers by
   theme, recent developments), e.g. "what should I read on…", "survey the literature on…".
-- referee: a review report assessing a manuscript file the user names or attaches.
+- referee: a referee review of a whole manuscript file the user names or attaches: an overview of the paper and
+  its typos and presentation problems, without checking the proofs.
+- detailed_review: the same review plus a check of the proofs (costs more); only when the user asks for a
+  detailed or thorough review or for the proofs of a paper to be checked.
+- quick_review: check whether a given proof of a given statement is correct, with a saved verdict and
+  located issues, e.g. "is this proof right?", "check the proof of Lemma 3.2 in paper.tex". The request
+  must contain the statement and its proof word for word, or name the file and the result.
+- explain: a precise, step-by-step explanation of a given lemma, theorem or proof for a mathematician from
+  another field, e.g. "explain this lemma", "walk me through the proof of Theorem 2 in notes.md".
 - writeup: turn notes, a draft or a PDF the user names or attaches into a clean LaTeX document.
 A question (why, what, how, is it true that) is answered with critic or explore. A request for a
-reference or citation to a known result is a check, not a literature report. Choose
-prove, literature, referee or writeup only when the message asks for that kind of work;
+reference or citation to a known result is a check, not a literature report. A given proof to verify is
+a quick_review; a whole manuscript to referee is a referee report (detailed_review when its proofs should be
+checked too). Choose prove, literature, referee, detailed_review, quick_review, explain or writeup only when the message asks for that kind of work;
 never choose one just because files exist in the workspace.
 Return one task per separate piece of work, in the order they should run. A single question,
 statement or request is exactly one task. Give several (at most 4) only when the message
@@ -66,7 +75,7 @@ poincare only when the user asks for the maximum effort.
 When the message is too ambiguous to choose, return no tasks and ask one short `question`;
 otherwise `question` is empty. Return only JSON matching the schema."""
 
-FALLBACK_QUESTION = ('Should I prove a statement, check an argument, explore an idea, find a reference, '
+FALLBACK_QUESTION = ('Should I prove a statement, check a proof, explain a result, explore an idea, find a reference, '
                      'write a literature report or a review of a manuscript, or write up notes in LaTeX?')
 
 

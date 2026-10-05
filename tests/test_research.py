@@ -101,6 +101,19 @@ class ResearchTests(unittest.TestCase):
         self.client = FakeClient(replies)
         return ResearchRunner(Agent(self.client, workspace, ctx=kwargs.get('ctx', 16384), predict=kwargs.get('predict', 4096)))
 
+    def test_a_review_that_only_announces_itself_leaves_the_report_partial(self):
+        (self.root / 'paper.md').write_text('Claim: x = x.\nProof: reflexivity.\n')
+        draft = 'The manuscript proves reflexivity [M1:L1-L2].'
+        replies = [response('Plan.'), response(calls=[tool('read_manuscript', source_id='M1', start_line=1, end_line=2)]),
+                   response('Read.'), response(draft),
+                   response("I'll review the report draft against the saved evidence.\n\nLet me verify the key claims."),
+                   response(draft)]
+        runner = self.runner(replies)
+        result = runner.start('Review paper.md', kind='referee')
+        self.assertEqual(result['status'], 'partial')
+        self.assertIn('only announced what it would check', result['report'])
+        self.assertIn('No tools are available in this step', self.client.requests[4]['messages'][1]['content'])
+
     def test_real_phases_and_exact_source_provenance(self):
         literature = FakeLiterature()
         citation = f'[{DOC}:L1-L2]'
@@ -152,7 +165,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(runner.state['sources'][0]['content'], original)
         self.assertIn('Offline mode', runner.state['evidence'][1]['result'])
         self.assertEqual(runner.state['manuscript_ranges']['M1'], [[1, 2]])
-        self.assertIn('Mathematical referee report', runner.state['skill'])
+        self.assertIn('mathematical referee report', runner.state['skill'])
         self.assertEqual(literature.stats['requests'], 0)
         self.assertNotIn(original, json.dumps(runner.state['evidence'][1]['arguments']))
 

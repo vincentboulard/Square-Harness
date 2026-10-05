@@ -38,14 +38,7 @@ square-harness --online --workspace ~/research/my-paper --mode literature \
   --output literature-review.md
 ```
 
-For a manuscript review:
-
-```bash
-square-harness --offline --workspace ~/research/my-paper --mode referee \
-  --research-file manuscript.tex \
-  --prompt "Assess the arguments and distinguish demonstrated errors, gaps and unresolved concerns." \
-  --output referee-report.md
-```
+For a manuscript review, see [Reviews](#reviews-quick-check-journal-report-explanation) below.
 
 Repeat `--research-file` for additional sources. These files are pinned on job
 creation. `--output` is relative to the workspace and does not silently overwrite
@@ -65,6 +58,57 @@ discovery uses Brave Search. Optional keys are `SEMANTIC_SCHOLAR_API_KEY` and
 `BRAVE_SEARCH_API_KEY`. Do not place keys in prompts or
 manuscripts. No key is required to begin with arXiv; service limits still apply.
 Cached sources live under `.mathagent/literature/`.
+
+## Reviews: quick check, journal report, explanation
+
+Review comes in four kinds, on one page of the interface (and as `/quick_review`,
+`/referee`, `/detailed_review` and `/explain` in the terminal):
+
+- **Quick check** (`quick_review`): is this proof correct? Paste the statement and its
+  proof, or pin a file and name the result (`Lemma 3.2`, a label such as `lem:compact`).
+  Independent verifier passes read the proof through different lenses (line by line,
+  adversarial, results used, overall structure); each alleged error is re-checked by a
+  fresh call; the verdict is *no issue found*, *issues found* or *uncertain*, and every
+  objection cites the proof lines with an exact quote. The proof is never rewritten; each
+  issue comes with a suggested repair.
+- **Review** (`referee`): a referee report on a pinned manuscript for understanding and
+  presentation. The whole paper is read part by part: an overview (question, main results,
+  proof strategy, how the sections fit, assumptions), part-by-part notes, and typos and
+  presentation problems with corrections, then an assessment, a recommendation and a note
+  to the editor. The proofs are not checked. From a PDF, only comments on words and
+  sentences are kept, since its formulas are garbled; a TeX source gives the full check.
+- **Detailed review** (`detailed_review`): the review, then the proofs are checked one at a
+  time, main results first, as far as the effort allows, with twice the budget of a review.
+  The controller maps the manuscript (sections, numbered statements, their proofs, the
+  results and equations each proof uses, its citations). Numbered major and minor comments
+  on the proofs come from checked findings, with questions to the authors and a table of
+  what was checked and what was not; when a main result's proof was not checked, the
+  recommendation says it is provisional. Online, results the proofs cite are checked with
+  the literature check and the contribution is compared with search results (titles and
+  abstracts only).
+- **Explanation** (`explain`): a precise explanation of a result and its proof for a
+  mathematician from another field: what it says, the idea, a sentence-by-sentence
+  walkthrough (every line of a short proof is covered), the standard facts used, and
+  where each hypothesis matters. An accuracy pass checks it against the source.
+
+```bash
+square-harness --offline --workspace ~/research/my-paper --mode referee \
+  --research-file manuscript.tex --prompt "Referee this manuscript." --output referee-report.md
+square-harness --offline --workspace ~/research/my-paper --mode detailed_review \
+  --research-file manuscript.tex --prompt "Check the proofs too." --output detailed-report.md
+square-harness --offline --workspace ~/research/my-paper --mode quick_review \
+  --research-file manuscript.tex --prompt "Lemma 3.2"
+```
+
+Effort sets the depth: the number of verifier passes for a quick check (1 at Low to 5 at
+Poincaré, with re-checks from Medium), and for a detailed review how far down the
+dependency graph the checks go (Low: main results; Medium: and what their proofs use;
+High: every proof in the body; Extra high and Poincaré: appendices too, with two passes
+on the main results). Each model call sees one proof with only what it needs, so small
+contexts work; on a vLLM server (`--backend openai`) independent checks run
+`--assistant-concurrency` at a time. Checks think before they answer when the output
+ceiling leaves room. The manuscript map reads TeX best; for PDFs it relies on the text
+extraction, whose formulas can be garbled.
 
 ## LaTeX write-ups
 

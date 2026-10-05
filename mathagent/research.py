@@ -51,6 +51,12 @@ Output Markdown review notes. This is model review, not certification.
 """
 
 
+def announces_only(text):
+    """A short answer that only says what it is about to do ("Let me verify the claims…") is not a review."""
+    text = text.strip()
+    return len(text) < 600 and bool(re.search(r"(?i)\b(?:let me|i will|i'll|i am going to|i'm going to)\b[^\n]*$", text))
+
+
 def _estimate(value):
     return max(1, math.ceil(len(json.dumps(value, ensure_ascii=False).encode()) / 3))
 
@@ -168,8 +174,12 @@ class ResearchRunner:
         sources = self._pin(names, 'M') + self._extra_sources()
         if sum(len(s['content'].encode()) for s in sources) > 2_000_000:
             raise ValueError('Pinned manuscripts exceed 2 MB; split this research task')
-        skill = files('mathagent').joinpath('skills', kind, 'SKILL.md').read_text(encoding='utf-8')
+        skill = files('mathagent').joinpath('skills', self._skill_folder(kind), 'SKILL.md').read_text(encoding='utf-8')
         return self._create(goal, kind, settings, sources, skill, reference=reference)
+
+    def _skill_folder(self, kind):
+        """The skill a job follows; review variants share the referee kind with their own skills."""
+        return kind
 
     def _extra_sources(self):
         """Subclasses may pin further snapshots (for example templates)."""
@@ -388,9 +398,12 @@ class ResearchRunner:
             self.state['phase'] = 'review'
             self._report()
         elif phase == 'review':
-            result = self._call('review', REVIEW_POLICY + '\nCitation checks: ' + json.dumps(self.state.get('citation_issues', [])), cap=2200)
+            result = self._call('review', REVIEW_POLICY + '\nCitation checks: ' + json.dumps(self.state.get('citation_issues', [])), cap=2200,
+                                trailer='No tools are available in this step: write the review notes now, from the material above.')
             self.state['review'] = result['text']
-            self.state['review_complete'] = result['complete'] and bool(result['text'].strip())
+            self.state['review_complete'] = result['complete'] and bool(result['text'].strip()) and not announces_only(result['text'])
+            if result['text'].strip() and announces_only(result['text']):
+                self.state['warnings'].append('The independent review only announced what it would check; it does not count as a review.')
             self.state['phase'] = 'revise' if self._can_revise() else 'done'
         elif phase == 'revise':
             result = self._call('revise', 'Revise the Markdown report in light of the independent review and citation checks. Preserve unresolved concerns explicitly; do not claim review resolved an issue without evidence. Use only encountered source references. Output the whole revised report.', cap=4096)

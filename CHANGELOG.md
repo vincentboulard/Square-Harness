@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Review has four kinds on one page: a quick check of a proof (independent
+  verifier passes through different lenses, each alleged error re-checked, a
+  verdict with located issues and suggested repairs; the proof is never
+  rewritten); a review of a manuscript (the whole paper read part by part for an
+  overview and its typos and presentation problems, without proof checks); a
+  detailed review that then checks the proofs one at a time, main results first,
+  from a map of the manuscript's statements, proofs and dependencies, at twice
+  the budget; and a precise explanation of a result and its proof. Independent
+  calls run concurrently on vLLM. The Assistant and the terminal start them as
+  `quick_review`, `referee`, `detailed_review` and `explain`.
+- An independent research review that only announces what it will check no
+  longer counts as a review: the report stays `partial`.
+
 - Literature check: one or two precise references for a known result, each
   graded (read, cited, located, contradicted, not found) from the passages
   actually read, with papers that cite the work found through Crossref, the

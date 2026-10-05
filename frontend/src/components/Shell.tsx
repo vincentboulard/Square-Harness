@@ -12,6 +12,7 @@ import { Inline } from './Markdown'
 import { Glyph } from './Glyph'
 import { AutoIcon, ChevronIcon, CloseIcon, FileIcon, MenuIcon, MoonIcon, PanelLeftIcon, PauseIcon, PhoneIcon, PlusIcon, SunIcon, TrashIcon } from './Icons'
 import { proofLook, researchLook, reviewStatusLook, Square } from './Square'
+import { VARIANT_NAMES, VERDICTS } from '../review'
 
 export function BrandMark({ size = 32 }: { size?: number }) {
   return (
@@ -183,7 +184,8 @@ function SideList({ route, app }: { route: Route; app: AppState }) {
             <span className="side-body">
               <span className="side-name"><Inline limit={110}>{job.title}</Inline></span>
               <span className="side-meta">
-                <span>{look.label}</span>
+                {job.variant && <span className="side-variant">{VARIANT_NAMES[job.variant]}</span>}
+                <span>{job.verdict ? VERDICTS[job.verdict]?.label || look.label : look.label}</span>
                 <span className="side-time">{ago(job.updated_at)}</span>
               </span>
             </span>

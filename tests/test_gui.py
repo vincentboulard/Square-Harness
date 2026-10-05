@@ -461,14 +461,13 @@ class ChatTests(GuiCase):
 class ResearchTests(GuiCase):
     def test_offline_referee_report_with_manuscript_evidence(self):
         (self.root / 'manuscript.tex').write_text('Claim: for every real x, x=x.\nProof: equality is reflexive.\n')
-        draft = '# Referee report\n\nThe manuscript states reflexivity [M1:L1-L2].\n'
-        self.fake.replies = [
-            text('Plan: read the manuscript.'),
-            [{'message': {'content': '', 'tool_calls': [{'function': {'name': 'read_manuscript',
-              'arguments': {'source_id': 'M1', 'start_line': 1, 'end_line': 2}}}]},
-              'done': True, 'done_reason': 'stop', 'eval_count': 20, 'prompt_eval_count': 400}],
-            text('Read; reflexivity is the argument.'), text(draft),
-            text('The cited passage supports the description.'), text(draft)]
+        scope = {'overview': 'A one-line note on reflexivity.', 'field': 'logic', 'contribution': 'Reflexivity of equality.',
+                 'main': [], 'notation': [], 'closest': [], 'queries': []}
+        check = {'explanation': 'The argument is reflexivity.', 'issues': [], 'verdict': 'no_issue_found'}
+        write = {'summary': 'The manuscript proves reflexivity.', 'significance': 'Elementary.', 'correctness': 'Checked.',
+                 'presentation': 'Short.', 'recommendation': 'minor_revision', 'reasons': 'Add context.', 'confidential': 'None.'}
+        read = {'summary': 'States reflexivity and proves it.', 'comments': []}
+        self.fake.replies = [text(json.dumps(read)), text(json.dumps(scope)), text(json.dumps(write))]  # a review checks no proof
         started = self.ok('POST', '/api/research', {'kind': 'referee', 'goal': 'Review this manuscript.',
                                                     'source_files': ['manuscript.tex'], 'rounds': 2, 'tokens': 16000,
                                                     'input_tokens': 50000, 'requests': 0, 'seconds': 60, 'online': False})
@@ -476,17 +475,35 @@ class ResearchTests(GuiCase):
         self.assertEqual(started['task']['label'], 'Review')
         self.assertEqual(self.wait_task(timeout=30)['state'], 'done')
         detail = self.ok('GET', f'/api/research/{job_id}')
-        self.assertEqual(detail['status'], 'reviewed', detail['citation_issues'])
-        self.assertEqual(detail['manuscript_ranges'], {'M1': [[1, 2]]})
-        self.assertEqual(detail['evidence'][0]['tool'], 'read_manuscript')
-        self.assertIn('[M1:L1-L2]', detail['draft'])
+        self.assertEqual(detail['status'], 'reviewed', detail['warnings'])
+        self.assertEqual((detail['variant'], detail['pipeline'], detail['level']), ('review', 'review-v1', 'medium'))
+        self.assertIn('The proofs were not checked in this review', detail['draft'])
+        self.assertIn([1, 2], detail['manuscript_ranges']['M1'])
+        self.assertIn('The manuscript proves reflexivity.', detail['draft'])
+        self.assertIn('**Minor revision**', detail['draft'])
         self.assertEqual(detail['budget']['requests'], {'used': 0, 'limit': 0})
-        self.assertEqual(self.ok('GET', '/api/research')['jobs'][0]['kind'], 'referee')
+        listed = self.ok('GET', '/api/research')['jobs'][0]
+        self.assertEqual((listed['kind'], listed['variant']), ('referee', 'review'))
         sources = self.ok('GET', f'/api/research/{job_id}/sources')['sources']
         self.assertEqual(sources[0]['id'], 'M1')
         stream = detail['calls'][0]['stream']
-        self.assertEqual(self.ok('GET', f'/api/research/{job_id}/stream/{stream}?from=0')['text'], 'Plan: read the manuscript.')
+        self.assertEqual(self.ok('GET', f'/api/research/{job_id}/stream/{stream}?from=0')['text'], json.dumps(read))
         self.assertTrue(all(request['think'] is False for request in self.fake.requests))
+
+    def test_quick_review_of_a_pasted_proof(self):
+        check = {'explanation': 'Each step follows.', 'issues': [], 'verdict': 'no_issue_found'}
+        self.fake.replies = [text(json.dumps(check))]
+        started = self.ok('POST', '/api/research', {'kind': 'referee', 'variant': 'quick', 'rounds': 1,
+                                                    'goal': 'Claim: x = x for every real x.\nProof. Equality is reflexive.',
+                                                    'online': False})
+        self.assertEqual(started['task']['label'], 'Review · quick check')
+        self.assertEqual(self.wait_task(timeout=30)['state'], 'done')
+        detail = self.ok('GET', f'/api/research/{started["id"]}')
+        self.assertEqual((detail['variant'], detail['verdict'], detail['status']), ('quick', 'no_issue_found', 'reviewed'))
+        self.assertEqual(detail['sources'][0]['path'], 'pasted-text.md')
+        self.assertIn('by 1 independent pass', detail['draft'])
+        self.assertIn('No issue found', detail['report'])
+        self.assertEqual(self.request('POST', '/api/research', {'kind': 'referee', 'variant': 'other', 'goal': 'x'})[0], 400)
 
 
 class LiveUpdateTests(GuiCase):

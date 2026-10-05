@@ -272,8 +272,14 @@ def researches(h, body):
 
 @route('POST', '/api/research')
 def research_start(h, body):
+    variant = body.get('variant')
+    if variant is not None and variant not in ('quick', 'review', 'journal', 'explain'):
+        raise ValueError('variant must be quick, review, journal (the detailed review) or explain')
+    target = body.get('target') or ''
+    if not isinstance(target, str) or len(target) > 200:
+        raise ValueError('target is a short text, at most 200 characters')
     task = h.server.hub.start_research(
-        body.get('kind'), _text(body, 'goal', 20000), source_files=_files(body),
+        body.get('kind'), _text(body, 'goal', 20000), source_files=_files(body), variant=variant, target=target,
         rounds=_int(body, 'rounds', 1, 100), tokens=_int(body, 'tokens', 1024),
         input_tokens=_int(body, 'input_tokens', 2048), seconds=_seconds(body, 'seconds'),
         requests=_int(body, 'requests', 0, 100), chars=_int(body, 'chars', 1000, 1_000_000),

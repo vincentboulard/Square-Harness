@@ -10,7 +10,7 @@ const NOTEBOOKS: Partial<Record<Mode, string>> = {
   free: 'Say what you need. The model picks the workflow and its effort and starts at once; its card says what started and can cancel it.',
   prove: 'A solver writes a whole proof, a fresh verifier reviews it, and a concrete objection leads to a repair.',
   literature: 'A verified reading list on a topic: entry points, then the core literature by theme.',
-  referee: 'A review of a manuscript, with line-level citations for every claim it checks.',
+  referee: 'Three kinds of review: a quick check of a proof, a journal referee report on a manuscript, and a precise explanation of a result, each pointing to the lines it discusses.',
   writeup: 'Clean LaTeX from your notes, drafts or PDFs, in your own macros and style.',
 }
 

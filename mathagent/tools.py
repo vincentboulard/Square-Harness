@@ -119,10 +119,19 @@ class Workspace:
         if not isinstance(pattern, str) or not pattern:
             raise ValueError('Provide nonempty literal search text (not regex)')
         hits = []
-        for p in self.files(self.readable - {'.pdf'}):
+        # PDFs are searched in their local text extraction (as read_file reads them): pinned ones,
+        # and all readable ones when the user allows PDFs. Nothing is uploaded.
+        pdfs = [] if self.literature is None else [q for q in self.pinned if q.suffix.lower() == '.pdf']
+        if self.literature is not None and '.pdf' in self.readable:
+            pdfs += [q for q in self.files({'.pdf'}) if q not in pdfs]
+        for p in list(self.files(self.readable - {'.pdf'})) + pdfs:
             try:
-                lines = self.text(p).splitlines()
-            except (OSError, ValueError, UnicodeError):
+                if p.suffix.lower() == '.pdf':
+                    summary = self.literature.import_local(str(p.relative_to(self.root)))
+                    lines = self.literature._document(summary['document_id'])[1]
+                else:
+                    lines = self.text(p).splitlines()
+            except (OSError, ValueError, UnicodeError):  # LiteratureError is a ValueError
                 continue
             for i, line in enumerate(lines, 1):
                 if pattern.casefold() in line.casefold():
@@ -189,7 +198,9 @@ resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
         kinds = ', '.join(sorted(self.readable))
         result = [] if not self.readable else [
             schema('list_files', f'List nonhidden files the user allows you to read ({kinds}; scan cap 2000).', {}),
-            schema('search_text', 'Case-insensitive literal search in allowed text files (not PDFs); max 50 matches.',
+            schema('search_text', 'Case-insensitive literal search in allowed files'
+                   + (', including the extracted text of attached or readable PDFs' if self.literature is not None else ' (not PDFs)')
+                   + '; max 50 matches.',
                    {'pattern': string}, ['pattern']),
         ]
         if self.readable or self.pinned:
