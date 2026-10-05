@@ -1,3 +1,4 @@
+import { activeTasks } from './concurrency.ts'
 import type { TaskSnapshot, TaskSummary } from './api.ts'
 
 const BUSY = new Set(['queued', 'starting', 'running', 'pausing'])
@@ -9,8 +10,8 @@ function belongsToChat(task: TaskSummary | null, id: string) {
 /** A legacy delegated job can still be using its originating conversation. */
 export function chatDeleteBlocked(snapshot: TaskSnapshot, id: string): boolean {
   if (snapshot.routing.includes(id)) return true
-  if (snapshot.task && BUSY.has(snapshot.task.state)
-    && (belongsToChat(snapshot.task, id) || snapshot.live?.chat === id)) return true
+  if (activeTasks(snapshot).some((entry) => belongsToChat(entry.task, id) || entry.live?.chat === id)) return true
+  if (snapshot.task?.state === 'queued' && belongsToChat(snapshot.task, id)) return true
   return snapshot.queue.some((task) => BUSY.has(task.state) && belongsToChat(task, id))
 }
 
@@ -19,6 +20,7 @@ export function withoutDeletedChat(snapshot: TaskSnapshot, id: string): TaskSnap
   const removeTask = belongsToChat(snapshot.task, id) && !BUSY.has(snapshot.task!.state)
   return {
     ...snapshot,
+    ...(snapshot.tasks ? { tasks: snapshot.tasks.filter((entry) => !belongsToChat(entry.task, id) && entry.live?.chat !== id) } : {}),
     task: removeTask ? null : snapshot.task,
     live: snapshot.live?.chat === id ? null : snapshot.live,
     activity: removeTask ? [] : snapshot.activity,

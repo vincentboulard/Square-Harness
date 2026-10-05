@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 import { ApprovalDialog } from './components/Approval'
 import { DropZone } from './components/DropZone'
 import { Login } from './components/Login'
-import { BrandMark, Rail, SideSpine, Sidebar, TopBar } from './components/Shell'
+import { JobNavigation } from './components/JobNavigation'
+import { BrandMark, SideSpine, Sidebar, TopBar } from './components/Shell'
 import { MODES } from './modes'
 import { usePanelHidden } from './panels'
-import { notebook, useRoute, type Route } from './router'
+import { useRoute, type Route } from './router'
 import { useApp } from './store'
-import { About } from './views/About'
 import { ChatView } from './views/ChatView'
 import { ProofNew } from './views/ProofNew'
 import { ProofView } from './views/ProofView'
@@ -17,7 +17,6 @@ import { WriteupNew } from './views/WriteupNew'
 import { WriteupView } from './views/WriteupView'
 
 function View({ route }: { route: Route }) {
-  if (route.page === 'about') return <About />
   const info = MODES[route.mode]
   if (info.kind === 'proof') return route.id ? <ProofView key={route.id} id={route.id} tab={route.tab} /> : <ProofNew />
   if (info.kind === 'chat' || info.kind === 'free') {
@@ -36,25 +35,24 @@ export function App() {
   const route = useRoute()
   const [drawer, setDrawer] = useState(false)
   const listHidden = usePanelHidden('sidebar')
-  useEffect(() => setDrawer(false), [route.mode, route.id, route.page])
+  useEffect(() => setDrawer(false), [route.mode, route.id])
   if (app.auth === 'checking') {
     return <div className="splash paper"><BrandMark size={56} /></div>
   }
   if (app.auth === 'needed') return <Login />
-  const about = route.page === 'about'
   return (
-    <div className={'app' + (listHidden && !about ? ' list-hidden' : '')}>
+    <div className={'app' + (listHidden ? ' list-hidden' : '')}>
       <div className={'nav' + (drawer ? ' nav-open' : '')}>
-        <Rail route={route} />
-        {!about && <Sidebar route={route} />}
+        <Sidebar route={route} />
       </div>
-      {!about && listHidden && <SideSpine route={route} />}
+      {listHidden && <SideSpine route={route} />}
       {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
       <main className="main">
-        <TopBar title={about ? 'About' : MODES[notebook(route.mode)].label} onMenu={() => setDrawer(true)} />
+        <TopBar route={route} onMenu={() => setDrawer(true)} />
         {app.connection === 'reconnecting' && (
           <div className="connection" role="status">Reconnecting to the harness. Saved work is safe; live updates resume when it answers.</div>
         )}
+        <JobNavigation route={route} />
         <View route={route} />
       </main>
       <ApprovalDialog />

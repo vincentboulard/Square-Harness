@@ -463,6 +463,205 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result['status'], 'incomplete')
         self.assertIn('unproved', result['warnings'][0])
 
+    def test_standard_reference_disposition_closes_lookup_without_another_tool(self):
+        worker_answer = ('Morris W. Hirsch, Differential Topology. Publisher and edition were not verified. '
+                         'Chapter 4 is an unconfirmed guess.')
+        def lookup(action, child, checkpoint):
+            self.children.append(copy.deepcopy(child))
+            child['job_id'] = 'reference_1'
+            checkpoint()
+            return {'status': 'answered', 'answer': worker_answer,
+                    'disposition': 'answer_with_qualification', 'job_id': 'reference_1'}
+        # No synthesis reply is supplied: the qualified worker answer is final.
+        runner, client = self.runner([calls(call(args=action(mode='check')))], lookup)
+        result = runner.run('Find a classical reference for the tubular neighborhood theorem.')
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['answer'], worker_answer)
+        self.assertEqual(len(self.children), 1)
+        self.assertEqual(result['actions'], 1)
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(runner.state['main_calls'], 1)
+        self.assertEqual(runner.state['answer_source'], {'kind': 'worker_result', 'job_id': 'reference_1'})
+        self.assertEqual(runner.agent.history[-1]['content'], worker_answer)
+        self.assertNotIn('Springer', result['answer'])
+        self.assertNotIn('1976', result['answer'])
+        self.assertIn('Publisher and edition were not verified.', result['answer'])
+
+    def test_saved_qualified_reference_returns_without_model_or_worker_reexecution(self):
+        answer = 'Brezis is a suggested standard reference; the precise place is unconfirmed.'
+        snapshots, executions, interrupted = [], [], [False]
+        query = 'Find a standard reference for Neumann regularity.'
+
+        def lookup(action, child, checkpoint):
+            executions.append(child['id'])
+            return {'status': 'answered', 'answer': answer, 'job_id': 'saved_reference',
+                    'disposition': 'answer_with_qualification'}
+
+        def save(state):
+            snapshots.append(state)
+            if (not interrupted[0] and state['children'] and state['children'][0]['status'] == 'complete'
+                    and any(m['role'] == 'tool' for m in state['messages'])):
+                interrupted[0] = True
+                raise KeyboardInterrupt()
+
+        runner, client = self.runner([calls(call(args=action(mode='check'), call_id='lookup_call'))],
+                                     lookup, checkpoint=save)
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(query)
+        saved = copy.deepcopy(snapshots[-1])
+        [native] = [m for m in saved['messages'] if m['role'] == 'tool']
+        self.assertEqual(native['tool_call_id'], 'lookup_call')
+        resumed = Orchestrator(runner.agent, lookup)
+        result = resumed.run(query, state=saved)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['answer'], answer)
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(result['main_calls'], 1)
+        self.assertEqual([m for m in resumed.state['messages'] if m['role'] == 'tool'], [native])
+        self.assertEqual(resumed.state['answer_source'], {'kind': 'worker_result', 'job_id': 'saved_reference'})
+        completed = copy.deepcopy(resumed.state)
+        again = Orchestrator(runner.agent, lookup)
+        self.assertEqual(again.run(query, state=completed), result)
+        self.assertEqual(again.state['messages'], completed['messages'])
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(len(client.requests), 1)
+
+    def test_interrupted_qualified_answer_emission_resumes_without_duplicate_native_answer(self):
+        answer = 'Hirsch is a suggested standard reference; its chapter is unconfirmed.'
+        query = 'Find a standard reference for the tubular neighborhood theorem.'
+        executions, interrupted = [], [False]
+
+        def lookup(action, child, checkpoint):
+            executions.append(child['id'])
+            return {'status': 'answered', 'answer': answer, 'job_id': 'emission_reference',
+                    'disposition': 'answer_with_qualification'}
+
+        def emit(kind, value):
+            if kind == 'text' and value == answer and not interrupted[0]:
+                interrupted[0] = True
+                raise KeyboardInterrupt()
+
+        runner, client = self.runner([calls(call(args=action(mode='check'), call_id='lookup_call'))],
+                                     lookup, emit=emit)
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(query)
+        saved = copy.deepcopy(runner.state)
+        [native] = [m for m in saved['messages'] if m['role'] == 'tool']
+        self.assertEqual(saved['messages'][-1]['content'], answer)
+        resumed = Orchestrator(runner.agent, lookup)
+        result = resumed.run(query, state=saved)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['answer'], answer)
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual([m for m in resumed.state['messages'] if m['role'] == 'tool'], [native])
+        self.assertEqual([m['content'] for m in resumed.state['messages']
+                          if m['role'] == 'assistant' and m.get('content') == answer], [answer])
+        self.assertEqual(resumed.state['answer_source'], {'kind': 'worker_result', 'job_id': 'emission_reference'})
+        self.assertEqual(resumed.agent.history[-1]['content'], answer)
+        self.assertEqual(result['main_calls'], 1)
+
+    def test_standard_reference_cannot_launch_two_workers_for_one_lookup(self):
+        runner, client = self.runner([calls(call(args=action(mode='check'), call_id='first'),
+            call(args=action(mode='check', request='Now find the exact theorem number.'), call_id='retry')), final()])
+        result = runner.run('Find a standard reference for this theorem.')
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(len(self.children), 1)
+        errors = [json.loads(m['content']) for m in runner.state['messages'] if m['role'] == 'tool']
+        self.assertTrue(any(r.get('status') == 'invalid_action' for r in errors))
+
+    def test_standard_reference_does_not_stop_independent_requested_proof(self):
+        def worker(action, child, checkpoint):
+            value = self.worker(action, child, checkpoint)
+            if action['mode'] == 'check':
+                value['disposition'] = 'answer_with_qualification'
+            return value
+        runner, client = self.runner([calls(call(args=action(mode='check'))),
+            calls(call(args=action(mode='prove'), call_id='proof')), final()], worker)
+        result = runner.run('Find a reference and prove the lemma.')
+        self.assertEqual(result['status'], 'complete')
+        self.assertIn('tools', client.requests[1])
+        self.assertEqual([c['action']['mode'] for c in self.children], ['check', 'prove'])
+
+    def test_standard_reference_does_not_skip_an_additional_request_in_another_sentence(self):
+        requests = [
+            'Find a standard reference for this theorem. Include a complete proof.',
+            'Find a standard reference for this theorem. Explain why it applies.',
+            'Find a standard reference for this theorem. Check the hypotheses.',
+        ]
+        for query in requests:
+            with self.subTest(query=query):
+                worker_answer = 'A standard reference is suggested; the precise place remains unconfirmed.'
+                parent_answer = 'Here is the requested proof or application review, with the reference qualified.'
+
+                def lookup(action, child, checkpoint):
+                    return {'status': 'answered', 'answer': worker_answer, 'job_id': 'qualified_reference',
+                            'disposition': 'answer_with_qualification'}
+
+                runner, client = self.runner([calls(call(args=action(mode='check'))), final(parent_answer)], lookup)
+                result = runner.run(query)
+                self.assertEqual(result['status'], 'complete')
+                self.assertEqual(result['answer'], parent_answer)
+                self.assertEqual(len(client.requests), 2)
+                self.assertEqual(result['main_calls'], 2)
+                self.assertNotIn('answer_source', runner.state)
+                self.assertIn('tools', client.requests[1])
+                [native] = [m for m in client.requests[1]['messages'] if m['role'] == 'tool']
+                self.assertEqual(json.loads(native['content'])['result']['answer'], worker_answer)
+
+    def test_lookup_at_action_limit_replaces_continuation_promise_with_answer(self):
+        promise = "The check worker couldn't confirm the exact section number. Let me try to find it directly from an open-access source."
+        runner, client = self.runner([
+            calls(call(args=action(mode='check'), call_id='A'), call(args=action(mode='check'), call_id='B')),
+            calls(*(call('list_files', {}, str(i)) for i in range(4))),
+            final(promise), final('Hirsch is located; the theorem number remains unconfirmed.')], max_actions=6)
+        result = runner.run('Find references for result A and result B.')
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['actions'], 6)
+        self.assertEqual(len(self.children), 2)
+        self.assertNotIn('tools', client.requests[-1])
+        self.assertIn('FINAL ANSWER REQUIRED NOW', client.requests[-1]['messages'][0]['content'])
+        self.assertEqual(client.requests[-1]['messages'][-1]['role'], 'user')
+        self.assertIn('CONTROLLER RECOVERY REQUEST', client.requests[-1]['messages'][-1]['content'])
+        self.assertIn('without read/cited evidence', client.requests[-1]['messages'][-1]['content'])
+        self.assertFalse(any('CONTROLLER RECOVERY REQUEST' in m.get('content', '') for m in runner.state['messages']))
+        self.assertTrue(runner.state['continuation_final_retried'])
+        self.assertIn('unconfirmed', result['answer'])
+
+    def test_continuation_with_actions_available_carries_out_next_step(self):
+        runner, client = self.runner([calls(call()), final('Let me verify the exact reference.'),
+                                     calls(call('read_result', {'job_id': 'job_1'}, 'read')), final('The reference is unconfirmed.')])
+        result = runner.run('Verify this reference.')
+        self.assertEqual(result['status'], 'complete')
+        self.assertIn('tools', client.requests[2])
+        self.assertEqual(len(self.children), 1)
+
+    def test_repeated_continuation_remains_incomplete_across_resume(self):
+        runner, client = self.runner([calls(call()), final('Je vais chercher la référence.'),
+                                     final('Let me search for the source.'), final('I will verify the source.')])
+        result = runner.run('Find a reference.')
+        self.assertEqual(result['status'], 'incomplete')
+        resumed = Orchestrator(runner.agent, runner.delegate)
+        result = resumed.run('Find a reference.', state=runner.state)
+        self.assertEqual(result['status'], 'incomplete')
+        self.assertEqual(len(client.requests), 4)
+        self.assertEqual(len(self.children), 1)
+
+    def test_opening_plan_followed_by_answer_is_not_retried(self):
+        answer = 'Let me verify the reference.\n\nIt is located, but the theorem number is unconfirmed.'
+        runner, client = self.runner([calls(call()), final(answer)])
+        self.assertEqual(runner.run('Find a reference.')['status'], 'complete')
+        self.assertEqual(len(client.requests), 2)
+
+    def test_new_turn_allows_lookup_beyond_six_actions(self):
+        runner, client = self.runner([calls(*(call('list_files', {}, str(i)) for i in range(6))),
+                                     calls(call('list_files', {}, 'seventh')), final()])
+        result = runner.run('Inspect sources.')
+        self.assertEqual(result['actions'], 7)
+        self.assertEqual(result['status'], 'complete')
+        self.assertIn('tools', client.requests[1])
+
     def test_completed_run_is_idempotent_and_resume_rejects_changed_context(self):
         runner, client = self.runner([final()])
         result = runner.run('Original question')
@@ -507,6 +706,26 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(runner.state['children'][0]['result']['status'], 'candidate_complete')
         self.assertEqual(runner.state['children'][0]['job_id'], 'saved_proof')
         return runner, client
+
+    def test_empty_post_worker_answer_gets_one_synthesis_retry_without_repeating_worker(self):
+        runner, client = self.runner([calls(call(args=action(mode='prove'))), final(''), final('Saved result with its unresolved obligations.')])
+        result = runner.run('Prove the original statement.')
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(len(self.children), 1)
+        self.assertEqual(len(client.requests), 3)
+        self.assertNotIn('tools', client.requests[-1])
+        self.assertTrue(runner.state['empty_final_retried'])
+
+    def test_repeated_empty_synthesis_is_bounded_across_resume(self):
+        runner, client = self.runner([calls(call(args=action(mode='prove'))), final(''), final(''), final('')])
+        result = runner.run('Prove the original statement.')
+        self.assertEqual(result['status'], 'incomplete')
+        self.assertEqual(len(client.requests), 3)
+        resumed = Orchestrator(runner.agent, runner.delegate)
+        result = resumed.run('Prove the original statement.', state=runner.state)
+        self.assertEqual(result['status'], 'incomplete')
+        self.assertEqual(len(client.requests), 4)
+        self.assertEqual(len(self.children), 1)
 
     def test_post_worker_full_answer_has_room_and_retains_adaptive_tools(self):
         runner, client = self.runner([

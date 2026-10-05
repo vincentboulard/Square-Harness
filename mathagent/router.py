@@ -40,8 +40,11 @@ ROUTER_POLICY = """You route a mathematician's message to the workflows of a loc
   given argument, proof or claim for gaps and counterexamples.
 - explore: open discussion of approaches, ideas, background or connections.
 - prove: a bounded proof search for one precise mathematical statement to be proved.
-- check: find one or two precise references (a book or paper and the theorem or section) for a
-  specific known result, or check a given citation, e.g. "find a reference for elliptic regularity
+- check: find a useful standard book/paper reference for a known result, optionally a chapter,
+  or verify a given citation or an explicitly requested exact locator. Ordinary reference requests
+  need one bounded lookup and an honest qualified suggestion, not a mandatory theorem number.
+  Do not add exact section/theorem/page requirements the human did not ask for.
+  Examples: "find a reference for elliptic regularity
   with Neumann conditions", "where is the Rellich theorem proved?", "is Theorem 9.26 of Brezis about this?".
 - literature: a reading list or map of the literature on a topic (what to read, surveys, core papers by
   theme, recent developments), e.g. "what should I read on…", "survey the literature on…".

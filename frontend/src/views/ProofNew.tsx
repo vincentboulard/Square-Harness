@@ -6,6 +6,7 @@ import { Markdown } from '../components/Markdown'
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp, useTick } from '../store'
+import { capacityFull } from '../concurrency'
 import { BusyNote, queuedMessage } from './shared'
 
 // File names in the statement, as the terminal notices them (proof jobs have no file tools).
@@ -70,7 +71,7 @@ export function ProofNew() {
     applyLevel(next)
   }
 
-  const running = !!snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const running = capacityFull(snapshot, status)
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true)

@@ -531,6 +531,23 @@ class ProofV051RealSizeTests(unittest.TestCase):
         self.assertEqual((kwargs['min_solve_tokens'], kwargs['verify_temperature']), (16384, .6))
 
 
+    def test_continuation_fits_remaining_budget_and_reserves_full_review(self):
+        client = ExactClient([[event('Partial derivation.', count=32768, reason='length')],
+                              [event('Completed written proof.', count=20000)], [event(approval(), count=10000)]])
+        runner, result = self.start(client, max_tokens=72000)
+        self.assertEqual(result['status'], 'candidate_complete')
+        self.assertEqual(runner.state['rounds_started'], 2)
+        self.assertEqual([r['options']['num_predict'] for r in client.requests],
+                         [32768, 72000 - 32768 - 16384, 16384])
+        self.assertLessEqual(runner.state['tokens_charged'], 72000)
+
+    def test_continuation_still_requires_minimum_solve_and_full_review(self):
+        client = ExactClient([[event('Partial derivation.', count=32768, reason='length')]])
+        runner, result = self.start(client, max_tokens=54930)
+        self.assertEqual(result['status'], 'budget_exhausted')
+        self.assertEqual(runner.state['rounds_started'], 1)
+        self.assertEqual(len(client.requests), 1)
+
     def test_repair_allowance_is_separate_and_gates_the_second_attempt(self):
         client = ExactClient([[event(PROOF_7KB, count=20000)], [event(LONG_OBJECTION, count=9000)],
                               [event('Repaired complete proof.', count=12000)], [event(approval(), count=8000)]])

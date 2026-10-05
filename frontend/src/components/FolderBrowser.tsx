@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, type FolderListing, type ReadSettings } from '../api'
+import { workspaceBusy } from '../concurrency'
 import { refreshStatus, useApp } from '../store'
 import { ErrorNote, Loading, Modal } from './common'
 import { FileIcon } from './Icons'
@@ -15,7 +16,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
   const [listing, setListing] = useState<FolderListing | null>(null)
   const [error, setError] = useState('')
   const [name, setName] = useState('')
-  const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const busy = workspaceBusy(app.snapshot)
 
   useEffect(() => {
     setError('')
@@ -66,7 +67,7 @@ export function FolderBrowser({ onClose }: { onClose: () => void }) {
               {isCurrent ? 'This is the open folder' : 'Open this folder'}
             </button>
           </div>
-          {busy && <p className="busy-note">Pause the running job before opening another folder: jobs belong to the folder they started in.</p>}
+          {busy && <p className="busy-note">Pause all active work and cancel queued turns before opening another folder. Chats and jobs belong to the folder they started in.</p>}
           <ul className="folder-list">
             {listing.folders.map((folder) => (
               <li key={folder.path}>

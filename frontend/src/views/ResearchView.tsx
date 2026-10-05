@@ -7,6 +7,7 @@ import { researchLook, researchResumable, Square, type Variant } from '../compon
 import { ago, count, firstLine } from '../format'
 import { isPanelHidden } from '../panels'
 import { go } from '../router'
+import { capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
@@ -29,7 +30,7 @@ export function ResearchView({ id, tab }: { id: string; tab: string | null }) {
   const [cite, setCite] = useState<string | null>(null)
   const active = tab || 'report'
   const jobClass = useJobClass()
-  const task = app.snapshot.task
+  const task = taskForJob(app.snapshot, 'research', id)?.task
   const ours = !!task && task.kind === 'research' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
 
   const openCite = useCallback((ref: string) => {
@@ -86,7 +87,8 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
   const look = researchLook(data.status, data.running)
   const app = useApp()
   const [error, setError] = useState('')
-  const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const busy = capacityFull(app.snapshot, app.status)
+  const ownTask = taskForJob(app.snapshot, 'research', data.id)?.task
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const steps = data.pipeline ? LIST_STEPS : STEPS
@@ -114,10 +116,10 @@ function ResearchHeader({ data, ours, pausing }: { data: ResearchDetail; ours: b
       {data.stop_reason && !data.running && <p className="muted small">{data.stop_reason}</p>}
       <div className="job-actions">
         {ours ? (
-          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause())}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
+          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
         ) : researchResumable(data.status) ? (
-          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, busy))}>
-            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Resume when the model is free' : 'Resume with the remaining budget'}
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, true))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume with the remaining budget'}
           </button>
         ) : null}
         {data.running && !ours && <span className="muted">Running in another process, such as a terminal.</span>}
@@ -156,12 +158,12 @@ function Report({ data, flagged, issues, onCite }: { data: ResearchDetail; flagg
 function LiveResearch({ id, role, file }: { id: string; role: string; file: string }) {
   const stream = useLiveStream('research', id, file)
   const app = useApp()
-  const task = app.snapshot.task
+  const task = taskForJob(app.snapshot, 'research', id)?.task
   const ours = !!task && task.kind === 'research' && task.target === id
   return (
     <div className="live" id="live">
       <p className="live-head"><Square variant="running" size={14} /> {ROLES[role]?.active || role}</p>
-      {ours && <ActivityLog items={app.snapshot.activity} />}
+      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || []} />}
       <StreamBody stream={stream} role={role} live />
     </div>
   )

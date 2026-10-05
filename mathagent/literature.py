@@ -1024,6 +1024,8 @@ with open(sys.argv[2], 'w', encoding='utf-8') as out:
             return status, response_headers, b''.join(chunks)
         except LiteratureError:
             raise
+        except ssl.SSLCertVerificationError:
+            raise LiteratureError('HTTPS certificate verification failed; configure SSL_CERT_FILE with a current trusted CA bundle') from None
         except (OSError, http.client.HTTPException):
             raise LiteratureError('HTTPS retrieval failed or timed out; check network and source availability') from None
         finally:

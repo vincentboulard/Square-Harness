@@ -255,12 +255,37 @@ v0.4 stay listed with their report, sources and files, but cannot be resumed.
 Every job page also lists its saved files: exact request payloads, streamed
 answers and intermediate results. Pause stops model work at the next checkpoint,
 like Ctrl+C in the terminal; Resume continues with the remaining saved budget.
-Standalone jobs use one active job slot. An Assistant turn can include several
-focused tasks within that slot; independent tasks can run concurrently on an
-OpenAI-compatible server, within the turn's shared allowance.
-A job started while another runs, from a form, a suggestion or a Resume button,
-waits in the queue shown under the running task, where it can be cancelled; it
-starts when the model is free. Approval dialogs replace the terminal's `[y/N]`
+The interface allows two active conversations or standalone jobs by default.
+Each keeps its full generated-token, input-token and time allowance. Two chats
+with 60,000 generated tokens each can therefore spend 120,000 tokens in total.
+Only one pending turn can write to each conversation, and a saved job cannot
+be resumed twice concurrently. Pause controls always select one particular task.
+An Assistant turn can include several focused workers within its active slot;
+those workers continue to share only that turn's allowance.
+
+Use **Parallel work** in the sidebar to set active conversations/jobs and
+simultaneous model requests independently, from 1 to 8. Launch defaults can be
+set with `--gui-concurrency 2 --gui-model-concurrency 2`. Changes apply to the
+current GUI session. Lowering a limit lets existing work finish and delays new
+admissions. Raising it starts queued work when capacity is available.
+The shared request pool includes Assistant workers: with two active tasks and
+two model slots, each task can use one stream. When only one task remains, it
+can use spare slots up to its own worker limit. The server must support multiple
+concurrent inference sequences to generate both streams at once. This shares
+generation capacity and does not impose an artificial token/s cap or guarantee
+an exact 50/50 speed split. Time ceilings still count wall-clock time while a
+task is active. Queued tasks do not spend their active-time budget.
+The Assistant starts with 60,000 generated tokens, 240,000 input tokens and
+15 minutes. Its default allowance grows to the highest delegated effort, up to
+Poincaré's 200,000 tokens, 800,000 input tokens and two hours. Parallel workers
+share the remaining generated tokens in proportion to their effort, with room
+reserved for the final answer. Explicit `--assistant-tokens`,
+`--assistant-input-tokens` and `--assistant-seconds` values are hard caps and are
+never raised. Resume keeps the saved ceilings and spent allowance. Ten proof
+attempts is an upper bound, subject to the actual tokens and time remaining.
+A job started when all active slots are occupied, from a form, a suggestion or a
+Resume button, waits in the queue, where it can be cancelled. It starts when a
+slot becomes available. Approval dialogs replace the terminal's `[y/N]`
 prompt for file writes and, with `--allow-python`, for Python.
 
 Conversations are saved in `.mathagent/chats/` so that they survive a reload.
@@ -311,16 +336,51 @@ unresolved issues and decides whether to answer, ask for clarification, or obtai
 more focused help. Delegation is optional; an elementary question can finish with
 one short answer.
 
-To find a precise reference for a known result ("where is the Rellich theorem
-proved?", "is Theorem 9.26 of Brezis about this?"), the assistant delegates a
-**literature check**: a quick lookup that recalls likely sources and checks each
-one against zbMATH, Crossref, the OpenCitations index and open papers. Each
-reference is graded read, cited, located, contradicted or not found, from the
-passages actually read; its card is marked [1] and its log is saved in
-`.mathagent/checks/`. A check sees only the delegated statement, never the
-conversation or workspace files, so its queries stay public words. A request for
-a reading list or survey of a topic goes to the Literature worker instead, which
-builds the same verified reading list as the Literature notebook.
+For a known result, the assistant can delegate a **literature check**. An ordinary
+request such as "give me a classical reference for the tubular neighborhood
+theorem" uses a standard lookup: the worker checks its best candidate with one
+bounded bibliographic lookup, using directly available chapter information as
+a lead when present. The controller queries the work's record once and grades
+that evidence; no verifier model round, citation-chain verification or discovery
+phase is required. A useful book reference is enough to answer even when its
+precise chapter or theorem cannot be verified. The answer labels that limitation
+explicitly: "I could not verify the precise location. My recollection suggests
+Chapter X, but that chapter attribution remains unconfirmed." If the lookup
+found no confirming source, a useful suggestion may still be returned as coming
+from model memory, clearly marked unverified.
+
+An explicit request for an exact theorem, section, page or edition, or to verify
+a given citation ("is Theorem 9.26 of Brezis about this?"), opts into precise
+checking against sources. The original human request determines this choice;
+an assistant-generated request for an exact number does not upgrade a standard
+lookup. Precise checking retains the bounded multi-candidate search and reports
+the requested place only when the evidence supports it. Direct programmatic
+calls to `CheckRunner.start` retain `lookup='precise'` as their default for
+compatibility; callers can select `lookup='standard'` explicitly.
+
+Each reference is graded read, cited, located, contradicted or not found. Read
+means the statement was read in the work; cited means another paper was read
+that cites this work at the relevant place; located means the work was found but
+the precise place is unconfirmed. A bibliographic record does not verify a
+chapter, theorem number or statement. A memory-only suggestion is not located
+evidence, and a contradicted locator is not offered as a probable place.
+
+For a simple reference request, the assistant displays the worker's qualified
+answer directly, preserving the record's publication details without another
+model rewrite. A differing publication year is flagged before suggesting a
+remembered locator, since it may belong to another edition.
+
+After a standard attempt, the assistant answers with the available reference
+and qualifications (`answer_with_qualification` when needed). It does not
+automatically launch a second worker or a Wikipedia/arXiv/citing-paper hunt just
+to remove that uncertainty. This stops the reference lookup branch; independent
+proof or other work requested in the same message can continue.
+
+The check card is marked [1] and its log is saved in `.mathagent/checks/`. A
+check sees only the delegated statement, never the conversation or workspace
+files, so its queries stay public words. A request for a reading list or survey
+of a topic goes to the Literature worker instead, which builds the same verified
+reading list as the Literature notebook.
 
 For a simple web lookup, the assistant can open a supplied public HTTPS URL,
 read page lines and links, and paginate its detected bibliography directly.
@@ -369,10 +429,13 @@ of 1. All tasks use the same served model and reserve part of the parent budget;
 concurrency does not multiply that budget or guarantee a speedup. Set the limit
 to 1 to serialize inference, and measure the actual server before increasing it.
 
-The shared limits are configurable at launch: `--assistant-tokens` (60,000
-generated tokens), `--assistant-input-tokens` (240,000 input tokens), and
-`--assistant-seconds` (900 seconds). A turn can create at most four workers and
-use at most six tool actions. These limits apply across pause and resume.
+The shared ceilings can be fixed at launch with `--assistant-tokens`,
+`--assistant-input-tokens`, and `--assistant-seconds`; otherwise they adapt to
+worker effort as described above. A new turn can create at most four workers and
+use at most twelve tool actions. Saved turns retain their original limits across
+pause and resume. At the action limit the assistant must give an answer from
+saved evidence, including unconfirmed details. A reply that only promises another
+lookup gets one recovery call; a repeated promise remains incomplete and resumable.
 
 Use **Pause**, or **Pause assistant** on the current task's card, to stop at a
 checkpoint. **Resume assistant** continues the saved turn with its remaining

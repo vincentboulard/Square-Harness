@@ -1,13 +1,14 @@
-"""Bridge the synchronous engine to browser clients: events, one worker, approvals.
+"""Bridge the synchronous engine to browser clients: events, workers, approvals.
 
 The engine is unchanged. For each task the hub builds the same objects as the
 terminal interface, forwards emit() callbacks as events, answers approve()
 callbacks from the browser, and pauses work by raising the KeyboardInterrupt
-that the runners already treat as a checkpointed pause. The hub serves one
-top-level task at a time; Assistant workers may share bounded concurrent
-inference within that task. Further job starts wait in a queue.
+that the runners already treat as a checkpointed pause. Independent tasks keep
+their own budgets and share a bounded inference pool. Further starts wait in a
+queue, and each conversation has at most one pending turn.
 """
 import collections
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import threading
@@ -21,14 +22,16 @@ from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
 from ..litreview import ReviewRunner
-from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker
+from ..refcheck import EFFORTS as REFCHECK_EFFORTS, CheckRunner, nested_checker, precise_reference_request
 from ..research import ResearchRunner
+from ..mode_calls import ModeOrchestrator
 from ..router import JOB_MODES
-from ..orchestrator import Orchestrator
+from ..orchestrator import DEFAULT_ACTIONS, FINAL_PREDICT
 from ..tools import Workspace
 from ..writeup import WriteupRunner
 from ..worker_errors import WorkerInputError
 from . import effort, store
+from .inference import InferencePool
 from .store import one_line
 
 RUNNING = ('starting', 'running', 'pausing')
@@ -37,7 +40,7 @@ LABELS = {'literature': 'Literature report', 'referee': 'Review', 'writeup': 'Wr
 
 
 class Busy(Exception):
-    """The model serves one task at a time; another task is still running."""
+    """A task has no available slot, or its conversation is already active."""
 
 
 class EventBus:
@@ -88,11 +91,42 @@ class Interruptible:
     lands in the terminal. Tools already running finish first.
     """
 
-    def __init__(self, host, cancel, timeout=600):
+    def __init__(self, host, cancel, timeout=600, *, pool=None, owner=None):
         super().__init__(host, timeout)
         self.cancel = cancel
+        self.pool, self.owner = pool, owner
+        self._admitted = threading.local()
+
+    @contextmanager
+    def inference_slot(self, *, deadline=None):
+        """Admit before accounting, while sharing one slot with stream()."""
+        if self.pool is None or getattr(self._admitted, 'active', False):
+            yield
+            return
+        with self.pool.slot(self.owner, self.cancel, deadline=deadline):
+            previous_timeout = self.timeout
+            if deadline is not None:
+                self.timeout = max(0.1, min(previous_timeout, deadline - time.monotonic()))
+            self._admitted.active = True
+            try:
+                yield
+            finally:
+                self._admitted.active = False
+                self.timeout = previous_timeout
 
     def stream(self, payload):
+        if self.cancel.is_set():
+            raise KeyboardInterrupt
+        if getattr(self._admitted, 'active', False):
+            yield from self._interruptible_stream(payload)
+        else:
+            try:
+                with self.inference_slot(deadline=time.monotonic() + self.timeout):
+                    yield from self._interruptible_stream(payload)
+            except TimeoutError as exc:
+                raise AgentError('Time budget exhausted while waiting for model capacity.') from exc
+
+    def _interruptible_stream(self, payload):
         if self.cancel.is_set():
             raise KeyboardInterrupt
         events = super().stream(payload)
@@ -231,6 +265,10 @@ class Hub:
         self.online_locked = bool(getattr(args, 'offline', False))
         self._lock = threading.Lock()
         self.task = None
+        self._tasks = collections.OrderedDict()
+        self.concurrency = getattr(args, 'gui_concurrency', 2)
+        self.inference = InferencePool(getattr(args, 'gui_model_concurrency', 2))
+        self._closing = False
         self.queue = collections.deque()
         self.routing = {}
         self._approvals = {}
@@ -240,14 +278,54 @@ class Hub:
 
     def current(self):
         with self._lock:
-            return self.task
+            return next(iter(self._tasks.values()), self.task)
 
-    def active(self):
-        task = self.current()
-        return task if task and task.state in RUNNING else None
+    def active(self, task_id=None):
+        with self._lock:
+            if task_id is not None:
+                task = self._tasks.get(task_id)
+                return task if task and task.state in RUNNING else None
+            return next((t for t in self._tasks.values() if t.state in RUNNING), None)
+
+    def active_tasks(self):
+        with self._lock:
+            return [t for t in self._tasks.values() if t.state in RUNNING]
+
+    def _capacity(self):
+        return {'chats': self.concurrency, 'requests': self.inference.capacity,
+                'active': len(self._tasks)}
+
+    def limits(self):
+        with self._lock:
+            return self._capacity()
+
+    def set_concurrency(self, *, chats=None, requests=None):
+        for value in (chats, requests):
+            if value is not None and (type(value) is not int or not 1 <= value <= 8):
+                raise ValueError('Concurrency limits must be integers from 1 to 8.')
+        with self._lock:
+            if chats is not None:
+                self.concurrency = chats
+                self.args.gui_concurrency = chats
+            if requests is not None:
+                self.inference.set_capacity(requests)
+                self.args.gui_model_concurrency = requests
+        self._advance()
+        with self.bus._cond:
+            limits = self.limits()
+            self.bus.publish('concurrency', concurrency=limits)
+        return limits
+
+    def _register(self, task):
+        self._tasks[task.id] = task
+        self.inference.register(task.id)
+        self.task = next(iter(self._tasks.values()))
 
     def _publish_task(self, task):
-        self.bus.publish('task', task=task.summary())
+        with self.bus._cond:
+            with self._lock:
+                summary = task.summary()
+            self.bus.publish('task', task=summary)
         if task.on_update:
             try:
                 task.on_update(task)
@@ -255,20 +333,30 @@ class Hub:
                 pass
 
     def _publish_queue(self):
-        self.bus.publish('queue', queue=[t.summary() for t in list(self.queue)])
+        with self.bus._cond:
+            with self._lock:
+                queue = [t.summary() for t in self.queue]
+            self.bus.publish('queue', queue=queue)
 
-    def _begin(self, kind, target, label, title, work, live=None, queue=False, on_update=None):
+    def _begin(self, kind, target, label, title, work, live=None, queue=False, on_update=None, allow_routing=False):
         with self._lock:
+            if self._closing:
+                raise Busy('The interface is shutting down.')
             origin_chat = target if kind == 'chat' else getattr(on_update, '_origin_chat', None)
             if origin_chat:
                 # Registration and deletion share this lock. An earlier read
                 # of the chat does not authorize work after it was deleted.
                 store.load_chat(self.root, origin_chat)
-            busy = self.task is not None and self.task.state in RUNNING
+            pending = list(self._tasks.values()) + list(self.queue)
+            if (origin_chat and origin_chat in self.routing and not allow_routing
+                    or any((origin_chat and t.origin_chat == origin_chat)
+                           or (target is not None and t.kind == kind and t.target == target)
+                           for t in pending)):
+                raise Busy('This conversation or job already has running or queued work.')
+            busy = len(self._tasks) >= self.concurrency or bool(self.queue)
+            queued = busy
             if busy and not queue:
-                raise Busy(f'The model is busy with a {self.task.label.lower()} ("{one_line(self.task.title, 60)}"). '
-                           'Pause it or wait until it finishes: the model serves one task at a time '
-                           'and time budgets count wall-clock time.')
+                raise Busy('All active task slots are occupied. Queue this request or wait for a slot.')
             task = Task(kind, target, label, title, on_update)
             task.origin_chat = origin_chat
             task.live, task.work = live, work
@@ -276,49 +364,79 @@ class Hub:
                 task.state = 'queued'
                 self.queue.append(task)
             else:
-                self.task = task
-        if task.state == 'queued':
+                self._register(task)
+        # Promotion may happen immediately after releasing the lock. Only the
+        # scheduler launches an enqueued task, even if it already started.
+        if queued:
             self._publish_queue()
             self._publish_task(task)
+            self._advance()
         else:
             self._launch(task)
         return task
 
     def _launch(self, task):
-        task.thread = threading.Thread(target=self._run, args=(task, task.work), name='square-' + task.kind, daemon=True)
-        task.thread.start()
+        with self._lock:
+            if task.thread is not None:
+                return
+            if self._closing:
+                task.cancel.set()
+                task.state, task.finished = 'paused', time.time()
+                task.ready.set()
+                stopped = True
+            else:
+                stopped = False
+                task.thread = threading.Thread(target=self._run, args=(task, task.work), name='square-' + task.kind, daemon=True)
+                task.thread.start()
+        if stopped:
+            self._publish_task(task)
+            self._advance(task)
 
     def _run(self, task, work):
-        if task.state == 'starting':  # a pause may already have arrived
-            task.state = 'running'
-        task.started = time.time()
+        with self._lock:
+            if task.state == 'starting':  # a pause may already have arrived
+                task.state = 'running'
+            task.started = time.time()
         self._publish_task(task)
         try:
+            if task.cancel.is_set():
+                raise KeyboardInterrupt
             result = work(task)
-            task.result_status = result.get('status') if isinstance(result, dict) else None
-            task.state = 'paused' if task.result_status == 'paused' and task.cancel.is_set() else 'done'
+            with self._lock:
+                task.result_status = result.get('status') if isinstance(result, dict) else None
+                task.state = 'paused' if task.result_status == 'paused' and task.cancel.is_set() else 'done'
         except KeyboardInterrupt:
-            task.state = 'paused'
+            with self._lock:
+                task.state = 'paused'
         except (AgentError, OSError, ValueError) as exc:
-            task.state, task.error = 'error', str(exc)
+            with self._lock:
+                task.state, task.error = 'error', str(exc)
         except Exception as exc:  # keep the server alive and report the failure
-            task.state, task.error = 'error', f'{type(exc).__name__}: {exc}'
+            with self._lock:
+                task.state, task.error = 'error', f'{type(exc).__name__}: {exc}'
         finally:
             task.finished = time.time()
             task.ready.set()
             self._publish_task(task)
-            self._advance()
+            self._advance(task)
 
-    def _advance(self):
-        """Start the next queued job once the model is free."""
+    def _advance(self, finished=None):
+        """Fill available task slots in FIFO order, after all final writes."""
+        launch = []
         with self._lock:
-            if (self.task is not None and self.task.state in RUNNING) or not self.queue:
-                return
-            task = self.queue.popleft()
-            task.state = 'starting'
-            self.task = task
-        self._publish_queue()
-        self._launch(task)
+            if finished is not None:
+                self._tasks.pop(finished.id, None)
+                self.inference.unregister(finished.id)
+                self.task = next(iter(self._tasks.values()), finished)
+            while not self._closing and len(self._tasks) < self.concurrency and self.queue:
+                task = self.queue.popleft()
+                task.state = 'starting'
+                self._register(task)
+                launch.append(task)
+        if launch:
+            self._publish_queue()
+            for task in launch:
+                self._launch(task)
 
     def cancel_queued(self, task_id):
         with self._lock:
@@ -332,33 +450,49 @@ class Hub:
         self._publish_task(task)
         return task
 
-    def pause(self):
-        task = self.active()
-        if task is None:
-            raise ValueError('No task is running')
-        task.cancel.set()
-        task.state = 'pausing'
+    def pause(self, task_id=None):
+        with self._lock:
+            if task_id is None:
+                tasks = [t for t in self._tasks.values() if t.state in RUNNING]
+                if len(tasks) != 1:
+                    raise ValueError('Select the task to pause.' if tasks else 'No task is running')
+                task = tasks[0]
+            else:
+                task = self._tasks.get(task_id)
+                if task is None or task.state not in RUNNING:
+                    raise ValueError('That task is no longer running.')
+            task.cancel.set()
+            task.state = 'pausing'
         self._publish_task(task)
         return task
 
     def shutdown(self, wait=20):
         with self._lock:
+            self._closing = True
             self.queue.clear()
-        task = self.active()
-        if task:
-            task.cancel.set()
-            task.thread.join(wait)
+            tasks = list(self._tasks.values())
+            for task in tasks:
+                task.cancel.set()
+        deadline = time.monotonic() + wait
+        for task in tasks:
+            if task.thread:
+                task.thread.join(max(0, deadline - time.monotonic()))
 
     def snapshot(self):
         """Current task, its live chat turn, the queue and pending approvals, with the event seq."""
         def read():
-            task = self.task
-            return {'task': task.summary() if task else None,
-                    'activity': list(task.activity) if task else [],
-                    'live': _copy(task.live) if task and task.live else None,
-                    'approvals': [a.summary() for a in self._approvals.values()],
-                    'queue': [t.summary() for t in list(self.queue)],
-                    'routing': sorted(self.routing)}
+            with self._lock:
+                task = next(iter(self._tasks.values()), self.task)
+                return {'task': task.summary() if task else None,
+                        'activity': list(task.activity) if task else [],
+                        'live': _copy(task.live) if task and task.live else None,
+                        'tasks': [{'task': t.summary(), 'activity': list(t.activity),
+                                   'live': _copy(t.live) if t.live else None}
+                                  for t in self._tasks.values() if t.state in RUNNING],
+                        'concurrency': self._capacity(),
+                        'approvals': [a.summary() for a in self._approvals.values()],
+                        'queue': [t.summary() for t in list(self.queue)],
+                        'routing': sorted(self.routing)}
         seq, value = self.bus.snapshot(read)
         return {'seq': seq, **value}
 
@@ -368,7 +502,7 @@ class Hub:
             chat = store.load_chat(self.root, chat_id)
             route_tasks = {item.get('task') for item in chat['transcript']
                            if item.get('role') == 'route' and item.get('task')}
-            tasks = ([self.task] if self.task else []) + list(self.queue)
+            tasks = list(self._tasks.values()) + ([self.task] if self.task else []) + list(self.queue)
             def belongs(task):
                 return (getattr(task, 'origin_chat', None) == chat_id
                         or (task.kind == 'chat' and task.target == chat_id)
@@ -388,8 +522,8 @@ class Hub:
     def set_workspace(self, relative):
         target = store.resolve_folder(self.base, relative)
         with self._lock:
-            if (self.task is not None and self.task.state in RUNNING) or self.queue:
-                raise Busy('Pause the running job and clear the queue before opening another folder.')
+            if self._tasks or self.queue or self.routing:
+                raise Busy('Pause all running jobs and clear the queue before opening another folder.')
             self.root = target
             self.args.workspace = target
         store.remember_folder(self.base, target.relative_to(self.base).as_posix())
@@ -427,7 +561,8 @@ class Hub:
                                   max_requests=args.research_requests, max_chars=args.research_chars)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root))
-        client = INTERRUPTIBLE[args.backend](args.host, task.cancel, timeout=args.request_timeout)
+        client = INTERRUPTIBLE[args.backend](args.host, task.cancel, timeout=args.request_timeout,
+                                            pool=self.inference, owner=task.id)
         agent = Agent(client, workspace, args.model, ctx or args.ctx, args.predict,
                       (not args.no_think) if think is None else bool(think), mode, args.max_rounds,
                       seed=args.seed, temperature=args.temperature, top_p=args.top_p)
@@ -616,7 +751,7 @@ class Hub:
         prompt = content + (('\n\nFiles provided by the user (read them with read_file): ' + ', '.join(files)) if files else '')
 
         def work(task):
-            # Reload under the one-task rule: the previous turn may have just been saved.
+            # The previous turn may have just been saved before this slot opened.
             fresh = store.load_chat(self.root, chat_id)
             agent, _ = self._engine(task, mode=mode, think=fresh['settings'].get('think'),
                                     online=self.online(fresh['settings'].get('online', False)) if not self.online_locked else False)
@@ -658,7 +793,8 @@ class Hub:
                     capture.emit(kind, value)
             runner = CheckRunner(agent, emit=emit)
             try:
-                result = runner.start(question, effort=effort)
+                result = runner.start(question, effort=effort,
+                    lookup='precise' if precise_reference_request(question) else 'standard')
             except BaseException as exc:
                 self._discarded(chat_id, '', exc)
                 raise
@@ -676,7 +812,7 @@ class Hub:
         live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'check'}
         return self._begin('chat', chat_id, LABELS['check'], question, work, live, queue=queue, on_update=on_update)
 
-    def review(self, chat_id):
+    def review(self, chat_id, *, queue=False):
         def last_exchange(session):
             history = session['history']
             if not history or history[-1].get('role') != 'assistant':
@@ -703,7 +839,7 @@ class Hub:
             self.bus.publish('chat_saved', chat=chat_id)
             return {'status': 'done', 'answer': result}
         live = {'chat': chat_id, 'kind': 'review', 'user': '', 'steps': [], 'mode': 'critic'}
-        return self._begin('chat', chat_id, 'Fresh review', last_user, work, live)
+        return self._begin('chat', chat_id, 'Fresh review', last_user, work, live, queue=queue)
 
     def _discarded(self, chat_id, content, exc):
         # As in the terminal, an unfinished turn never enters the model context;
@@ -718,8 +854,8 @@ class Hub:
 
     # -- Assistant: bounded main agent and existing workers -----------------
 
-    def route(self, chat_id, content, files=()):
-        return self._assistant_turn(chat_id, content, files)
+    def route(self, chat_id, content, files=(), *, required_mode=None):
+        return self._assistant_turn(chat_id, content, files, required_mode=required_mode)
 
     def resume_assistant(self, chat_id):
         chat = store.load_chat(self.root, chat_id)
@@ -728,7 +864,7 @@ class Hub:
             raise ValueError('This Assistant turn is not paused or recoverable.')
         return self._assistant_turn(chat_id, state['query'], state.get('files', ()), resume=True)
 
-    def _assistant_turn(self, chat_id, content, files=(), resume=False):
+    def _assistant_turn(self, chat_id, content, files=(), resume=False, required_mode=None):
         chat = store.load_chat(self.root, chat_id)
         if chat['mode'] != 'free':
             raise ValueError('Only Assistant conversations orchestrate workers.')
@@ -738,8 +874,9 @@ class Hub:
         saved = chat.get('assistant_state') or {}
         with self._lock:
             store.load_chat(self.root, chat_id)
-            pending = ([self.task] if self.task else []) + list(self.queue)
-            if chat_id in self.routing or any(t.target == chat_id and t.state in RUNNING + ('queued',) for t in pending):
+            pending = list(self._tasks.values()) + list(self.queue)
+            if (self._closing or chat_id in self.routing
+                    or any(t.origin_chat == chat_id or t.target == chat_id for t in pending)):
                 raise Busy('The Assistant is still working on this conversation.')
             if not resume and saved.get('status') in ('interrupted', 'running', 'incomplete'):
                 raise ValueError('Resume the pending Assistant turn first, or start a new conversation.')
@@ -782,10 +919,18 @@ class Hub:
                     self.bus.publish('chat_saved', chat=chat_id)
 
             concurrency = getattr(self.args, 'assistant_concurrency', 2) if self.args.backend == 'openai' else 1
+            maximum = effort.EFFORTS['poincare']
+            configured = {key: getattr(self.args, argument, None) for key, argument in (
+                ('max_tokens', 'assistant_tokens'), ('max_input_tokens', 'assistant_input_tokens'),
+                ('max_seconds', 'assistant_seconds'))}
+            adaptive = {key: value for key, value in (
+                ('max_tokens', maximum['tokens']), ('max_input_tokens', maximum['input']),
+                ('max_seconds', maximum['minutes'] * 60)) if configured[key] is None}
             budget = BudgetClient(main.client, state=previous.get('budget') if previous else None,
-                                  max_tokens=getattr(self.args, 'assistant_tokens', 60000),
-                                  max_input_tokens=getattr(self.args, 'assistant_input_tokens', 240000),
-                                  max_seconds=getattr(self.args, 'assistant_seconds', 900),
+                                  max_tokens=configured['max_tokens'] or 60000,
+                                  max_input_tokens=configured['max_input_tokens'] or 240000,
+                                  max_seconds=configured['max_seconds'] or 900,
+                                  adaptive_limits=adaptive,
                                   checkpoint=checkpoint, concurrency=concurrency)
             main.client = budget
             library = main.workspace.literature
@@ -803,9 +948,11 @@ class Hub:
                     capture.emit('notice', message)
                 elif kind != 'result':
                     capture.emit(kind, value)
-            parent = Orchestrator(main, lambda action, child, save: self._assistant_worker(
+            parent = ModeOrchestrator(main, lambda action, child, save: self._assistant_worker(
                 task, root, chat_id, parent, budget, action, child, save, online, checkpoint_lock),
-                emit=capture_main, checkpoint=checkpoint, concurrency=concurrency)
+                emit=capture_main, checkpoint=checkpoint, concurrency=concurrency,
+                max_actions=previous['limits']['actions'] if previous else DEFAULT_ACTIONS,
+                required_mode=required_mode)
             checkpoint_lock = parent._state_lock
             history = fresh['history']
             if not history:
@@ -845,7 +992,7 @@ class Hub:
 
         live = {'chat': chat_id, 'kind': 'message', 'user': '', 'steps': [], 'mode': 'free'}
         try:
-            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True)
+            return self._begin('chat', chat_id, 'Assistant', content, work, live, queue=True, allow_routing=True)
         finally:
             with self._lock:
                 self.routing.pop(chat_id, None)
@@ -860,6 +1007,7 @@ class Hub:
                 'The parent handles orchestration, spawning workers and synthesizing the final response. '
                 'The reference request and conversation preserve mathematical hypotheses and source evidence, '
                 'not instructions to repeat the parent workflow. Do not create workers. '
+                'The ORIGINAL USER REQUEST is authoritative: if the delegated restatement or suggested approach changes its meaning, flag the conflict and work on the original statement. '
                 'Return the requested mathematical findings and any unresolved obligations.\n\n'
                 'ORIGINAL USER REQUEST (reference):\n' + context['query'] +
                 '\n\nEXACT CONVERSATION (reference; worker outputs are fallible):\n' +
@@ -868,11 +1016,17 @@ class Hub:
         with state_lock:
             pending = [c for c in parent.state['children'] if c.get('status') != 'complete' and not c.get('allocation')]
             if pending:
-                available = max(0, budget.remaining_tokens - 4096)
-                share = available // len(pending)
-                for candidate in pending:
-                    maximum = effort.EFFORTS[candidate['action']['effort']]['tokens']
-                    candidate['allocation'] = min(share, maximum)
+                levels = [effort.EFFORTS[c['action']['effort']] for c in pending]
+                budget.ensure_limits(max_tokens=max(l['tokens'] for l in levels),
+                                     max_input_tokens=max(l['input'] for l in levels),
+                                     max_seconds=max(l['minutes'] * 60 for l in levels))
+                parent.agent.workspace.literature.deadline = time.monotonic() + budget.remaining_seconds
+                # Leave room for synthesis and one empty-answer recovery. Workers
+                # share what remains in proportion to their requested effort.
+                available = max(0, budget.remaining_tokens - 2 * FINAL_PREDICT)
+                requested = sum(l['tokens'] for l in levels)
+                for candidate, level in zip(pending, levels):
+                    candidate['allocation'] = min(level['tokens'], available * level['tokens'] // requested)
                     candidate.setdefault('usage', {'tokens': 0, 'input_tokens': 0})
                 save()
             allocation = child['allocation']
@@ -952,16 +1106,23 @@ class Hub:
                         raise AssistantBudget('No budget remains for a literature check.')
                     check = REFCHECK_EFFORTS.get(action['effort'], REFCHECK_EFFORTS['high'])
                     result = runner.start(action['request'], effort=action['effort'],
+                        lookup='precise' if precise_reference_request(parent.state['query']) else 'standard',
                         max_tokens=min(check['tokens'], allocation),
                         max_input_tokens=min(check['input'], budget.pool.state['max_input_tokens']),
                         max_seconds=max(0.1, min(check['seconds'], budget.remaining_seconds)))
                 status = result['status']
+                references = json.loads(runner.result_for_agent())
                 outcome = {'answered': 'Reference confirmed; see the answer.',
                            'partial': 'No exact place confirmed; see the levels.'}.get(status, status.replace('_', ' ').capitalize() + '.')
+                if references.get('lookup') == 'standard':
+                    outcome = 'Standard reference lookup finished; precise place unconfirmed.'
                 result = {'status': status, 'answer': runner.state.get('answer') or runner._compose(),
-                          'references': json.loads(runner.result_for_agent()), 'job_id': result['id'],
+                          'references': references, 'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root)),
-                          'warnings': [] if online else ['Online search was off; only cached sources were used.']}
+                          'warnings': list(runner.state.get('warnings', [])) +
+                                      ([] if online else ['Online search was off; only cached sources were used.'])}
+                if references.get('lookup') == 'standard':
+                    result['disposition'] = 'answer_with_qualification'
             elif mode in ('literature', 'referee', 'writeup'):
                 # Literature is the verified reading-list pipeline; the exact conversation sets its scope.
                 runner = (WriteupRunner if mode == 'writeup' else ReviewRunner if mode == 'literature'
@@ -976,6 +1137,8 @@ class Hub:
                         kwargs['kind'] = mode
                     result = runner.start(action['request'], reference_context=context, **kwargs)
                 outcome = result['status'].replace('_', ' ').capitalize() + '; see the saved report.'
+                if result.get('stop_reason') and result['status'] in ('error', 'budget_violation'):
+                    outcome = result['stop_reason']
                 worker_error = result.get('worker_error')
                 result = {'status': result['status'], 'answer': result['report'], 'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root))}
@@ -995,7 +1158,9 @@ class Hub:
                 store.update_item(root, chat_id, index, status='stopped', outcome='Paused; work is saved.')
                 save()
                 raise KeyboardInterrupt
-            store.update_item(root, chat_id, index, status='done', outcome=outcome, job_id=result['job_id'] if mode not in ('critic', 'explore') else None)
+            store.update_item(root, chat_id, index, status='done', outcome=outcome,
+                              error=(result.get('error') or {}).get('message'),
+                              job_id=result['job_id'] if mode not in ('critic', 'explore') else None)
             self.bus.publish('chat_saved', chat=chat_id)
             return result
         except KeyboardInterrupt:
@@ -1104,10 +1269,10 @@ class Hub:
         task_id = chat['transcript'][index].get('task')
         with self._lock:
             queued = any(t.id == task_id for t in self.queue)
-            running = self.task is not None and self.task.id == task_id and self.task.state in RUNNING
+            running = task_id in self._tasks and self._tasks[task_id].state in RUNNING
         if not task_id or not (queued or running):
             raise ValueError('This job is no longer running or waiting')
-        return self.cancel_queued(task_id) if queued else self.pause()
+        return self.cancel_queued(task_id) if queued else self.pause(task_id)
 
     def dismiss_route(self, chat_id, index):
         chat = store.load_chat(self.root, chat_id)

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from mathagent.agent import Agent
 from mathagent.literature import LiteratureTools
-from mathagent.research import ResearchRunner
+from mathagent.research import ResearchRunner, _reference_prompt, _reference_snapshot
 from mathagent.tools import Workspace
 
 
@@ -100,6 +100,21 @@ class ResearchTests(unittest.TestCase):
         workspace.literature = literature
         self.client = FakeClient(replies)
         return ResearchRunner(Agent(self.client, workspace, ctx=kwargs.get('ctx', 16384), predict=kwargs.get('predict', 4096)))
+
+    def test_reference_prompt_reuses_only_exact_duplicate_history(self):
+        history = [{'role': 'user', 'content': 'All hypotheses and quantifiers.'},
+                   {'role': 'tool', 'content': 'Exact passage.', 'tool_call_id': 'native-id'}]
+        context = {'query': 'Check this.', 'history': history,
+                   'messages': history + [{'role': 'user', 'content': 'Check this.'}], 'files': []}
+        original, _, digest = _reference_snapshot(context)
+        rendered = json.loads(_reference_prompt(context))
+        self.assertEqual(rendered['messages'], context['messages'])
+        self.assertEqual(rendered['history'], {'same_as_messages_prefix': 2})
+        self.assertEqual(rendered['messages'][:2], history)
+        self.assertEqual(_reference_snapshot(context), _reference_snapshot(original))
+        self.assertEqual(_reference_snapshot(context)[2], digest)
+        context['history'] = [{'role': 'user', 'content': 'Additional exact hypothesis.'}]
+        self.assertEqual(json.loads(_reference_prompt(context)), context)
 
     def test_real_phases_and_exact_source_provenance(self):
         literature = FakeLiterature()

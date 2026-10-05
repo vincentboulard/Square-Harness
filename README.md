@@ -69,15 +69,23 @@ Delegated work has its own card and saved artifacts; pause and resume the
 assistant to continue with the remaining allowance. Proofs, answers, reports, reviews
 and write-ups appear as the model writes them, with typeset LaTeX, each proof
 attempt with its review, budgets, citation checks and approval dialogs for file
-writes. Jobs started while the model is busy wait in a queue. Drop files onto the
+writes. Two conversations or jobs can run at once by default, with independent
+token budgets. Additional jobs wait in a queue. Drop files onto the
 window and switch folders from the sidebar. It uses the same engine, settings and saved jobs as the terminal, including
 jobs started there, and works in phone browsers too: see the
 [usage guide](docs/usage.md#visual-interface) before exposing it to your network.
 
-Assistant can run independent tasks in parallel on an OpenAI-compatible server
+The interface's **Parallel work** settings control active conversations/jobs
+and simultaneous model requests (1–8 each). The launch defaults are
+`--gui-concurrency 2 --gui-model-concurrency 2`. One pending turn is allowed per
+conversation. Model streams share available generation capacity, rather than
+sharing a token allowance. Exact token/s depends on the inference server and workload.
+
+Within each conversation, Assistant can run independent tasks in parallel on an OpenAI-compatible server
 such as vLLM: `--assistant-concurrency 2` is the default, and the limit can be
-set from 1 to 4. Other backends run one task at a time. Parallel calls share the
-same model and parent allowance; their speed depends on the server and workload.
+set from 1 to 4. Other backends run one Assistant worker at a time. Workers in
+one conversation share that conversation's parent allowance and the interface's
+model-request slots; other conversations retain their own full allowance.
 
 ## Proof mode
 

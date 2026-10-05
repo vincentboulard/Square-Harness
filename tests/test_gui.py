@@ -93,7 +93,7 @@ class GuiCase(unittest.TestCase):
         self.addCleanup(self.fake.close)
         args = cli.parser().parse_args(['--workspace', str(self.root), '--host', self.fake.host, '--model', MODEL,
                                         '--ctx', '16384', '--predict', '1024', '--proof-solve-tokens', '4096',
-                                        '--proof-verify-tokens', '2048', *self.extra_args])
+                                        '--proof-verify-tokens', '2048', '--gui-concurrency', '1', *self.extra_args])
         args.workspace = self.root
         self.token = server.workspace_token(self.root)
         self.hub = Hub(args)
@@ -332,7 +332,7 @@ class ProofWorkflowTests(GuiCase):
                       message='streamed thinking')
         status, value, _ = self.request('POST', '/api/proofs', {'goal': 'Another proof.'})
         self.assertEqual(status, 409)
-        self.assertIn('one task at a time', value['error'])
+        self.assertIn('active task slots', value['error'])
         self.assertEqual(self.ok('POST', '/api/task/pause')['task']['state'], 'pausing')
         task = self.wait_task()
         self.assertEqual(task['state'], 'paused')

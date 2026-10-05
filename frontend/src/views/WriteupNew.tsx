@@ -5,6 +5,7 @@ import { EffortSlider, effortLimits, type EffortLevel } from '../components/Effo
 import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { useApp } from '../store'
+import { capacityFull } from '../concurrency'
 import { BusyNote, queuedMessage } from './shared'
 
 const TEMPLATE = ['.sty', '.cls', '.tex', '.bib']
@@ -54,7 +55,7 @@ export function WriteupNew() {
     setSources((items) => [...new Set([...items, ...paths.filter((path) => !style.includes(path))])])
   })
 
-  const running = !!snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const running = capacityFull(snapshot, status)
   const hasMaterial = sources.length > 0 || notes.trim().length > 0
   const submit = async (event: FormEvent) => {
     event.preventDefault()

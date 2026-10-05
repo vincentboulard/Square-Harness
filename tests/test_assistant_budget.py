@@ -24,6 +24,25 @@ def payload(cap=40):
 
 
 class AssistantBudgetTests(unittest.TestCase):
+    def test_adaptive_promotion_preserves_spending_and_saved_caps_on_resume(self):
+        budget = BudgetClient(Client(), max_tokens=100, max_input_tokens=100, max_seconds=10,
+                              adaptive_limits={'max_tokens': 200, 'max_seconds': 20})
+        list(budget.stream(payload()))
+        budget.ensure_limits(max_tokens=300, max_input_tokens=300, max_seconds=30)
+        self.assertEqual((budget.snapshot()['tokens'], budget.snapshot()['input_tokens']), (12, 20))
+        self.assertEqual((budget.snapshot()['max_tokens'], budget.snapshot()['max_input_tokens'], budget.snapshot()['max_seconds']),
+                         (200, 100, 20))
+        resumed = BudgetClient(Client(), state=budget.snapshot(), adaptive_limits={'max_tokens': 1000})
+        resumed.ensure_limits(max_tokens=1000)
+        self.assertEqual(resumed.snapshot()['max_tokens'], 200)
+        self.assertEqual(resumed.remaining_tokens, 188)
+
+    def test_legacy_saved_budget_cannot_be_promoted_on_resume(self):
+        old = BudgetClient(Client(), max_tokens=100).snapshot()
+        resumed = BudgetClient(Client(), state=old, adaptive_limits={'max_tokens': 1000})
+        resumed.ensure_limits(max_tokens=1000)
+        self.assertEqual(resumed.snapshot()['max_tokens'], 100)
+
     def test_completed_calls_charge_measured_usage_across_independent_clients(self):
         budget = BudgetClient(Client(), max_tokens=100)
         child = budget.fork(Client(15), allowance=40, usage={'tokens': 0, 'input_tokens': 0})

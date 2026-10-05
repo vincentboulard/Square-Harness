@@ -6,6 +6,7 @@ import { Inline, Markdown } from '../components/Markdown'
 import { candidateLook, proofLook, proofResumable, Square, type Variant } from '../components/Square'
 import { ago, bytes, count, duration, plural } from '../format'
 import { go } from '../router'
+import { capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { ActivityLog, ArtifactViewer, BusyNote, JobAside, ReviewBody, ROLES, StreamBody, useJobClass, useLiveStream } from './shared'
 
@@ -41,7 +42,7 @@ export function ProofView({ id, tab }: { id: string; tab: string | null }) {
   const [artifact, setArtifact] = useState<string | null>(null)
   const active = tab || 'work'
   const jobClass = useJobClass()
-  const task = app.snapshot.task
+  const task = taskForJob(app.snapshot, 'proof', id)?.task
   const ours = !!task && task.kind === 'proof' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
 
   const focusAttempt = (index: number) => {
@@ -84,7 +85,8 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(false)
   const app = useApp()
-  const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const busy = capacityFull(app.snapshot, app.status)
+  const ownTask = taskForJob(app.snapshot, 'proof', data.id)?.task
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const long = data.goal.length > 420
   const resumable = proofResumable(data.status, data.version)
@@ -119,12 +121,12 @@ function ProofHeader({ data, ours, pausing }: { data: ProofDetail; ours: boolean
       {data.recovery_notice && <p className="warning-note">{data.recovery_notice}</p>}
       <div className="job-actions">
         {ours ? (
-          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause())}>
+          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}>
             <PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}
           </button>
         ) : resumable ? (
-          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeProof(data.id, busy))}>
-            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Resume when the model is free' : 'Resume with the remaining budget'}
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeProof(data.id, true))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume with the remaining budget'}
           </button>
         ) : null}
         {data.running && !ours && <span className="muted">Running in another process, such as a terminal.</span>}
@@ -280,7 +282,7 @@ function LiveCall({ id, role, file, ours }: { id: string; role: string; file: st
   return (
     <div className="live" id="live" aria-live="off">
       <p className="live-head"><Square variant="running" size={14} /> {ROLES[role]?.active || role}</p>
-      {ours && <ActivityLog items={app.snapshot.activity} />}
+      {ours && <ActivityLog items={taskForJob(app.snapshot, 'proof', id)?.activity || []} />}
       <StreamBody stream={stream} role={role} live />
     </div>
   )

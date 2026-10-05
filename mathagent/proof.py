@@ -201,7 +201,8 @@ class ProofRunner:
 
     def _reserve_attempt(self, kind='initial'):
         settings = self.state['settings']
-        needed = self._attempt_cap(kind) + settings['verify_tokens']
+        solve = self._attempt_cap(kind) if kind == 'initial' else settings['min_solve_tokens']
+        needed = solve + settings['verify_tokens']
         if self._remaining() < needed:
             raise ProofBudget(f'Not starting another attempt: {needed} tokens must remain for a full solve and verification; {self._remaining()} remain.')
         if self._elapsed() >= settings['max_seconds']:
@@ -316,6 +317,8 @@ class ProofRunner:
         allowance, fitted to the context for repairs and continuations."""
         settings = self.state['settings']
         cap = self._attempt_cap(pending['kind'])
+        if pending['kind'] != 'initial':
+            cap = min(cap, self._remaining() - settings['verify_tokens'])
         if pending['kind'] not in {'initial', 'retry'}:
             floor = settings.get('min_solve_tokens', cap)
             count = self._count(messages, floor)

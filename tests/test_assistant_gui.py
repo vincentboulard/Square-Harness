@@ -209,6 +209,63 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual(detail['assistant_budget']['tokens']['used'], 8 + 53 + 31 + 27)
         self.assertEqual(self.ok('GET', '/api/task')['queue'], [])
 
+    def test_poincare_proof_promotes_shared_budget_and_continues_after_full_cutoff(self):
+        self.hub.args.proof_solve_tokens = 32768
+        self.hub.args.proof_verify_tokens = 16384
+        chat = self.conversation()
+        cutoff = text('Unfinished written derivation.', eval_count=32768)
+        cutoff[-1]['done_reason'] = 'length'
+        self.fake.replies = [delegation('prove', 'Prove the exact original statement.', effort='poincare'),
+                             cutoff, text(PROOF, eval_count=20000),
+                             text(json.dumps(APPROVAL), eval_count=8000), text('The written proof was reviewed.')]
+        original = 'Let G=-d_x^2-x^2*d_y^2 on (-1,1) x S^1. Show non-observability for T<a^2/2.'
+        self.ask(chat, original)
+        self.wait_task(timeout=30)
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete', saved['warnings'])
+        self.assertEqual(saved['budget']['max_tokens'], 200000)
+        self.assertEqual(saved['budget']['max_input_tokens'], 800000)
+        self.assertEqual(saved['budget']['max_seconds'], 7200)
+        [child] = saved['children']
+        proof = self.ok('GET', f'/api/proofs/{child["job_id"]}')
+        state = json.loads((self.root / '.mathagent' / 'proofs' / child['job_id'] / 'state.json').read_text())
+        self.assertEqual(proof['status'], 'candidate_complete')
+        self.assertEqual(state['rounds_started'], 2)
+        self.assertEqual(state['settings']['max_rounds'], 10)
+        self.assertEqual(state['settings']['max_tokens'], 200000 - 8 - 2 * 8192)
+        self.assertIn(original, state['goal'])
+        self.assertIn('ORIGINAL USER REQUEST is authoritative', state['goal'])
+        self.assertEqual(saved['budget']['tokens'], 8 + 32768 + 20000 + 8000 + 20)
+
+    def test_explicit_assistant_caps_are_not_raised_by_poincare_worker(self):
+        self.hub.args.assistant_tokens = 60000
+        self.hub.args.assistant_input_tokens = 240000
+        self.hub.args.assistant_seconds = 900
+        chat = self.conversation()
+        self.fake.replies = [delegation('prove', 'Prove identity.', effort='poincare'),
+                             text(PROOF), text(json.dumps(APPROVAL)), text('The proof is complete.')]
+        self.ask(chat, 'Prove x=x.')
+        self.wait_task(timeout=30)
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete')
+        self.assertEqual((saved['budget']['max_tokens'], saved['budget']['max_input_tokens'], saved['budget']['max_seconds']),
+                         (60000, 240000, 900))
+        self.assertNotIn('adaptive_limits', saved['budget'])
+
+    def test_mixed_parallel_efforts_receive_proportional_shares(self):
+        self.openai_fixture()
+        chat = self.conversation()
+        tasks = delegation('critic', 'Check one sign.', effort='low')
+        tasks[0]['message']['tool_calls'] += delegation('explore', 'Work through the harder argument.', effort='poincare')[0]['message']['tool_calls']
+        self.fake.replies = [tasks, text('Sign checked.'), text('Exploration finished.'), text('Both findings are retained.')]
+        self.ask(chat, 'Run these two independent tasks.')
+        self.wait_task(timeout=30)
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete')
+        low, poincare = saved['children']
+        self.assertGreater(poincare['allocation'], 6 * low['allocation'])
+        self.assertLessEqual(low['allocation'] + poincare['allocation'], 200000 - 8 - 2 * 8192)
+
     def test_two_independent_workers_use_parallel_calls_and_one_shared_budget(self):
         self.openai_fixture()
         chat = self.conversation()
@@ -330,6 +387,7 @@ class AssistantGuiTests(GuiCase):
         self.wait_task()
         saved = store.load_chat(self.root, chat)['assistant_state']
         saved['status'] = 'running'  # durable state left by an interrupted GUI process
+        saved['limits']['actions'] = 6  # retain a checkpoint made before the default increased
         store.save_assistant(self.root, chat, saved)
         self.assertIsNone(self.hub.active())
         self.assertEqual(self.detail(chat)['assistant_status'], 'paused')
@@ -340,6 +398,8 @@ class AssistantGuiTests(GuiCase):
         detail = self.detail(chat)
         self.assertEqual(sum(item['role'] == 'user' for item in detail['transcript']), 1)
         self.assertEqual(detail['assistant_budget']['tokens']['used'], 19 + 23)
+
+        self.assertEqual(store.load_chat(self.root, chat)['assistant_state']['limits']['actions'], 6)
 
     def test_paused_proof_worker_resumes_the_same_saved_job(self):
         chat = self.conversation()
@@ -428,13 +488,13 @@ class AssistantGuiTests(GuiCase):
         self.fake.replies = [delegation('check', 'Find a reference for H^2 regularity of the Neumann problem.'),
                              text(json.dumps(RECALL)), text('Nothing to search.'), text(json.dumps(NOT_FOUND)),
                              text('Brezis, Theorem 9.26, is a likely source but the check could not confirm it.')]
-        self.ask(chat, 'Where is H^2 regularity for the Neumann problem proved?')
+        self.ask(chat, 'Find the exact reference for H^2 regularity for the Neumann problem.')
         self.wait_task(timeout=30)
         detail = self.detail(chat)
         self.assertEqual(detail['assistant_status'], 'complete')
         delegate = next(item for item in self.fake.requests[0]['tools'] if item['function']['name'] == 'delegate')
         self.assertIn('check', delegate['function']['parameters']['properties']['mode']['enum'])
-        self.assertIn('Use check to find one or two precise references', self.fake.requests[0]['messages'][0]['content'])
+        self.assertIn('Use check to find a useful standard reference', self.fake.requests[0]['messages'][0]['content'])
         [card] = [item for item in detail['transcript'] if item['role'] == 'route']
         self.assertEqual((card['mode'], card['status'], card['orchestrated']), ('check', 'done', True))
         self.assertTrue((self.root / '.mathagent' / 'checks' / card['job_id'] / 'report.md').exists())
@@ -451,6 +511,56 @@ class AssistantGuiTests(GuiCase):
         self.assertIn('Online search was off', result['result']['warnings'][0])
         self.assertEqual(next(item['content'] for item in reversed(detail['transcript']) if item['role'] == 'assistant'),
                          'Brezis, Theorem 9.26, is a likely source but the check could not confirm it.')
+
+    def test_check_recovery_warning_and_unexecuted_followup_reach_saved_chat(self):
+        from mathagent import refcheck
+        from tests.test_gui_features import NOT_FOUND, RECALL
+        with patch.dict(refcheck.EFFORTS, {'low': {**refcheck.EFFORTS['low'], 'candidates': 2, 'discover': False}}):
+            chat = self.conversation(online=False)
+            cutoff = text('{"candidates":[{"year":' + ' ' * 1000)
+            cutoff[-1]['done_reason'] = 'length'
+            answer = 'The proposed reference remains unconfirmed; online search was disabled.'
+            self.fake.replies = [delegation('check', 'Verify the reference.'), cutoff,
+                                 text(json.dumps(RECALL)), text('Nothing to search.'), text(json.dumps(NOT_FOUND)),
+                                 text('Let me verify the source.'), text(answer)]
+            self.ask(chat, 'Verify this citation.')
+            self.wait_task(timeout=30)
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete')
+        self.assertEqual(saved['answer'], answer)
+        self.assertTrue(saved['continuation_final_retried'])
+        self.assertNotIn('format', self.fake.requests[2])
+        [child] = saved['children']
+        self.assertTrue(any('constrained decoding' in w for w in child['result']['warnings']))
+        self.assertEqual(len(list((self.root / '.mathagent' / 'checks').glob('*/state.json'))), 1)
+
+    def test_standard_book_lookup_finishes_with_qualified_answer_after_one_worker(self):
+        from tests.test_gui_features import RECALL
+        chat = self.conversation(online=False)
+        # Even an over-specific delegated restatement cannot strengthen the human request.
+        self.fake.replies = [delegation('check', 'Find the exact theorem number for this result.'),
+                             text(json.dumps(RECALL))]
+        self.ask(chat, 'Find a standard reference for Neumann regularity without an exact theorem number.')
+        self.wait_task(timeout=30)
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete')
+        self.assertEqual(saved['actions'], 1)
+        [child] = saved['children']
+        self.assertEqual(saved['answer'], child['result']['answer'])
+        self.assertEqual(saved['main_calls'], 1)
+        self.assertEqual(saved['answer_source'], {'kind': 'worker_result', 'job_id': child['job_id']})
+        self.assertEqual(child['result']['disposition'], 'answer_with_qualification')
+        self.assertIn('Brezis', saved['answer'])
+        self.assertIn('unconfirmed', saved['answer'].lower())
+        self.assertNotIn('Springer', saved['answer'])
+        self.assertNotIn('edition', saved['answer'].lower())
+        state = json.loads((self.root / '.mathagent' / 'checks' / child['job_id'] / 'state.json').read_text())
+        self.assertEqual(state['check']['lookup'], 'standard')
+        self.assertEqual(state['settings']['max_requests'], 4)
+        self.assertEqual(len(state['candidates']), 1)
+        self.assertEqual([e['tool'] for e in state['evidence']], ['search_papers'])
+        self.assertNotIn('tools', self.fake.requests[-1])
+        self.assertEqual(len(self.fake.requests), 2)
 
     def test_critic_worker_can_check_references_like_a_critique_chat(self):
         chat = self.conversation(online=True)
@@ -470,7 +580,7 @@ class AssistantGuiTests(GuiCase):
         self.assertNotIn('check_reference', names(self.fake.requests[-2]))
 
     def test_large_previous_report_is_reference_context_not_an_oversized_literature_goal(self):
-        self.hub.args.ctx = 65536  # conservative byte counting must fit the full fixture
+        self.hub.args.ctx = 40960  # the exact conversation fits when supplied only once
         chat = self.conversation(online=False)
         source = 'Hypotheses: a is real, c > 0, and T > T0.\nKeep every quantifier unchanged.\n'
         (self.root / 'hypotheses.tex').write_text(source)
@@ -507,6 +617,8 @@ class AssistantGuiTests(GuiCase):
         self.assertIn('PREVIOUS_REPORT_START', material)
         self.assertIn('PREVIOUS_REPORT_END', material)
         self.assertIn(json.dumps(previous_report)[1:-1], material)
+        self.assertEqual(material.count('PREVIOUS_REPORT_START'), 1)
+        self.assertEqual(material.count('PREVIOUS_REPORT_END'), 1)
         self.assertIn('Hypotheses: a is real, c > 0, and T > T0.', material)
         self.assertIn('Keep every quantifier unchanged.', material)
         self.assertNotIn('Unexpected extra call.', json.dumps(detail))

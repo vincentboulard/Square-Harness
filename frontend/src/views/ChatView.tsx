@@ -1,10 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
 import { api, type LiveTurn, type RouteMode, type TranscriptItem } from '../api'
+import { capacityFull, chatWork, taskById } from '../concurrency'
 import { assistantResumable, routeActivity } from '../assistant'
 import { Collapse, ErrorNote, Loading, Toggle, useLoad } from '../components/common'
 import { CloseIcon, FileIcon, PauseIcon, PlayIcon, SendIcon } from '../components/Icons'
 import { EFFORTS, effortLimits, isLevel, type EffortKind } from '../components/Effort'
 import { Glyph } from '../components/Glyph'
+import { ModeMessage } from '../components/ModeMessage'
+import { callPayload, type ModeCall } from '../modeCalls'
 import { Inline, Markdown, StreamingMarkdown } from '../components/Markdown'
 import { proofLook, researchLook, Square, type Variant } from '../components/Square'
 import { useDropTarget } from '../drop'
@@ -19,7 +22,7 @@ type ChatMode = 'critic' | 'explore' | 'free'
 const INTRO: Record<ChatMode, { title: string; text: string; examples: string[] }> = {
   free: {
     title: 'What are you working on?',
-    text: 'Ask a question, share an argument, or describe what you want to work on. The assistant can answer directly, find precise references for known results, call on focused help when needed, and use the results to continue the discussion.',
+    text: 'Square Harness answers your questions and coordinates focused working agents: Prove for proof search and review, Reference check for citations, Literature for reading lists, Referee for manuscript reviews, Critic for proof gaps, Explore for possible approaches, and Write-up for LaTeX drafts. Their findings feed back into the discussion.',
     examples: [
       'Prove that every bounded sequence in $H^1(0,1)$ has a subsequence converging strongly in $L^2(0,1)$.',
       'Find a reference on the $H^2$ regularity of elliptic problems with Neumann boundary conditions.',
@@ -66,10 +69,10 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const app = useApp()
   const tick = useTick(id)
   const { data, error } = useLoad(() => (id ? api.chat(id) : Promise.resolve(null)), [id, tick])
-  const task = app.snapshot.task
-  const busy = !!task && ['starting', 'running', 'pausing'].includes(task.state)
-  const ours = busy && task!.kind === 'chat' && task!.target === id
-  const current = ours && app.snapshot.live && app.snapshot.live.chat === id ? app.snapshot.live : null
+  const work = chatWork(app.snapshot, id)
+  const task = work.active?.task
+  const ours = !!task
+  const current = work.active?.live?.chat === id ? work.active.live : null
   // Keep a finished turn on screen until the saved transcript replaces it.
   const [lingering, setLingering] = useState<LiveTurn | null>(null)
   const previous = useRef<LiveTurn | null>(null)
@@ -79,8 +82,9 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   }, [current])
   useEffect(() => { setLingering(null) }, [data])
   const live = current || lingering
-  const routing = !!id && app.snapshot.routing.includes(id)
+  const routing = work.routing
   const [draft, setDraft] = useState('')
+  const [selectedCall, setSelectedCall] = useState<ModeCall | null>(null)
   const [attachments, setAttachments] = useState<string[]>([])
   const [sendError, setSendError] = useState('')
   const [sending, setSending] = useState(false)
@@ -105,16 +109,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   const free = mode === 'free'
   const paused = free && assistantResumable(data)
   const send = async (text?: string) => {
-    const content = (text ?? draft).trim()
-    if (!content || sending || resuming || paused || (free && (routing || ours)) || (!free && busy)) return
+    const raw = text ?? draft
+    const modeCall = free && text === undefined ? callPayload(raw, selectedCall) : undefined
+    const content = modeCall ? raw : raw.trim()
+    if (!content.trim() || sending || resuming || paused || work.blocked) return
     setSending(true)
     setSendError('')
     try {
       let chatId = id
       if (!chatId) chatId = (await api.createChat(mode, think, locked ? undefined : online)).id
-      if (free) await api.route(chatId, content, attachments)
+      if (free) await api.route(chatId, content, attachments, modeCall)
       else await api.send(chatId, content, attachments)
       setDraft('')
+      setSelectedCall(null)
       setAttachments([])
       pinned.current = true
       if (!id) go(mode, chatId)
@@ -144,19 +151,25 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
   }
   const transcript = data?.transcript || []
   const last = [...transcript].reverse().find((item) => item.role !== 'notice' && item.role !== 'route')
-  const canReview = !!id && !busy && !paused && !!last && last.role === 'assistant' && !!last.content
+  const canReview = !!id && !work.blocked && !paused && !sending && !resuming && !!last && last.role === 'assistant' && !!last.content
+  const review = async () => {
+    if (!id || !canReview || sending) return
+    setSending(true)
+    setSendError('')
+    try { await api.review(id) } catch (reason) { setSendError((reason as Error).message) } finally { setSending(false) }
+  }
   // Another conversation's work can be queued; this conversation has one active turn.
-  const blocked = free ? routing || ours || paused : busy
+  const blocked = work.blocked || paused
 
   return (
     <div className="chat">
       <div className="chat-scroll sheet paper" ref={scroller}
         onScroll={(event) => { const el = event.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         <div className="sheet-inner chat-inner">
-          {!id && <Intro mode={mode} onPick={(text) => setDraft(text)} />}
+          {!id && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
           {id && error && <ErrorNote>{error}</ErrorNote>}
           {id && !data && !error && <Loading />}
-          {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => setDraft(text)} />}
+          {data && !transcript.length && !live && !routing && <Intro mode={mode} onPick={(text) => { setDraft(text); setSelectedCall(null) }} />}
           {id && <Transcript items={transcript} mode={mode} chatId={id} />}
           {routing && !live && (
             <div className="entry message message-model">
@@ -186,14 +199,19 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
           </div>
         )}
         <div className="composer-box">
-          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
+          {free ? <ModeMessage value={draft} onChange={setDraft} call={selectedCall} onCall={setSelectedCall}
+            onSend={() => { send() }} disabled={blocked || sending || resuming} /> : <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keys}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
             placeholder={free ? 'Describe what you want to do; drop files here to attach them…'
               : mode === 'critic' ? 'Ask the critic to check a statement, a proof, or a file…' : 'Ask about an approach, a reformulation or a connection…'}
-            aria-label="Message" />
+            aria-label="Message" />}
           {ours ? (
-            <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause().catch((reason: Error) => setSendError(reason.message))}>
+            <button type="button" className="btn composer-send" disabled={task?.state === 'pausing'} onClick={() => api.pause(task!.id).catch((reason: Error) => setSendError(reason.message))}>
               <PauseIcon size={16} /> {free ? 'Pause' : 'Stop'}
+            </button>
+          ) : work.queued ? (
+            <button type="button" className="btn composer-send" onClick={() => api.cancelQueued(work.queued!.id).catch((reason: Error) => setSendError(reason.message))}>
+              <CloseIcon size={16} /> Cancel queued turn
             </button>
           ) : (
             <button type="submit" className="btn btn-primary composer-send" disabled={blocked || sending || resuming || !draft.trim()} aria-label="Send">
@@ -208,24 +226,25 @@ export function ChatView({ mode, id }: { mode: ChatMode; id: string | null }) {
             <Toggle label="Search online" checked={online && !locked} onChange={changeOnline} disabled={locked} />
           </span>
           {free && assistantResumable(data) && (
-            <button type="button" className="btn btn-quiet btn-small" disabled={busy || resuming || sending} onClick={resume}>
+            <button type="button" className="btn btn-quiet btn-small" disabled={work.blocked || resuming || sending} onClick={resume}>
               <PlayIcon size={14} /> {resuming ? 'Resuming…' : 'Resume assistant'}
             </button>
           )}
           {free && data?.assistant_budget && (
-            <span className="muted small" title="Shared allowance for the assistant and all focused tasks in this turn">
+            <span className="muted small" title="This conversation's allowance covers its assistant and focused tasks. Other conversations have their own budgets.">
               {count(data.assistant_budget.tokens.used)} / {count(data.assistant_budget.tokens.limit)} tokens
               {' · '}{duration(data.assistant_budget.seconds.used)} / {duration(data.assistant_budget.seconds.limit)}
             </span>
           )}
           {canReview && (
-            <button type="button" className="btn btn-quiet btn-small" onClick={() => api.review(id!).catch((reason: Error) => setSendError(reason.message))}>
+            <button type="button" className="btn btn-quiet btn-small" onClick={review}>
               Fresh review of the last answer
             </button>
           )}
-          <span className="composer-hint">Enter sends, Shift+Enter adds a line, drop files to attach</span>
+          <span className="composer-hint">Enter sends · Shift+Enter adds a line · @ selects a mode</span>
         </div>
-        {busy && !ours && !free && <BusyNote />}
+        {work.queued && <p className="queued-note" role="status">This turn is queued and will start when a chat slot opens. You can cancel it above.</p>}
+        {!blocked && capacityFull(app.snapshot, app.status) && <BusyNote queue />}
         <ErrorNote>{sendError}</ErrorNote>
       </form>
     </div>
@@ -240,6 +259,11 @@ function Intro({ mode, onPick }: { mode: ChatMode; onPick: (text: string) => voi
       <div>
         <h1 className="page-title">{intro.title}</h1>
         <p className="lede">{intro.text}</p>
+        {mode === 'free' && <p className="lede">
+          To force a worker, type <code>@</code> anywhere in your prompt and confirm a choice in the popup.
+          The available calls are <code>@prove</code>, <code>@check</code>, <code>@literature</code>, and <code>@referee</code>.
+          Unconfirmed <code>@</code> text stays part of your message.
+        </p>}
         <div className="examples">
           {intro.examples.map((example) => (
             <button key={example} type="button" className="example" onClick={() => onPick(example)}>
@@ -395,7 +419,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
     return api.startRoute(chatId, index, { mode, request: item.request || '', files: item.files || [], limits: limits as Record<string, number> | undefined })
   })
 
-  const task = app.snapshot.task
+  const task = taskById(app.snapshot, item.task)?.task
   const { queued, running } = routeActivity(item, app.snapshot)
   let status = ''
   let variant: Variant = 'ready'
@@ -410,7 +434,7 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
   if (item.status === 'proposed') { headline = `${info.label} suggested`; status = 'Not started'; variant = 'ready' }
   else if (item.status === 'failed') { headline = item.orchestrated ? `${info.label} did not finish` : `Could not start ${info.noun}`; variant = 'error' }
   else if (item.status === 'cancelled') { headline = `${info.label} cancelled`; status = 'Removed from the queue'; variant = 'spent' }
-  else if (queued) { headline = `${info.label} queued`; status = 'Starts when the model is free'; variant = 'ready' }
+  else if (queued) { headline = `${info.label} queued`; status = 'Starts when a chat slot opens'; variant = 'ready' }
   else if (running && task?.state === 'pausing') { headline = `Stopping ${info.noun}`; status = 'At the next checkpoint'; variant = 'running' }
   else if (running) { headline = kind === 'answer' && !item.orchestrated ? 'Answering here' : kind === 'check' && !item.orchestrated ? 'Checking references' : `${item.job_id || item.orchestrated ? 'Running' : 'Starting'} ${info.noun}`; status = ''; variant = 'running' }
   else if (item.status === 'stopped') { headline = kind === 'answer' && !item.orchestrated ? 'The answer was stopped' : `${info.label} stopped`; status = status || 'Paused'; variant = 'paused' }
@@ -432,12 +456,12 @@ function RouteCard({ chatId, index, item }: { chatId: string; index: number; ite
         <div className="route-actions">
           {(queued || running) && (
             <button type="button" className="btn btn-small" disabled={acting || task?.state === 'pausing'}
-              title={item.orchestrated ? 'Pause the assistant and its current task; resume with the remaining budget' : queued ? 'Take it out of the queue' : 'Stop at the next checkpoint; the job is kept and can be resumed from its page'}
-              onClick={() => act(() => item.orchestrated ? api.pause() : api.cancelRoute(chatId, index))}>
-              {item.orchestrated ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated ? 'Pause assistant' : 'Cancel'}
+              title={queued ? 'Take it out of the queue' : item.orchestrated ? 'Pause the assistant and its current task; resume with the remaining budget' : 'Stop at the next checkpoint; the job is kept and can be resumed from its page'}
+              onClick={() => act(() => queued ? api.cancelQueued(item.task!) : item.orchestrated ? api.pause(item.task!) : api.cancelRoute(chatId, index))}>
+              {item.orchestrated && running ? <PauseIcon size={14} /> : <CloseIcon size={14} />} {item.orchestrated && running ? 'Pause assistant' : 'Cancel'}
             </button>
           )}
-          {item.job_id && mode !== 'check' && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id)}>Open the {info.label.toLowerCase()}</a>}
+          {item.job_id && mode !== 'check' && <a className="btn btn-small btn-quiet" href={href(mode, item.job_id, null, chatId)}>Open the {info.label.toLowerCase()}</a>}
           {!item.orchestrated && ['proposed', 'failed', 'cancelled'].includes(item.status || '') && (
             <button type="button" className="btn btn-small" disabled={acting} onClick={start}>
               {item.status === 'proposed' ? 'Start' : 'Start again'}

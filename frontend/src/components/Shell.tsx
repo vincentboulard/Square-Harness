@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, type ChatListItem, type TaskSummary } from '../api'
+import { activeTasks, chatWork, concurrencyLimits } from '../concurrency'
 import { chatDeleteBlocked } from '../chatDeletion'
 import { ago, duration } from '../format'
 import { MODES } from '../modes'
 import { setPanelHidden } from '../panels'
-import { href, notebook, RAIL, type Mode, type Route } from '../router'
+import { href, notebook, type Mode, type Route } from '../router'
 import { applyTheme, deleteConversation, readTheme, useApp, type AppState, type Theme } from '../store'
-import { ErrorNote, Modal } from './common'
+import { ErrorNote, Modal, NumberField } from './common'
 import { FileAccess, FolderBrowser } from './FolderBrowser'
 import { Inline } from './Markdown'
 import { Glyph } from './Glyph'
@@ -24,9 +25,9 @@ export function BrandMark({ size = 32 }: { size?: number }) {
   )
 }
 
-/** Which mode the running task belongs to, so its notebook shows activity. */
+/** Resolve a task destination for active and queued work. */
 export function taskMode(task: TaskSummary | null, app: AppState): Mode | null {
-  if (!task || !['starting', 'running', 'pausing'].includes(task.state)) return null
+  if (!task) return null
   if (task.kind === 'proof') return 'prove'
   if (task.kind === 'research') {
     const job = app.research?.find((item) => item.id === task.target)
@@ -41,41 +42,12 @@ export function taskHref(task: TaskSummary, app: AppState) {
   return href(mode, task.target)
 }
 
-export function Rail({ route }: { route: Route }) {
-  const app = useApp()
-  const running = taskMode(app.snapshot.task, app)
-  const busy = running && notebook(running)
-  const about = route.page === 'about'
-  return (
-    <nav className="rail" aria-label="Modes">
-      <a className={'rail-brand' + (about ? ' rail-brand-active' : '')} href="#/about" title="About Square Harness"
-        aria-label="About Square Harness" aria-current={about ? 'page' : undefined}><BrandMark size={40} /></a>
-      {RAIL.map((mode) => {
-        const info = MODES[mode]
-        const active = !about && notebook(route.mode) === mode
-        return (
-          <a key={mode} href={href(mode)} className={'mode' + (active ? ' mode-active' : '')}
-            aria-current={active ? 'page' : undefined} title={info.summary}>
-            <span className={`mode-cover mode-${mode}`}>
-              <span className="mode-glyph"><Glyph mode={mode} /></span>
-              {busy === mode && <span className="mode-busy" aria-label="Running" />}
-            </span>
-            <span className="mode-label">{info.label}</span>
-          </a>
-        )
-      })}
-      <span className="rail-spacer" />
-      <ThemeButton />
-    </nav>
-  )
-}
-
 function ThemeButton() {
   const [theme, setTheme] = useState<Theme>(readTheme)
   const next: Record<Theme, Theme> = { system: 'light', light: 'dark', dark: 'system' }
   const label = { system: 'Theme follows the system', light: 'Light theme', dark: 'Dark theme' }[theme]
   return (
-    <button type="button" className="rail-button" title={label + ' (click to change)'} aria-label={label}
+    <button type="button" className="icon-btn" title={label + ' (click to change)'} aria-label={label}
       onClick={() => { const value = next[theme]; setTheme(value); applyTheme(value) }}>
       {theme === 'light' ? <SunIcon /> : theme === 'dark' ? <MoonIcon /> : <AutoIcon />}
     </button>
@@ -97,22 +69,27 @@ function ReviewTally({ reviews }: { reviews: Partial<Record<string, number>> }) 
   )
 }
 
+function HistoryMark({ mode }: { mode: Mode }) {
+  if (mode === 'free') return null
+  return <span className={`history-mark mode-${mode}`} aria-hidden="true"><Glyph mode={mode} /></span>
+}
+
 export function Sidebar({ route }: { route: Route }) {
   const app = useApp()
   const info = MODES[notebook(route.mode)]
   return (
-    <aside className="sidebar" aria-label={info.label}>
+    <aside className="sidebar" aria-label={info.historyLabel}>
       <div className="sidebar-inner">
         <header className="side-head">
           <div className="side-title-row">
-            <h1 className="side-title">{info.label}</h1>
+            <h1 className="side-title"><HistoryMark mode={info.mode} /><span>{info.historyLabel}</span></h1>
             <button type="button" className="icon-btn side-hide" title="Hide this list" aria-label="Hide this list"
               onClick={() => setPanelHidden('sidebar', true)}>
               <PanelLeftIcon />
             </button>
           </div>
           <p className="side-summary">{info.summary}</p>
-          <a className="btn btn-primary btn-block" href={href(info.mode)}><PlusIcon size={16} /> {info.newLabel}</a>
+          <a className="btn btn-primary btn-block" href={href('free')}><PlusIcon size={16} /> {MODES.free.newLabel}</a>
         </header>
         <div className="side-list">
           <SideList route={route} app={app} />
@@ -128,12 +105,13 @@ export function Sidebar({ route }: { route: Route }) {
 export function SideSpine({ route }: { route: Route }) {
   const app = useApp()
   const info = MODES[notebook(route.mode)]
-  const running = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const running = activeTasks(app.snapshot).length > 0
   return (
     <button type="button" className="spine side-spine" onClick={() => setPanelHidden('sidebar', false)}
-      title={`Show the ${info.label} list`} aria-label={`Show the ${info.label} list`}>
+      title={`Show the ${info.historyLabel} list`} aria-label={`Show the ${info.historyLabel} list`}>
       <ChevronIcon size={16} />
-      <span className="spine-text">{info.label}</span>
+      <HistoryMark mode={info.mode} />
+      <span className="spine-text">{info.historyLabel}</span>
       {running && <Square variant="running" size={12} label="The model is working" />}
     </button>
   )
@@ -207,13 +185,17 @@ function ChatSideList({ route, app }: { route: Route; app: AppState }) {
       {!app.chats.length && <p className="side-empty muted">{MODES.free.empty}</p>}
       {app.chats.map((chat) => {
         const blocked = chatDeleteBlocked(app.snapshot, chat.id)
+        const work = chatWork(app.snapshot, chat.id)
         return (
           <div key={chat.id} className={'side-chat-row' + (route.id === chat.id ? ' side-item-active' : '')}>
             <a href={href(chat.kind, chat.id)} className="side-item side-item-chat" aria-current={route.id === chat.id ? 'page' : undefined}>
+              {work.active && <Square variant="running" size={12} label="Active conversation" />}
+              {work.queued && <Square variant="ready" size={12} label="Queued conversation" />}
               <span className="side-body">
                 <span className="side-name"><Inline limit={110}>{chat.title}</Inline></span>
                 <span className="side-meta">
                   {chat.kind !== 'free' && <span className="side-kind" title="A conversation from an earlier version">{MODES[chat.kind].label}</span>}
+                  {work.queued && <span>Queued</span>}
                   <span className="side-preview">{chat.preview ? <Inline limit={80}>{chat.preview}</Inline> : 'No answer yet'}</span>
                   <span className="side-time">{ago(chat.updated_at)}</span>
                 </span>
@@ -298,27 +280,33 @@ export function Elapsed({ since }: { since: number }) {
 
 export function TaskPanel() {
   const app = useApp()
-  const task = app.snapshot.task
-  const [error, setError] = useState('')
-  if (!task || !['starting', 'running', 'pausing'].includes(task.state)) return null
-  const pausing = task.state === 'pausing'
+  const tasks = activeTasks(app.snapshot)
   return (
     <>
+      {tasks.map(({ task }) => <ActiveTaskPanel key={task.id} task={task} app={app} />)}
+      <QueuePanel />
+    </>
+  )
+}
+
+function ActiveTaskPanel({ task, app }: { task: TaskSummary; app: AppState }) {
+  const [error, setError] = useState('')
+  const pausing = task.state === 'pausing'
+  return (
     <div className="task-panel" role="status">
       <Square variant="running" size={16} label="Running" />
       <a className="task-text" href={taskHref(task, app)}>
         <span className="task-label">{task.label}</span>
         <span className="task-title"><Inline limit={70}>{task.title}</Inline></span>
-        <span className="task-state">{pausing ? 'Pausing at the next checkpoint…' : <>Using the model for <Elapsed since={task.started} /></>}</span>
+        <span className="task-state">{pausing ? 'Pausing at the next checkpoint…' : <>Active for <Elapsed since={task.started} /></>}</span>
         {error && <span className="task-error">{error}</span>}
       </a>
       <button type="button" className="btn btn-small" disabled={pausing}
-        onClick={() => api.pause().catch((reason: Error) => setError(reason.message))}>
+        aria-label={`Pause ${task.label}: ${task.title}`}
+        onClick={() => api.pause(task.id).catch((reason: Error) => setError(reason.message))}>
         <PauseIcon size={15} /> Pause
       </button>
     </div>
-    <QueuePanel />
-    </>
   )
 }
 
@@ -328,11 +316,11 @@ function QueuePanel() {
   if (!app.snapshot.queue.length) return null
   return (
     <div className="queue-panel">
-      <p className="detail-label">Waiting for the model</p>
+      <p className="detail-label">Waiting for a chat slot</p>
       {app.snapshot.queue.map((item) => (
         <div key={item.id} className="queue-item">
-          <span className="queue-text"><strong>{item.label}</strong> <Inline limit={50}>{item.title}</Inline></span>
-          <button type="button" className="icon-btn" aria-label="Cancel this job" title="Cancel"
+          <a className="queue-text" href={taskHref(item, app)}><strong>{item.label}</strong> <Inline limit={50}>{item.title}</Inline></a>
+          <button type="button" className="icon-btn" aria-label={`Cancel queued ${item.label}: ${item.title}`} title="Cancel"
             onClick={() => api.cancelQueued(item.id).catch((reason: Error) => setError(reason.message))}>
             <CloseIcon size={14} />
           </button>
@@ -344,7 +332,10 @@ function QueuePanel() {
 }
 
 function WorkspacePanel() {
-  const { status } = useApp()
+  const app = useApp()
+  const { status } = app
+  const limits = concurrencyLimits(app.snapshot, status)
+  const [parallel, setParallel] = useState(false)
   const [pairing, setPairing] = useState(false)
   const [browsing, setBrowsing] = useState(false)
   const [access, setAccess] = useState(false)
@@ -372,6 +363,7 @@ function WorkspacePanel() {
       <div className="workspace-row">
         <span className={'model-dot' + (reachable && installed ? ' model-ok' : ' model-bad')} aria-hidden="true" />
         <span className="workspace-model" title={`${status.model} at ${status.host}: ${modelNote}`}>{status.model}</span>
+        <ThemeButton />
         {status.lan && (
           <button type="button" className="icon-btn" title="Connect a phone" aria-label="Connect a phone" onClick={() => setPairing(true)}>
             <PhoneIcon size={16} />
@@ -381,6 +373,10 @@ function WorkspacePanel() {
       <button type="button" className="workspace-access" onClick={() => setAccess(true)}>
         <FileIcon size={13} /> {readLabel}
       </button>
+      <button type="button" className="workspace-access" onClick={() => setParallel(true)}>
+        Parallel work: {activeTasks(app.snapshot).length} / {limits.chats} active
+      </button>
+      {parallel && <ConcurrencySettings onClose={() => setParallel(false)} />}
       {browsing && <FolderBrowser onClose={() => setBrowsing(false)} />}
       {access && <FileAccess onClose={() => setAccess(false)} />}
       {(!reachable || !installed) && <p className="workspace-warning">{modelNote}. {modelHint}</p>}
@@ -395,13 +391,46 @@ function WorkspacePanel() {
   )
 }
 
-export function TopBar({ title, onMenu }: { title: string; onMenu: () => void }) {
+function ConcurrencySettings({ onClose }: { onClose: () => void }) {
   const app = useApp()
-  const running = app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const limits = concurrencyLimits(app.snapshot, app.status)
+  const [chats, setChats] = useState(limits.chats)
+  const [requests, setRequests] = useState(limits.requests)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const valid = [chats, requests].every((value) => Number.isInteger(value) && value >= 1 && value <= 8)
+  const save = async () => {
+    if (!valid || saving) return
+    setSaving(true)
+    setError('')
+    try { await api.concurrency({ chats, requests }); onClose() }
+    catch (reason) { setError((reason as Error).message); setSaving(false) }
+  }
+  return (
+    <Modal title="Parallel work" onClose={saving ? undefined : onClose}>
+      <p>Each conversation or job keeps its full token budget. Work beyond the active limit waits in the queue.</p>
+      <NumberField label="Active conversations and jobs" value={chats} onChange={setChats} min={1} max={8}
+        hint="Default: 2. One turn at a time in each conversation." />
+      <NumberField label="Simultaneous model requests" value={requests} onChange={setRequests} min={1} max={8}
+        hint="Default: 2. Includes requests from all active conversations and their workers." />
+      <p className="muted small">Active requests share the model's throughput. Two requests can progress together, but their speeds depend on the model server and hardware. Lowering a limit lets current work finish before new work starts.</p>
+      <ErrorNote>{error}</ErrorNote>
+      <div className="modal-actions">
+        <button type="button" className="btn" disabled={saving} onClick={onClose}>Cancel</button>
+        <button type="button" className="btn btn-primary" disabled={saving || !valid} onClick={save}>{saving ? 'Saving…' : 'Save limits'}</button>
+      </div>
+    </Modal>
+  )
+}
+
+export function TopBar({ route, onMenu }: { route: Route; onMenu: () => void }) {
+  const app = useApp()
+  const info = MODES[notebook(route.mode)]
+  const running = activeTasks(app.snapshot).length > 0
   return (
     <header className="topbar">
       <button type="button" className="icon-btn" aria-label="Open navigation" onClick={onMenu}><MenuIcon /></button>
-      <span className="topbar-title">{title}</span>
+      <span className="topbar-title"><HistoryMark mode={info.mode} /><span>{info.historyLabel}</span></span>
       {running && <Square variant="running" size={16} label="The model is working" />}
     </header>
   )

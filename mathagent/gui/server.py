@@ -31,6 +31,7 @@ import webbrowser
 
 from .. import __version__
 from ..agent import AgentError
+from ..mode_calls import validated_mode_call
 from ..ledger import _directory
 from . import store
 from .hub import Busy, Hub
@@ -124,6 +125,7 @@ def status(h, body):
            # The default for new work in the interface: online unless launched --offline.
            'online': hub.online(), 'online_locked': hub.online_locked,
            'allow_python': bool(args.allow_python), 'lan': not h.server.loopback,
+           'concurrency': hub.limits(),
            'defaults': {'ctx': args.ctx, 'predict': args.predict, 'think': not args.no_think,
                         'proof_rounds': args.proof_rounds, 'proof_tokens': args.proof_tokens,
                         'proof_seconds': args.proof_seconds, 'proof_solve_tokens': args.proof_solve_tokens,
@@ -200,7 +202,19 @@ def task(h, body):
 
 @route('POST', '/api/task/pause')
 def pause(h, body):
-    return {'task': h.server.hub.pause().summary()}
+    task = body.get('task')
+    if task is not None and (not isinstance(task, str) or not re.fullmatch(r'[0-9a-f]{12}', task)):
+        raise ValueError('Give a valid task ID to pause.')
+    return {'task': h.server.hub.pause(task).summary()}
+
+
+@route('POST', '/api/concurrency')
+def concurrency(h, body):
+    if not body or set(body) - {'chats', 'requests'}:
+        raise ValueError('Give chats or requests as integers from 1 to 8.')
+    if any(type(value) is not int for value in body.values()):
+        raise ValueError('Concurrency limits must be integers from 1 to 8.')
+    return {'concurrency': h.server.hub.set_concurrency(**body)}
 
 
 @route('POST', '/api/approvals/(?P<approval>[0-9a-f]{32})')
@@ -327,7 +341,7 @@ def chat(h, body, id):
     result = _chat_view(store.load_chat(hub.root, id))
     if result['assistant_status'] == 'running':
         snapshot = hub.snapshot()
-        tasks = ([snapshot['task']] if snapshot['task'] else []) + snapshot['queue']
+        tasks = [entry['task'] for entry in snapshot['tasks']] + snapshot['queue']
         if not any(task['target'] == id and task['state'] in ('starting', 'running', 'pausing', 'queued') for task in tasks):
             result['assistant_status'] = 'paused'
     return result
@@ -351,12 +365,14 @@ def chat_settings(h, body, id):
 
 @route('POST', '/api/chats/' + UUID + '/messages')
 def chat_message(h, body, id):
-    return {'task': h.server.hub.chat(id, _text(body, 'content', 60000), files=_files(body, 'files')).summary()}
+    return {'task': h.server.hub.chat(id, _text(body, 'content', 60000), files=_files(body, 'files'),
+                                     queue=bool(_flag(body, 'queue'))).summary()}
 
 
 @route('POST', '/api/chats/' + UUID + '/route')
 def chat_route(h, body, id):
-    h.server.hub.route(id, _text(body, 'content', 60000), _files(body, 'files'))
+    content, mode = validated_mode_call(_text(body, 'content', 60000), body.get('mode_call'))
+    h.server.hub.route(id, content, _files(body, 'files'), required_mode=mode)
     return {'ok': True}
 
 
@@ -471,7 +487,7 @@ def research_pdf(h, body, id):
 
 @route('POST', '/api/chats/' + UUID + '/review')
 def chat_review(h, body, id):
-    return {'task': h.server.hub.review(id).summary()}
+    return {'task': h.server.hub.review(id, queue=bool(_flag(body, 'queue'))).summary()}
 
 
 def _chat_view(chat):
@@ -519,8 +535,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def active(self, kind):
-        task = self.server.hub.active()
-        return task.target if task and task.kind == kind else None
+        return next((t.target for t in self.server.hub.active_tasks() if t.kind == kind), None)
 
     def offset(self):
         value = (self.query.get('from') or ['0'])[0]

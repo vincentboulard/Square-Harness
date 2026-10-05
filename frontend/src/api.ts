@@ -34,6 +34,7 @@ export type Status = {
   allow_python: boolean
   lan: boolean
   defaults: Defaults
+  concurrency?: Concurrency
   ollama: { reachable: boolean; models: string[]; error?: string }
   pair_urls?: string[]
   root: string
@@ -89,6 +90,9 @@ export type LiveTurn = { chat: string; kind: 'message' | 'review'; user: string;
 
 export type Activity = { kind: 'notice' | 'tool' | 'result'; text: string; time: number }
 
+export type Concurrency = { chats: number; requests: number; active: number }
+export type TaskEntry = { task: TaskSummary; activity: Activity[]; live: LiveTurn | null }
+
 export type TaskSnapshot = {
   seq: number
   task: TaskSummary | null
@@ -97,6 +101,8 @@ export type TaskSnapshot = {
   approvals: Approval[]
   queue: TaskSummary[]
   routing: string[]
+  tasks?: TaskEntry[]
+  concurrency?: Concurrency
 }
 
 // Proof jobs (v0.5 engine): immutable candidates, whole-proof reviews, recorded calls.
@@ -394,7 +400,8 @@ export const api = {
   status: () => get<Status>('/api/status'),
   login: (token: string) => post<{ ok: boolean }>('/api/login', { token }),
   task: () => get<TaskSnapshot>('/api/task'),
-  pause: () => post<{ task: TaskSummary }>('/api/task/pause'),
+  pause: (task: string) => post<{ task: TaskSummary }>('/api/task/pause', { task }),
+  concurrency: (limits: { chats?: number; requests?: number }) => post<{ concurrency: Concurrency }>('/api/concurrency', limits),
   decide: (id: string, approve: boolean) => post<{ ok: boolean }>(`/api/approvals/${id}`, { approve }),
   files: () => get<{ files: WorkspaceFile[] }>('/api/files'),
 
@@ -436,7 +443,7 @@ export const api = {
   startWriteup: (body: Record<string, unknown>) => post<StartResult>('/api/writeup', body),
   researchPdfUrl: (id: string) => `/api/research/${id}/pdf`,
   cancelQueued: (task: string) => post<{ task: TaskSummary }>(`/api/queue/${task}/cancel`),
-  route: (id: string, content: string, files: string[]) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files }),
+  route: (id: string, content: string, files: string[], mode_call?: { mode: RouteMode; start: number }) => post<{ ok: boolean }>(`/api/chats/${id}/route`, { content, files, mode_call }),
   resumeAssistant: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/assistant/resume`),
   startRoute: (id: string, index: number, body: { mode: string; request: string; files: string[]; limits?: Record<string, number> }) =>
     post<{ task: TaskSummary }>(`/api/chats/${id}/routes/${index}/start`, body),
@@ -447,6 +454,6 @@ export const api = {
   deleteChat: (id: string) => request<{ deleted: string }>('DELETE', `/api/chats/${id}`),
   createChat: (mode: string, think?: boolean, online?: boolean) => post<Chat>('/api/chats', { mode, think, online }),
   chatSettings: (id: string, settings: { think?: boolean; online?: boolean }) => post<Chat>(`/api/chats/${id}/settings`, settings),
-  send: (id: string, content: string, files: string[] = []) => post<{ task: TaskSummary }>(`/api/chats/${id}/messages`, { content, files }),
-  review: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/review`),
+  send: (id: string, content: string, files: string[] = []) => post<{ task: TaskSummary }>(`/api/chats/${id}/messages`, { content, files, queue: true }),
+  review: (id: string) => post<{ task: TaskSummary }>(`/api/chats/${id}/review`, { queue: true }),
 }

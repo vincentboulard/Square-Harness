@@ -6,6 +6,7 @@ import { useDropTarget } from '../drop'
 import { go } from '../router'
 import { Glyph } from '../components/Glyph'
 import { useApp } from '../store'
+import { capacityFull } from '../concurrency'
 import { BusyNote, queuedMessage } from './shared'
 
 type Kind = 'literature' | 'referee'
@@ -74,7 +75,7 @@ export function ResearchNew({ kind }: { kind: Kind }) {
   }
   const searching = online && !status?.online_locked
 
-  const running = !!snapshot.task && ['starting', 'running', 'pausing'].includes(snapshot.task.state)
+  const running = capacityFull(snapshot, status)
   const noun = kind === 'referee' ? 'review' : 'literature report'
   const submit = async (event: FormEvent) => {
     event.preventDefault()

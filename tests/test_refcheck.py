@@ -1,4 +1,5 @@
 """Literature check: recall, per-guess verification and the controller's evidence levels."""
+import copy
 import json
 from pathlib import Path
 import sys
@@ -83,13 +84,14 @@ class CheckTests(unittest.TestCase):
         compact.start()
         self.addCleanup(compact.stop)
 
-    def run_check(self, replies, effort='medium', guesses=(), online=True, fetcher=None):
+    def run_check(self, replies, effort='medium', guesses=(), online=True, fetcher=None, lookup=None):
         lit = LiteratureTools(self.root, online=online)
         self.client = FakeClient(replies)
         runner = CheckRunner(Agent(self.client, Workspace(self.root, literature=lit), ctx=16384, predict=4096))
         with patch.object(lit, '_fetch', side_effect=fetcher or fetch):
+            options = {'lookup': lookup} if lookup is not None else {}
             result = runner.start('Find a reference on the regularity of elliptic problems with Neumann boundary conditions.',
-                                  effort=effort, guesses=guesses)
+                                  effort=effort, guesses=guesses, **options)
         return runner, result
 
     def searches(self):
@@ -104,6 +106,147 @@ class CheckTests(unittest.TestCase):
                  'record': 'zbl:1220.46002', 'statement_found': 'The Neumann Laplacian has domain H^2 with zero normal derivative.', 'note': ''}
         value.update(fields)
         return text(value)
+
+    def test_standard_lookup_finishes_with_one_book_without_a_locator_hunt(self):
+        alternatives = [RECALL['candidates'][0],
+                        {'authors': ['Evans'], 'title': 'Partial differential equations',
+                         'year': '1998', 'locator': 'Section 6.3', 'why': 'Alternative source.'},
+                        {'authors': ['Gilbarg', 'Trudinger'], 'title': 'Elliptic partial differential equations',
+                         'year': '2001', 'locator': 'Chapter 6', 'why': 'Alternative source.'}]
+        fetched = []
+
+        def metadata_only(url, headers=None, max_bytes=None):
+            fetched.append(url)
+            self.assertIn('zbmath', url)
+            return json.dumps(ZBMATH).encode(), 'application/json', url
+
+        # Only a recall reply is supplied: another verifier/model round would fail.
+        runner, result = self.run_check([text({**RECALL, 'candidates': alternatives})],
+                                        lookup='standard', fetcher=metadata_only)
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(len(self.client.requests), 1)
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(len(runner.state['candidates']), 1)
+        self.assertEqual([e['tool'] for e in runner.state['evidence']], ['search_papers'])
+        self.assertTrue(all(e['arguments']['provider'] == 'zbmath' for e in runner.state['evidence']))
+        verdict = runner.state['candidates'][0]['verdict']
+        self.assertEqual(verdict['level'], 'located')
+        self.assertEqual(verdict['record']['identifier'], 'zbl:1220.46002')
+        self.assertFalse(verdict.get('quote'))
+        compact = json.loads(runner.result_for_agent())
+        self.assertEqual(compact['lookup'], 'standard')
+        self.assertEqual(compact['disposition'], 'answer_with_qualification')
+        self.assertFalse(compact['precise_place_confirmed'])
+        self.assertEqual(compact['references'][0]['level'], 'located')
+        self.assertIn('Brezis', runner.state['answer'])
+        self.assertIn('unconfirmed', runner.state['answer'].lower())
+        self.assertNotIn('What it states', runner.state['answer'])
+
+    def test_human_precision_intent_ignores_explicitly_declined_locators(self):
+        from mathagent.refcheck import precise_reference_request
+        self.assertFalse(precise_reference_request('Find a classical reference.'))
+        self.assertFalse(precise_reference_request('Find a book without an exact theorem number.'))
+        self.assertFalse(precise_reference_request("I don't need the precise reference, just a standard book."))
+        self.assertTrue(precise_reference_request('Find the exact theorem number in this book.'))
+        self.assertTrue(precise_reference_request('Which chapter contains it?'))
+        self.assertTrue(precise_reference_request('Verify this citation.'))
+        self.assertTrue(precise_reference_request('No need for an exact page; verify this citation.'))
+        self.assertTrue(precise_reference_request('No need for an exact page but verify this citation.'))
+        self.assertTrue(precise_reference_request('Verify the reference Hirsch, Differential Topology.'))
+        self.assertTrue(precise_reference_request('Check whether this reference proves the assertion.'))
+        self.assertTrue(precise_reference_request('Give the page on which it appears.'))
+
+    def test_standard_lookup_with_no_record_keeps_only_an_honest_memory_suggestion(self):
+        fetched = []
+
+        def no_record(url, headers=None, max_bytes=None):
+            fetched.append(url)
+            self.assertIn('zbmath', url)
+            return b'{"result": []}', 'application/json', url
+
+        runner, result = self.run_check([text(RECALL)], lookup='standard', fetcher=no_record)
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(len(self.client.requests), 1)
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'not_found')
+        answer = runner.state['answer']
+        self.assertIn('Brezis', answer)
+        self.assertRegex(answer.lower(), r'memory|model recall')
+        self.assertIn('unconfirmed', answer.lower())
+        self.assertNotIn('Work record:', answer)
+        self.assertNotIn('@book', answer)
+        compact = json.loads(runner.result_for_agent())
+        self.assertEqual(compact['references'][0]['level'], 'not_found')
+        self.assertEqual(compact['disposition'], 'answer_with_qualification')
+        self.assertFalse(compact['precise_place_confirmed'])
+        self.assertEqual([e['tool'] for e in runner.state['evidence']], ['search_papers'])
+
+    def test_standard_lookup_offline_finishes_without_network_or_fake_confirmation(self):
+        def forbidden_fetch(*args, **kwargs):
+            self.fail('Offline standard lookup must not fetch a source.')
+
+        runner, result = self.run_check([text(RECALL)], lookup='standard', online=False,
+                                        fetcher=forbidden_fetch)
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(len(self.client.requests), 1)
+        self.assertEqual(len(runner.state['candidates']), 1)
+        self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'not_found')
+        self.assertIn('Brezis', runner.state['answer'])
+        self.assertRegex(runner.state['answer'].lower(), r'memory|model recall')
+        compact = json.loads(runner.result_for_agent())
+        self.assertEqual(compact['references'][0]['level'], 'not_found')
+        self.assertFalse(compact['precise_place_confirmed'])
+        self.assertFalse(any(e['tool'] in ('find_quotes', 'open_paper', 'read_paper', 'search_paper')
+                             for e in runner.state['evidence']))
+
+    def test_standard_book_record_never_confirms_a_guessed_chapter(self):
+        guess = {**RECALL['candidates'][0], 'locator': 'Chapter 9'}
+        runner, _ = self.run_check([text({**RECALL, 'candidates': [guess]})], lookup='standard')
+        compact = json.loads(runner.result_for_agent())
+        self.assertEqual(compact['references'][0]['level'], 'located')
+        self.assertFalse(compact['precise_place_confirmed'])
+        self.assertIn('Chapter 9', runner.state['answer'])
+        self.assertIn('unconfirmed', runner.state['answer'].lower())
+        self.assertEqual(len(self.client.requests), 1)
+        self.assertEqual([e['tool'] for e in runner.state['evidence']], ['search_papers'])
+
+    def test_invalid_lookup_is_rejected_before_model_work(self):
+        with self.assertRaises(ValueError):
+            self.run_check([], lookup='guess-until-success')
+        self.assertEqual(self.client.requests, [])
+
+    def test_standard_answer_preserves_record_metadata_and_flags_edition_mismatch(self):
+        guess = {**RECALL['candidates'][0], 'year': '2000', 'locator': 'Chapter 9'}
+        runner, _ = self.run_check([text({**RECALL, 'candidates': [guess]})], lookup='standard')
+        answer = runner.state['answer']
+        self.assertIn('(2011)', answer)
+        self.assertIn('Publisher in the bibliographic record: New York, NY: Springer.', answer)
+        self.assertIn('record is dated 2011', answer)
+        self.assertIn('model recall suggested 2000', answer)
+        self.assertIn('may refer to a different edition', answer)
+        self.assertIn('unconfirmed', answer)
+        compact = json.loads(runner.result_for_agent())
+        self.assertIn('(2011)', compact['references'][0]['reference'])
+        self.assertNotIn('(2000)', compact['references'][0]['reference'])
+        self.assertFalse(compact['precise_place_confirmed'])
+
+    def test_standard_lookup_does_not_replace_a_book_with_an_unrelated_article(self):
+        guess = {'authors': ['Hirsch'], 'title': 'Differential Topology', 'year': '1976',
+                 'locator': 'Chapter 5', 'why': 'Recalled standard book.'}
+        unrelated = copy.deepcopy(ZBMATH)
+        unrelated['result'][0].update(
+            title={'title': 'On immersions of manifolds in differential topology'},
+            contributors={'authors': [{'name': 'Hirsch, Morris W.'}]}, year='1961',
+            document_type={'description': 'article'})
+        def metadata(url, headers=None, max_bytes=None):
+            return json.dumps(unrelated).encode(), 'application/json', url
+        runner, _ = self.run_check([text({**RECALL, 'candidates': [guess]})],
+                                  lookup='standard', fetcher=metadata)
+        self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'not_found')
+        self.assertIn('*Differential Topology* (1976)', runner.state['answer'])
+        self.assertIn('bibliographic lookup did not confirm it', runner.state['answer'])
+        self.assertNotIn('immersions', runner.state['answer'])
+        self.assertNotIn('1961', runner.state['answer'])
 
     def test_cited_reference_with_record_quote_and_bibtex(self):
         runner, result = self.run_check([text(RECALL), *self.searches(), response('Enough evidence.'), self.verdict()])
@@ -253,6 +396,18 @@ class CheckTests(unittest.TestCase):
         self.assertEqual([c['source'] for c in runner.state['candidates']], ['caller'])
         self.assertIn('already suggested', self.client.requests[0]['messages'][1]['content'])
 
+    def test_whitespace_capped_recall_recovers_without_the_same_json_grammar(self):
+        broken = response('{"statement":"H2 regularity","candidates":[{"year":' + ' ' * 1000,
+                          complete=False)
+        runner, result = self.run_check([broken, text(RECALL), *self.searches(),
+                                        response('Enough evidence.'), self.verdict()])
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'cited')
+        self.assertIn('format', self.client.requests[0])
+        self.assertNotIn('format', self.client.requests[1])
+        self.assertFalse(self.client.requests[1]['think'])
+        self.assertTrue(any('constrained decoding' in w for w in runner.state['warnings']))
+
     def test_discovery_adds_the_reference_an_open_paper_cites(self):
         empty = {**RECALL, 'candidates': []}
         discovered = {'found': True, 'candidate': RECALL['candidates'][0]}
@@ -267,6 +422,14 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(runner.state['candidates'][0]['source'], 'discovery')
         self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'cited')
         self.assertEqual(result['status'], 'answered')
+
+    def test_plain_recall_recovery_rejects_malformed_candidate_types(self):
+        runner, result = self.run_check([response('{', complete=False),
+            text({'statement': 'Result sought', 'keywords': 17, 'candidates': [{'authors': 23, 'title': 'Work'}]})],
+            effort='low')
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(runner.state['candidates'], [])
+        self.assertEqual(runner.state['keywords'], [])
 
     def test_repeated_calls_are_skipped_and_reused_across_guesses(self):
         evans = {'authors': ['Evans'], 'title': 'Partial differential equations', 'year': '1998', 'locator': 'Theorem 6.3.4', 'why': 'w'}

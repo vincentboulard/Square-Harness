@@ -1,0 +1,14 @@
+.mode-message { position: relative; flex: 1; min-width: 0; }
+.mode-message textarea { display: block; width: 100%; }
+.selected-mode { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; padding: 5px 8px; width: fit-content; max-width: 100%; border: 1px solid var(--ink-soft-strong); border-radius: 7px; background: var(--ink-soft); font-size: 12px; }
+.selected-mode > span:not(.route-cover) { color: var(--text-3); }
+.selected-mode .chip-remove { margin-left: 4px; }
+.mode-picker { position: absolute; z-index: 20; bottom: calc(100% + 10px); left: 0; width: min(500px, 100%); border: 1px solid var(--line-strong); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow-lg); overflow: hidden; }
+.mode-picker-title { display: flex; flex-wrap: wrap; gap: 3px 12px; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); color: var(--text-2); font-size: 12px; font-weight: 700; }
+.mode-picker-title span { color: var(--text-3); font-size: 11px; font-weight: 400; }
+.mode-picker [role='listbox'] { padding: 5px; max-height: min(340px, 45dvh); overflow-y: auto; }
+.mode-option { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.mode-option-active { background: var(--ink-soft); }
+.mode-option .route-cover { flex: none; width: 27px; height: 27px; }
+.mode-option > span:last-child { min-width: 0; }
+.mode-option-summary { display: block; margin-top: 2px; color: var(--text-3); font-size: 12px; line-height: 1.4; }

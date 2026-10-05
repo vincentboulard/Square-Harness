@@ -2,9 +2,10 @@
 import { useSyncExternalStore } from 'react'
 import {
   api, ApiError, onUnauthorized,
-  type ChatListItem, type LiveStep, type ProofListItem, type ResearchListItem,
+  type ChatListItem, type Concurrency, type ProofListItem, type ResearchListItem,
   type Status, type StreamChunk, type TaskSnapshot, type TaskSummary, type Approval, type Activity,
 } from './api'
+import { reduceActivity, reduceChat, reduceTask, taskById } from './concurrency'
 import { chatDeleteBlocked, deletedChatDestination, withoutDeletedChat } from './chatDeletion'
 
 export type Connection = 'connecting' | 'open' | 'reconnecting'
@@ -31,11 +32,12 @@ type ServerEvent =
   | { type: 'job'; seq: number; job: 'proof' | 'research'; id: string; status: string; phase: string | null }
   | ({ type: 'stream'; seq: number; job: 'proof' | 'research'; id: string; role: string } & StreamChunk)
   | { type: 'queue'; seq: number; queue: TaskSummary[] }
+  | { type: 'concurrency'; seq: number; concurrency: Concurrency }
   | { type: 'routing'; seq: number; chat: string; state: 'running' | 'done' }
   | { type: 'workspace'; seq: number; path: string }
   | { type: 'files'; seq: number; path: string }
 
-const EMPTY: TaskSnapshot = { seq: 0, task: null, activity: [], live: null, approvals: [], queue: [], routing: [] }
+const EMPTY: TaskSnapshot = { seq: 0, task: null, activity: [], live: null, approvals: [], queue: [], routing: [], tasks: [] }
 
 let state: AppState = {
   auth: 'checking', status: null, connection: 'connecting', snapshot: EMPTY,
@@ -151,7 +153,8 @@ export async function refreshStatus() {
 let buffered: ServerEvent[] | null = null
 
 async function refreshSnapshot() {
-  buffered = buffered || []
+  if (buffered) return
+  buffered = []
   try {
     const snapshot = await api.task()
     const pending = buffered || []
@@ -159,33 +162,18 @@ async function refreshSnapshot() {
     set({ snapshot: [...deletedChats].reduce(withoutDeletedChat, snapshot) })
     pending.filter((event) => event.seq > snapshot.seq).forEach(handle)
   } catch {
+    const pending = buffered || []
     buffered = null
+    pending.forEach(handle)
+    if (state.auth === 'ok') window.setTimeout(refreshSnapshot, 1000)
   }
-}
-
-function applyChat(event: Extract<ServerEvent, { type: 'chat' }>) {
-  set((s) => {
-    const live = s.snapshot.live
-    if (!live || s.snapshot.task?.id !== event.task) return {}
-    const steps: LiveStep[] = [...live.steps]
-    if (event.kind === 'start') steps.push({ type: 'call', thinking: '', text: '' })
-    else if (event.kind === 'delta') {
-      const last = steps[steps.length - 1]
-      if (last && last.type === 'call') {
-        steps[steps.length - 1] = { ...last, thinking: last.thinking + (event.thinking || ''), text: last.text + (event.text || '') }
-      }
-    } else if (event.kind === 'tool' || event.kind === 'result' || event.kind === 'notice') {
-      steps.push({ type: event.kind, text: event.text || '' })
-    }
-    return { snapshot: { ...s.snapshot, seq: event.seq, live: { ...live, steps } } }
-  })
 }
 
 let instance = ''
 
 function handle(event: ServerEvent) {
   // A task event (such as a new job's ID) may be newer than the snapshot being fetched.
-  if (buffered && (event.type === 'chat' || event.type === 'chat_deleted' || event.type === 'activity' || event.type === 'approval' || event.type === 'task')) {
+  if (buffered && ['chat', 'chat_deleted', 'activity', 'approval', 'task', 'queue', 'concurrency', 'routing'].includes(event.type)) {
     buffered.push(event)
     return
   }
@@ -198,18 +186,9 @@ function handle(event: ServerEvent) {
       instance = event.instance
       break
     case 'task': {
-      const current = state.snapshot.task
-      const fresh = !current || current.id !== event.task.id
-      // A job joining or leaving the queue is not the model's task: keep the running one shown.
-      const waiting = event.task.state === 'queued' || event.task.state === 'cancelled'
-      if (!(fresh && waiting)) {
-        set((s) => ({
-          snapshot: fresh
-            ? { ...s.snapshot, seq: event.seq, task: event.task, activity: [], live: null }
-            : { ...s.snapshot, seq: event.seq, task: event.task },
-        }))
-      }
-      if (fresh && event.task.state === 'running') refreshSnapshot()
+      const fresh = !taskById(state.snapshot, event.task.id)
+      set((s) => ({ snapshot: reduceTask(s.snapshot, event.task, event.seq) }))
+      if (fresh && ['starting', 'running'].includes(event.task.state)) refreshSnapshot()
       if (['done', 'paused', 'error'].includes(event.task.state)) {
         refreshLists(150)
         bump(event.task.target)
@@ -220,9 +199,7 @@ function handle(event: ServerEvent) {
       break
     }
     case 'activity':
-      set((s) => s.snapshot.task?.id === event.task
-        ? { snapshot: { ...s.snapshot, activity: [...s.snapshot.activity.slice(-199), { kind: event.kind, text: event.text, time: event.time }] } }
-        : {})
+      set((s) => ({ snapshot: reduceActivity(s.snapshot, event.task, { kind: event.kind, text: event.text, time: event.time }, event.seq) }))
       break
     case 'approval':
       set((s) => ({
@@ -235,7 +212,7 @@ function handle(event: ServerEvent) {
       }))
       break
     case 'chat':
-      applyChat(event)
+      set((s) => ({ snapshot: reduceChat(s.snapshot, event) }))
       break
     case 'chat_saved':
       refreshLists(100)
@@ -251,8 +228,11 @@ function handle(event: ServerEvent) {
     case 'stream':
       streamListeners.get(`${event.job}:${event.id}:${event.file}`)?.forEach((listener) => listener(event))
       break
+    case 'concurrency':
+      set((s) => ({ snapshot: { ...s.snapshot, seq: Math.max(s.snapshot.seq, event.seq), concurrency: event.concurrency }, status: s.status ? { ...s.status, concurrency: event.concurrency } : null }))
+      break
     case 'queue':
-      set((s) => ({ snapshot: { ...s.snapshot, queue: event.queue } }))
+      set((s) => ({ snapshot: { ...s.snapshot, seq: Math.max(s.snapshot.seq, event.seq), queue: event.queue } }))
       break
     case 'routing':
       set((s) => ({

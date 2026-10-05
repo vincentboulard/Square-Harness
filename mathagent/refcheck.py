@@ -1,4 +1,7 @@
-"""Literature check: one or two precise references for a known result, checked against sources.
+"""Literature check: a qualified standard reference or a precise citation check.
+
+A standard lookup recalls one useful work, looks up its bibliographic record
+once, and returns it with any remembered place explicitly unconfirmed.
 
 The model first recalls where the result is usually cited (a book, a section, a
 theorem number). Each guess then goes to a verifier with a fresh, small context
@@ -28,6 +31,36 @@ EFFORTS = {
 }
 TOOLS = ('search_papers', 'find_quotes', 'open_paper', 'read_paper', 'search_paper')
 MAX_RESULTS = 5  # search results per call: a check needs a few good hits, not a survey
+
+
+def precise_reference_request(text):
+    """Human-requested precision, never the assistant's stricter restatement."""
+    # Explicitly declining precision must not opt into the expensive workflow.
+    # Remove only that clause, preserving later positive citation requests.
+    text = re.sub(
+        r"\b(?:without|no need|do not need|don't need|don’t need|sans|pas besoin de)\b"
+        r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?]){0,70}"
+        r"(?:exact|precise|précis\w*|precis\w*|theorem number|numéro)"
+        r"(?:(?!\b(?:but|mais|and|et)\b)[^,.;!?])*",
+        '', text, flags=re.I)
+    return re.search(
+        r'\b(?:exact|precise|précis\w*|precis\w*)\b.{0,90}'
+        r'(?:reference|référence|citation|place|location|locator|chapter|chapitre|section|theorem|théorème|page)'
+        r'|\b(?:theorem|thm|lemma|proposition|section|chapter|chapitre|théorème|page)\s+(?:number|numéro|\d)'
+        r'|\b(?:verify|check|confirm|vérif\w*)\b.{0,60}(?:citation|attribution)'
+        r'|\b(?:verify|check|confirm|vérif\w*)\s+(?:this|that|the|the given|a|cette|la|une)\s+(?:reference|référence)\b'
+        r'|\b(?:check|verify|confirm|vérif\w*)\s+(?:whether|if)\b.{0,50}(?:reference|référence|citation)'
+        r'|\b(?:give|find|provide|identify|locate|donne\w*|trouve\w*)\s+(?:me\s+)?(?:the|la|le)\s+(?:page|section|chapter|chapitre)\b'
+        r'|\b(?:which|what|quel\w*)\b.{0,40}(?:chapter|chapitre|section|page|theorem number|numéro du théorème)'
+        r'|\b(?:edition|édition)\b', text, re.I | re.S) is not None
+
+
+def simple_standard_reference_request(text):
+    """Conservative closing rule; preserve independent jobs and multiple topics."""
+    return (not precise_reference_request(text)
+            and re.search(r'\b(?:reference|référence|references|références)\b|where.{0,80}proved', text, re.I)
+            and not re.search(r'\b(?:and|also|then|et|puis|prove|proof|proofs|demonstrate|derive|calculate|compute|explain|justify|establish|show|outline|summarize|review|audit|apply|démontrer|prouver|preuve|expliquer|justifier|vérifier)\b'
+                              r'|\b(?:check|verify)\b.{0,50}(?:hypotheses|assumptions|conditions|claim|statement|proof)', text, re.I))
 
 CANDIDATE = {
     'type': 'object', 'additionalProperties': False, 'required': ['authors', 'title', 'year', 'locator', 'why'],
@@ -140,7 +173,10 @@ def _clean_candidate(value, source):
     if not isinstance(value, dict):
         return None
     placeholder = re.compile(r'\b(?:not|unknown|recall\w*|remember\w*|n/?a|none|unsure)\b', re.I)
-    authors = [str(a).strip()[:60] for a in value.get('authors') or [] if str(a).strip() and not placeholder.search(str(a))][:4]
+    raw_authors = value.get('authors') or []
+    if not isinstance(raw_authors, list):
+        return None
+    authors = [a.strip()[:60] for a in raw_authors if isinstance(a, str) and a.strip() and not placeholder.search(a)][:4]
     title = str(value.get('title') or '').strip()[:300]
     if placeholder.search(title):
         title = ''
@@ -176,14 +212,23 @@ class CheckRunner(ResearchRunner):
                 value(kind, text)
         self._emit = quiet
 
-    def start(self, question, *, guesses=(), effort='medium', **overrides):
+    def start(self, question, *, guesses=(), effort='medium', lookup='precise', **overrides):
+        if lookup not in ('standard', 'precise'):
+            raise ValueError('lookup must be standard or precise')
         level = EFFORTS.get(effort, EFFORTS['high'] if effort in ('xhigh', 'poincare') else EFFORTS['medium'])
+        if lookup == 'standard':
+            level = {**level, 'candidates': 1, 'verify_rounds': 1, 'discover': False,
+                     'tokens': 8000, 'input': 60000, 'seconds': 90, 'requests': 4, 'chars': 18000}
+        self._lookup = lookup
         self._guesses = [g for g in (_clean_candidate(g, 'caller') for g in guesses or []) if g][:3]
         self._level = dict(level)
         budgets = dict(max_rounds=level['candidates'] * level['verify_rounds'] + level['verify_rounds'],
                        max_tokens=level['tokens'], max_input_tokens=level['input'], max_seconds=level['seconds'],
                        max_requests=level['requests'], max_chars=level['chars'])
+        standard_bounds = dict(budgets)
         budgets.update({k: v for k, v in overrides.items() if k in budgets and v is not None})
+        if lookup == 'standard':
+            budgets = {key: min(value, standard_bounds[key]) for key, value in budgets.items()}
         return super().start(question, kind='check', **budgets)
 
     def _pin(self, names, prefix):
@@ -191,13 +236,15 @@ class CheckRunner(ResearchRunner):
 
     def _extra_state(self):
         return {'statement': '', 'keywords': [], 'candidates': list(self._guesses), 'current': 0,
-                'discovered': False, 'answer': '', 'check': {k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')}}
+                'discovered': False, 'answer': '', 'check': {**{k: self._level[k] for k in ('candidates', 'verify_rounds', 'discover')},
+                                                        'lookup': self._lookup}}
 
     # -- context -----------------------------------------------------------------
 
     def _material(self, role):
         s = self.state
         fixed = 'QUESTION:\n' + s['goal'] + '\n'
+        fixed += 'Lookup mode: ' + s['check'].get('lookup', 'precise') + '.\n'
         if s['statement']:
             fixed += '\nRESULT SOUGHT:\n' + s['statement'] + '\nKeywords: ' + ', '.join(s['keywords']) + '\n'
         online = bool(self.literature and self.literature.online)
@@ -266,24 +313,44 @@ class CheckRunner(ResearchRunner):
         if self.state['candidates']:
             instruction += '\nThe asking agent already suggested: ' + '; '.join(
                 describe(c) + f', {c["locator"]}' for c in self.state['candidates']) + '. Keep these first.'
+        standard = self.state['check'].get('lookup') == 'standard'
+        if standard:
+            instruction += ('\nThis is a standard-reference lookup: suggest only the best one source. '
+                            'A chapter is useful but optional; give a place only if you recall it, '
+                            'otherwise leave locator empty. The precise place need not be verified. '
+                            'Keep the statement and keywords brief.')
         self.emit('notice', 'Recalling where this result is usually stated')
         # Recall is where the model's knowledge matters most: let it think first, and
         # fall back to a direct answer if thinking used up the output.
         value = None
-        for think, cap in ((True, 3000), (False, 1200)):
-            result = self._call('recall', instruction, cap=cap, format_schema=RECALL_SCHEMA, think=think)
+        for think, cap in (((False, 1600), (False, 1200)) if standard else ((True, 3000), (False, 1200))):
+            # Some guided decoders get stuck emitting whitespace inside a JSON
+            # field. Retrying the same grammar reproduces the failure: use plain
+            # generation for the bounded recovery, then parse and clean guesses.
+            recovery = ('\nReturn only one compact JSON object with this structure: '
+                        '{"statement":"result sought","keywords":["short topic"],'
+                        '"candidates":[{"authors":["surname"],"title":"work",'
+                        '"year":"1976","locator":"guessed place or empty",'
+                        '"why":"reason"}]}. Use an empty string for an unknown year. '
+                        'All year values must be quoted strings. No Markdown fences.\n')
+            result = self._call('recall', instruction + ('' if think else recovery), cap=cap,
+                                format_schema=RECALL_SCHEMA if think else None, think=think)
             try:
                 value = json.loads(result['text'])
                 break
             except ValueError:
-                self.state['warnings'].append('The recall answer was not usable JSON' + (' after thinking; retried without.' if think else '.'))
+                self.state['warnings'].append('The recall answer was not usable JSON' +
+                    ('; retried without thinking or constrained decoding.' if think else '.'))
                 value = {}
         if not isinstance(value, dict):
             value = {}
         self.state['statement'] = str(value.get('statement') or '')[:1500]
-        self.state['keywords'] = [str(k)[:80] for k in value.get('keywords') or [] if str(k).strip()][:6]
+        keywords = value.get('keywords')
+        self.state['keywords'] = [k[:80] for k in (keywords if isinstance(keywords, list) else [])
+                                  if isinstance(k, str) and k.strip()][:6]
         seen = {(_fold(' '.join(c['authors'])), _number(c['locator'])) for c in self.state['candidates']}
-        for item in value.get('candidates') or []:
+        candidates = value.get('candidates')
+        for item in candidates if isinstance(candidates, list) else []:
             c = _clean_candidate(item, 'recall')
             if c and (_fold(' '.join(c['authors'])), _number(c['locator'])) not in seen:
                 self.state['candidates'].append(c)
@@ -359,6 +426,13 @@ class CheckRunner(ResearchRunner):
             if calls:
                 s['pending_tools'] = {'calls': calls, 'index': 0, 'active': False}
                 return
+        if s['check'].get('lookup') == 'standard':
+            # A single record lookup is enough for this contract. Source/locator
+            # gates stay strict; lack of a record leaves a labelled memory lead.
+            c['rounds'] = 1
+            c['verdict'] = self._gate(index, {'level': 'located', 'locator': c['locator']})
+            s['phase'] = 'answer'
+            return
         # Each guess gets a fair share of web requests, so the first cannot starve the others.
         share = max(6, settings['max_requests'] // (len(s['candidates']) + int(s['check']['discover'])))
         if (c['rounds'] < s['check']['verify_rounds'] and s['rounds_started'] < settings['max_rounds']
@@ -396,6 +470,8 @@ class CheckRunner(ResearchRunner):
         words = re.findall(r'[^\W\d_]+', c['title'])[:8]
         query = f'au:{names[0]}' + (' ti:' + ' '.join(words) if words else '')
         calls.append({'function': {'name': 'search_papers', 'arguments': {'query': query, 'provider': 'zbmath', 'limit': 3}}})
+        if self.state['check'].get('lookup') == 'standard':
+            return calls
         # All the keywords together: a combined topic query finds far more of the papers that cite the work.
         topic = ' '.join(self.state['keywords'][:4])[:120]
         if _number(c['locator']) or topic:
@@ -492,6 +568,16 @@ class CheckRunner(ResearchRunner):
             overlap = len(words & _words(r['title']))
             if words and not overlap:
                 continue
+            if self.state['check'].get('lookup') == 'standard':
+                # One common title word and an author do not identify a work.
+                # An ambiguous hit must leave the recalled source unverified.
+                if not set(surnames).issubset({_fold(n) for n in _surnames(r['authors'])}):
+                    continue
+                stopwords = {'a', 'an', 'the', 'of', 'to', 'on', 'in', 'and', 'for', 'with'}
+                expected = set(re.findall(r'[a-z0-9]+', _fold(candidate['title']))) - stopwords
+                actual = set(re.findall(r'[a-z0-9]+', _fold(r['title']))) - stopwords
+                if not expected or len(expected & actual) / len(expected | actual) < .8:
+                    continue
             value = overlap + (3 if wanted and str(r.get('identifier')) == wanted else 0) + (1 if r.get('review') else 0)
             if value > score:
                 best, score = r, value
@@ -611,6 +697,8 @@ class CheckRunner(ResearchRunner):
         top = [c for c in judged if RANK[c['verdict']['level']] >= RANK['cited']]
         if not top:
             top = [c for c in judged if c['verdict']['level'] == 'located']
+        if not top and self.state['check'].get('lookup') == 'standard':
+            top = [c for c in judged if c['verdict']['level'] != 'contradicted']
         return top[:2]
 
     @staticmethod
@@ -636,6 +724,28 @@ class CheckRunner(ResearchRunner):
     def _compose(self):
         s = self.state
         chosen = self.chosen()
+        if s['check'].get('lookup') == 'standard':
+            if not chosen:
+                return ('I could not identify a reliable standard reference in this lookup. '
+                        'I did not verify a chapter, theorem number or page.')
+            c = chosen[0]
+            v = c['verdict']
+            record = v.get('record') or {}
+            source = {**c, **{k: record[k] for k in ('authors', 'title', 'year') if record.get(k)}}
+            out = ['Suggested standard reference: **' + describe(source) + '**.']
+            if record.get('publisher'):
+                out.append('Publisher in the bibliographic record: ' + record['publisher'] + '.')
+            out.append('The bibliographic record was found; its relevance to this result is a recommendation from model recall.'
+                       if record else 'This is a suggestion from model recall; the bibliographic lookup did not confirm it.')
+            out.append('I did not verify the precise reference within the work.')
+            if c.get('locator') and v['level'] != 'contradicted':
+                out.append('Possible place from model recall: **' + c['locator'] + '** — unconfirmed.')
+                if record.get('year') and c.get('year') and str(record['year']) != str(c['year']):
+                    out.append('The record is dated ' + str(record['year']) + ', whereas model recall suggested '
+                               + str(c['year']) + '; the guessed place may refer to a different edition.')
+            if record.get('url'):
+                out.append('Book or paper record: ' + record['url'])
+            return '\n\n'.join(out)
         out = []
         if not chosen:
             out.append('**No reference could be confirmed.** The guesses below were checked; treat them as leads only.')
@@ -689,7 +799,10 @@ class CheckRunner(ResearchRunner):
         refs = []
         for c in self.chosen():
             v = c['verdict']
-            refs.append({'level': v['level'], 'reference': describe(c).replace('*', ''), 'place': v.get('locator'),
+            record = v.get('record') or {}
+            source = ({**c, **{k: record[k] for k in ('authors', 'title', 'year') if record.get(k)}}
+                      if self.state['check'].get('lookup') == 'standard' else c)
+            refs.append({'level': v['level'], 'reference': describe(source).replace('*', ''), 'place': v.get('locator'),
                          'corrected_from': v.get('corrected_from'), 'cited_as': v.get('cited_entry') or None,
                          'edition_of_place': v.get('cited_edition'),
                          'statement_found': v.get('statement_found'), 'evidence': f'{v["document_id"]}:{v["lines"]}' if v.get('quote') else None,
@@ -700,6 +813,9 @@ class CheckRunner(ResearchRunner):
                    'reasons': (c.get('verdict') or {}).get('reasons', [])} for c in self.state['candidates'] if c not in self.chosen()]
         value = {'status': self.state['status'], 'check_id': self.state['id'], 'references': refs, 'not_confirmed': others,
                  'note': 'Only read/cited references have a checked place; say "located" ones are unconfirmed when you cite them.'}
+        if self.state['check'].get('lookup') == 'standard':
+            value.update(lookup='standard', disposition='answer_with_qualification',
+                         precise_place_confirmed=bool(self._confirmed()))
         text = json.dumps(value, ensure_ascii=False)
         while len(text) > 3000 and (value['not_confirmed'] or any(r.get('quote') for r in refs)):
             if value['not_confirmed']:
@@ -711,6 +827,10 @@ class CheckRunner(ResearchRunner):
         return text[:3000]
 
     def _finish(self):
+        if self.state['check'].get('lookup') == 'standard':
+            self.state['status'] = 'answered' if self.chosen() else 'partial'
+            self.state['stop_reason'] = 'One standard-reference lookup finished; precise locations remain unconfirmed.'
+            return
         self.state['status'] = 'answered' if self._confirmed() else 'partial'
         self.state['stop_reason'] = ('Check finished.' if self._confirmed()
                                      else 'Check finished without a confirmed place; see the levels below.')

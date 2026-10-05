@@ -18,7 +18,7 @@ from .ledger import ProofStore
 from .tools import Workspace
 from .literature import LiteratureTools
 from .litreview import ReviewRunner
-from .refcheck import CheckRunner, nested_checker
+from .refcheck import CheckRunner, nested_checker, precise_reference_request
 from .research import ResearchRunner
 from .writeup import WriteupRunner
 from . import __version__
@@ -148,9 +148,9 @@ def parser():
     p.add_argument('--max-rounds', type=int, default=8, help='Tool rounds per ordinary chat query (not proof rounds)')
     p.add_argument('--assistant-concurrency', type=int, default=2,
                    help='Simultaneous Assistant workers on vLLM/OpenAI-compatible servers (1–4; other backends use 1)')
-    p.add_argument('--assistant-tokens', type=int, default=60000, help='Shared generated-token budget per Assistant turn')
-    p.add_argument('--assistant-input-tokens', type=int, default=240000, help='Shared input-token budget per Assistant turn')
-    p.add_argument('--assistant-seconds', type=float, default=900, help='Shared active-time budget per Assistant turn')
+    p.add_argument('--assistant-tokens', type=int, help='Hard shared generated-token ceiling (default: adaptive to worker effort, 60000–200000)')
+    p.add_argument('--assistant-input-tokens', type=int, help='Hard shared input-token ceiling (default: adaptive to worker effort, 240000–800000)')
+    p.add_argument('--assistant-seconds', type=float, help='Hard shared active-time ceiling (default: adaptive to worker effort, 900–7200 seconds)')
     p.add_argument('--proof-rounds', type=int, default=3, help='Maximum proof attempts, including the initial solve and revisions')
     p.add_argument('--proof-tokens', type=int, default=120000, help='Total generated-token ceiling, including all thinking and verification')
     p.add_argument('--proof-seconds', type=float, default=1800, help='Time budget in seconds per new proof')
@@ -189,6 +189,10 @@ def parser():
     p.add_argument('--gui-root', type=Path, metavar='PATH',
                    help='With --gui, folders at or below this one can be opened in the interface (default: the workspace)')
     p.add_argument('--gui-port', type=int, default=8765, help='Interface port; the next free port is used if taken (default: %(default)s)')
+    p.add_argument('--gui-concurrency', type=int, default=2,
+                   help='Maximum active interface chats/jobs (1–8; each keeps its full token budget)')
+    p.add_argument('--gui-model-concurrency', type=int, default=2,
+                   help='Maximum simultaneous model requests across interface jobs and workers (1–8)')
     p.add_argument('--no-browser', action='store_true', help='With --gui, do not open a browser automatically')
     one_shot = p.add_mutually_exclusive_group()
     one_shot.add_argument('--prompt', help='Run one query or command and exit')
@@ -230,9 +234,12 @@ def main():
         p.error('Use temperature 0–2, top-p in (0, 1], and seed in [0, 2**31)')
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         p.error('Request timeout must be finite and positive')
-    if (not 1 <= args.assistant_concurrency <= 4 or args.assistant_tokens < 4096
-            or args.assistant_input_tokens < 4096 or not math.isfinite(args.assistant_seconds)
-            or args.assistant_seconds <= 0):
+    if not 1 <= args.gui_concurrency <= 8 or not 1 <= args.gui_model_concurrency <= 8:
+        p.error('Use gui-concurrency and gui-model-concurrency from 1 to 8')
+    if (not 1 <= args.assistant_concurrency <= 4
+            or args.assistant_tokens is not None and args.assistant_tokens < 4096
+            or args.assistant_input_tokens is not None and args.assistant_input_tokens < 4096
+            or args.assistant_seconds is not None and (not math.isfinite(args.assistant_seconds) or args.assistant_seconds <= 0)):
         p.error('Use assistant-concurrency 1–4, assistant token budgets >= 4096, and finite assistant-seconds > 0')
     if args.ctx < 2048 or not 0 < args.predict < args.ctx - 1024 or not 1 <= args.max_rounds <= 32:
         p.error('Use ctx >= 2048, 0 < predict < ctx - 1024, and 1 <= max-rounds <= 32')
@@ -416,7 +423,7 @@ def main():
             if not args.online:
                 ui.say('Note: research is offline, so the check can only use cached sources. Relaunch with --online.')
             runner = CheckRunner(agent, ui.emit)
-            result = runner.start(query)
+            result = runner.start(query, lookup='precise' if precise_reference_request(query) else 'standard')
             ui.say('\n' + (runner.state.get('answer') or runner._compose()))
             ui.say(f'Check {result["id"]} · {result["status"]} · log: {Path(result["directory"]) / "report.md"}')
             agent.history.extend([{'role': 'user', 'content': query}, {'role': 'assistant', 'content': runner.state.get('answer', '')}])

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { activeTasks, concurrencyLimits } from '../concurrency'
 import { api, type Artifact, type Review, type ToolCall } from '../api'
 import { Collapse, ErrorNote, Loading, Modal } from '../components/common'
 import { BackIcon, PanelRightIcon } from '../components/Icons'
@@ -9,18 +10,17 @@ import { bytes, count, firstLine } from '../format'
 import { setPanelHidden, usePanelHidden } from '../panels'
 import { onStream, useApp } from '../store'
 
-/** Says what the model is doing; `queue` explains that new work waits its turn. */
+/** Explains what happens when every chat slot is occupied. */
 export function BusyNote({ queue = false }: { queue?: boolean }) {
   const app = useApp()
-  const task = app.snapshot.task
-  if (!task) return null
-  const waiting = app.snapshot.queue.length
+  const tasks = activeTasks(app.snapshot)
+  if (!tasks.length) return null
+  const limits = concurrencyLimits(app.snapshot, app.status)
   return (
     <p className="busy-note">
-      The model is working on a {task.label.toLowerCase()}: <a href={taskHref(task, app)}><Inline limit={70}>{withoutStop(task.title)}</Inline></a>.
-      {queue
-        ? ` This one will wait in the queue${waiting ? `, after ${waiting} other ${waiting === 1 ? 'job' : 'jobs'}` : ''}, and start when the model is free.`
-        : ' Pause it first: the model serves one task at a time, and time budgets count wall-clock time.'}
+      {tasks.length} of {limits.chats} chat slots are active.
+      {queue ? ' New work joins the queue and starts when a slot opens.' : ' Each conversation has its own token budget.'}
+      {' '}<a href={taskHref(tasks[0].task, app)}>Open active work</a>.
     </p>
   )
 }
@@ -29,7 +29,7 @@ export function BusyNote({ queue = false }: { queue?: boolean }) {
 const withoutStop = (title: string) => title.trim().replace(/[.。]+$/, '')
 
 export function queuedMessage(title: string) {
-  return `Added to the queue: “${firstLine(withoutStop(title), 80)}”. It starts when the model is free. The queue is listed under the running job, where you can cancel it.`
+  return `Added to the queue: “${firstLine(withoutStop(title), 80)}”. It starts when a chat slot opens. The queue is listed in the sidebar, where you can cancel it.`
 }
 
 /** The job's overview column (budget, candidates, checks); it slides away to a spine. */

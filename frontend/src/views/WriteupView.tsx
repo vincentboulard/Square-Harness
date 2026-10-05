@@ -7,6 +7,7 @@ import { researchLook, researchResumable, Square, type Variant } from '../compon
 import { ago } from '../format'
 import { isPanelHidden } from '../panels'
 import { go } from '../router'
+import { capacityFull, taskForJob } from '../concurrency'
 import { useApp, useTick } from '../store'
 import { Files } from './ProofView'
 import { flaggedCitations, Passage, SourcesTab } from './ResearchView'
@@ -27,7 +28,7 @@ export function WriteupView({ id, tab }: { id: string; tab: string | null }) {
   const [cite, setCite] = useState<string | null>(null)
   const active = tab || 'document'
   const jobClass = useJobClass()
-  const task = app.snapshot.task
+  const task = taskForJob(app.snapshot, 'research', id)?.task
   const ours = !!task && task.kind === 'research' && task.target === id && ['starting', 'running', 'pausing'].includes(task.state)
   const openCite = (ref: string) => {
     setCite(ref)
@@ -71,7 +72,8 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
   const app = useApp()
   const look = researchLook(data.status, data.running)
   const [error, setError] = useState('')
-  const busy = !!app.snapshot.task && ['starting', 'running', 'pausing'].includes(app.snapshot.task.state)
+  const busy = capacityFull(app.snapshot, app.status)
+  const ownTask = taskForJob(app.snapshot, 'research', data.id)?.task
   const queued = app.snapshot.queue.some((item) => item.target === data.id)
   const act = (action: Promise<unknown>) => { setError(''); action.catch((reason: Error) => setError(reason.message)) }
   const phase = data.phase === 'repair' ? 'compile' : data.phase
@@ -103,10 +105,10 @@ function Header({ data, ours, pausing }: { data: ResearchDetail; ours: boolean; 
       )}
       <div className="job-actions">
         {ours ? (
-          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause())}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
+          <button type="button" className="btn" disabled={pausing} onClick={() => act(api.pause(ownTask!.id))}><PauseIcon size={16} /> {pausing ? 'Pausing…' : 'Pause'}</button>
         ) : researchResumable(data.status) ? (
-          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, busy))}>
-            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Resume when the model is free' : 'Resume with the remaining budget'}
+          <button type="button" className="btn btn-primary" disabled={queued} onClick={() => act(api.resumeResearch(data.id, true))}>
+            <PlayIcon size={16} /> {queued ? 'Waiting in the queue' : busy ? 'Queue resume' : 'Resume with the remaining budget'}
           </button>
         ) : null}
       </div>
@@ -147,7 +149,7 @@ function LiveWriteup({ id, role, file, ours }: { id: string; role: string; file:
   return (
     <div className="live" id="live">
       <p className="live-head"><Square variant="running" size={14} /> {ROLES[role === 'plan' ? 'outline' : role]?.active || role}</p>
-      {ours && <ActivityLog items={app.snapshot.activity} />}
+      {ours && <ActivityLog items={taskForJob(app.snapshot, 'research', id)?.activity || []} />}
       {role === 'plan' ? <StreamBody stream={stream} role="outline" live />
         : role === 'fidelity' ? <StreamBody stream={stream} role="fidelity" live />
         : <pre className="source tex live-tex">{stream.text || 'Waiting for the first tokens…'}</pre>}

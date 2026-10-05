@@ -25,15 +25,20 @@ class _Pool:
 class BudgetClient:
     def __init__(self, client, *, state=None, max_tokens=60000, max_input_tokens=240000,
                  max_seconds=900, checkpoint=lambda: None, concurrency=2, pool=None,
-                 allowance=None, usage=None):
+                 allowance=None, usage=None, adaptive_limits=None):
         self.client = client
         budget = dict(state or {'tokens': 0, 'input_tokens': 0, 'seconds': 0,
                                'max_tokens': max_tokens, 'max_input_tokens': max_input_tokens,
                                'max_seconds': max_seconds})
+        if state is None and adaptive_limits:
+            budget['adaptive_limits'] = dict(adaptive_limits)
         for key in ('tokens', 'input_tokens', 'seconds', 'max_tokens', 'max_input_tokens', 'max_seconds'):
             value = budget.get(key)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError('Invalid Assistant budget: ' + key)
+        for key, value in budget.get('adaptive_limits', {}).items():
+            if key not in ('max_tokens', 'max_input_tokens', 'max_seconds') or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < budget[key]:
+                raise ValueError('Invalid adaptive Assistant ceiling: ' + key)
         self.pool = pool or _Pool(budget, checkpoint, concurrency)
         self.allowance = allowance
         self.usage = usage if usage is not None else {'tokens': 0, 'input_tokens': 0}
@@ -51,6 +56,16 @@ class BudgetClient:
 
     def fork(self, client, *, allowance, usage):
         return BudgetClient(client, pool=self.pool, allowance=allowance, usage=usage)
+
+    def ensure_limits(self, **requested):
+        """Promote only saved adaptive limits; explicit caps and usage never change."""
+        with self.pool.lock:
+            ceilings = self.pool.state.get('adaptive_limits', {})
+            for key, value in requested.items():
+                if key not in ('max_tokens', 'max_input_tokens', 'max_seconds') or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError('Invalid requested Assistant limit: ' + key)
+                if key in ceilings:
+                    self.pool.state[key] = max(self.pool.state[key], min(value, ceilings[key]))
 
     @property
     def remaining_tokens(self):
@@ -80,7 +95,18 @@ class BudgetClient:
         try:
             if cancel is not None and cancel.is_set():
                 raise KeyboardInterrupt
-            yield from self._stream(payload)
+            # The GUI's global inference queue is separate from this turn's
+            # token pool. Admit before reserving tokens, so an undispatched
+            # pause or expired deadline cannot consume its output allowance.
+            admission = getattr(self.client, 'inference_slot', None)
+            if admission is None:
+                yield from self._stream(payload)
+            else:
+                try:
+                    with admission(deadline=time.monotonic() + self.remaining_seconds):
+                        yield from self._stream(payload)
+                except TimeoutError as exc:
+                    raise AssistantBudget('Assistant time budget exhausted while waiting for inference.') from exc
         finally:
             self.pool.slots.release()
 

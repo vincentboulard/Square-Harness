@@ -1,5 +1,6 @@
 import hashlib
 import json
+import ssl
 from pathlib import Path
 import tempfile
 import time
@@ -176,6 +177,14 @@ class LiteratureTests(unittest.TestCase):
             connect.assert_called_once_with(('93.184.216.34', 443), timeout=15.0)
             context.return_value.wrap_socket.assert_called_once_with(connect.return_value, server_hostname='example.org')
             self.assertEqual(result[2], b'ok')
+
+    def test_certificate_failure_is_actionable_and_keeps_verification_enabled(self):
+        with patch.object(self.lit, '_addresses', return_value=['93.184.216.34']), patch('socket.create_connection') as connect, patch('ssl.create_default_context') as context:
+            context.return_value.wrap_socket.side_effect = ssl.SSLCertVerificationError('untrusted chain')
+            with self.assertRaisesRegex(LiteratureError, 'certificate verification failed.*SSL_CERT_FILE'):
+                self.lit._request_once('https://example.org/p', {}, 100)
+            context.return_value.wrap_socket.assert_called_once_with(connect.return_value, server_hostname='example.org')
+            connect.return_value.close.assert_called_once()
 
     def test_redirect_private_destination_blocked(self):
         with patch.object(self.lit, '_request_once', return_value=(302, {'location': 'https://127.0.0.1/private'}, b'')) as request:

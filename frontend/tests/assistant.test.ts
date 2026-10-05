@@ -14,8 +14,8 @@ const child: TranscriptItem = {
   task: parent.id, status: 'started', job_id: 'proof-child',
 }
 
-test('Assistant preserves the free mode identifier for saved conversations', () => {
-  assert.equal(MODES.free.label, 'Assistant')
+test('Square Harness preserves the free mode identifier for saved conversations', () => {
+  assert.equal(MODES.free.label, 'Square Harness')
   assert.equal(MODES.free.mode, 'free')
 })
 

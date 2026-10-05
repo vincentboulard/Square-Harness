@@ -9,6 +9,7 @@ Worker results are evidence with their own status, never proof certificates.
 import copy
 import hashlib
 import json
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .agent import AgentError
 from .router import EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
+from .refcheck import simple_standard_reference_request
 
 
 POLICY = """You are the main mathematical assistant for a research mathematician.
@@ -25,6 +27,9 @@ Completeness concerns the mathematical obligations of the argument. Use standard
 elementary identities without rederiving field axioms unless explicitly requested.
 Preserve all hypotheses, definitions, quantifiers and the user's language.
 Distinguish proved facts, conjectures, heuristic arguments and unresolved gaps.
+The original user statement is authoritative. Do not strengthen it or insert a
+supposed equivalent formulation or proof guidance into a delegation unless that
+equivalence or guidance has been justified. Flag conflicts in worker restatements.
 Do not describe a model's review as a formal proof certificate.
 
 You can delegate a precise objective to an existing worker when sustained proof
@@ -37,17 +42,27 @@ create other children. The controller also gives prove, critic, explore, referee
 and writeup workers the unchanged original user message and conversation, so
 your objective must identify its relationship to that request.
 
-Use check to find one or two precise references (a book or paper and the theorem
-or section) for a known result, or to verify a citation or theorem number. It is
-a quick verified lookup: it recalls likely sources, checks each against zbMATH,
-Crossref, citing papers and open texts, and grades it read, cited, located,
-contradicted or not found. Use literature only for a reading list or survey of a
-topic. Check and literature workers see only your objective: state the result
-itself with its hypotheses, add any guessed sources, and use public mathematical
-words, never private manuscript text. A theorem number you recall is a guess:
+Use check to find a useful standard reference for a known result, or to verify a
+citation or an explicitly requested precise locator. Ordinary reference requests
+get ONE bounded lookup: a standard book or paper, optionally a remembered chapter,
+with an honest statement of what was not verified. Do not insert a requirement
+for an exact theorem/section/page into a delegation unless the human asked for it.
+A located book or clearly labelled memory suggestion is a useful final result.
+If the worker returns disposition answer_with_qualification, answer from it;
+do not start another check, Wikipedia lookup or arXiv citation hunt merely to
+resolve the optional locator. Continue independently requested proof or other jobs.
+Precise checking uses sources and grades them read, cited, located, contradicted
+or not found. Use literature only for a reading list or survey of a
+topic. Check workers see only your objective. Literature workers also receive the
+exact reference conversation to set their scope. State the result itself with its
+hypotheses, add any guessed sources, and use public mathematical words in queries,
+never private manuscript text. A theorem number you recall is a guess:
 verify it with check before giving it as fact, or say it is unverified. When you
 cite a checked reference, keep its evidence level; located means the exact place
-was not confirmed.
+was not confirmed. This includes chapter numbers and titles, section and theorem
+numbers, and pages: a guessed locator never becomes confirmed just because the
+book's bibliographic record was found. At level located, give the work's verified
+metadata and label every guessed place unconfirmed, or omit the guessed place.
 For two independent objectives, return both delegate calls in the same response:
 the controller runs them concurrently within a shared budget. Do not delegate
 dependent objectives together; inspect the first result before choosing the next.
@@ -90,6 +105,24 @@ STATE_VERSION = 1
 MAIN_PREDICT = 8192
 FINAL_PREDICT = 8192
 MAX_FINAL_PREDICT = 16384
+DEFAULT_ACTIONS = 12
+
+
+def _ends_with_work_plan(text):
+    """Catch an explicit unexecuted follow-up, not judge mathematical validity.
+
+    Only inspect a short final paragraph and a promise at its end, so an opening
+    explanation such as 'Let me check ...' followed by an answer is unaffected.
+    """
+    tail = text.strip().split('\n\n')[-1]
+    if len(tail) > 600:
+        return False
+    return re.search(
+        r"\b(?:let me|i will|i'll|je vais|laissez-moi)\s+"
+        r"(?:(?:try to|now|first|then|next|essayer de)\s+)*"
+        r"(?:find|search|look|verify|check|read|open|continue|retrieve|investigate|"
+        r"chercher|trouver|vérifier|lire|ouvrir|continuer)\b[^.!?]*[.!?]?\s*$",
+        tail, re.I) is not None
 
 
 def _delegate_schema():
@@ -117,7 +150,7 @@ class Orchestrator:
     """
 
     def __init__(self, agent, delegate, emit=None, checkpoint=None,
-                 max_actions=6, max_children=4, concurrency=2):
+                 max_actions=DEFAULT_ACTIONS, max_children=4, concurrency=2):
         if type(max_actions) is not int or max_actions < 0:
             raise ValueError('max_actions must be a nonnegative integer')
         if type(max_children) is not int or max_children < 0:
@@ -177,6 +210,8 @@ class Orchestrator:
             'messages': copy.deepcopy(original) + [{'role': 'user', 'content': content}],
             'children': [], 'pending_calls': [], 'actions': 0, 'main_calls': 0,
             'answer': '', 'warnings': [], 'last_call': None, 'blockers': [], 'force_final': False,
+            'empty_final_retried': False,
+            'continuation_final_retried': False,
             'limits': {'actions': self.max_actions, 'children': self.max_children,
                        'concurrency': self.concurrency},
         }
@@ -200,6 +235,8 @@ class Orchestrator:
         self.state = state
         self.state.setdefault('blockers', [])
         self.state.setdefault('force_final', False)
+        self.state.setdefault('empty_final_retried', False)
+        self.state.setdefault('continuation_final_retried', False)
         if not isinstance(self.state['blockers'], list):
             raise ValueError('Malformed assistant blockers')
 
@@ -278,7 +315,19 @@ class Orchestrator:
             'messages': [{'role': 'system', 'content': POLICY + (
                 '\nThe preceding response was unfinished. Give a complete replacement answer from the '
                 'unchanged conversation and saved worker results. Do not repeat completed proof work. '
-                'The unfinished displayed fragment is not a proved premise.\n' if recovery else '')}]
+                'The unfinished displayed fragment is not a proved premise.\n' if recovery else '') + (
+                '\nThe last synthesis was empty. Give a written answer from the saved worker results, '
+                'including their status and unresolved obligations. Do not rerun workers.\n'
+                if self.state.get('empty_final_retried') else '') + (
+                '\nThe preceding reply ended with a plan to do more work. Carry out the next step '
+                'using an available tool, or give the actual answer and its limitations from saved evidence. '
+                'A promise to search or verify later is not a final answer.\n'
+                if self.state.get('continuation_final_retried') else '') + (
+                '\nFINAL ANSWER REQUIRED NOW: further tools are unavailable for this turn. '
+                'Use the saved results to answer the original request. Preserve evidence levels, '
+                'identify unconfirmed details and provider failures, and say where the investigation '
+                'stopped. Do not promise another search, verification, or background continuation.\n'
+                if not tools else '')}]
                 + copy.deepcopy(self.state['messages']),
             'options': {'num_ctx': self.agent.ctx, 'num_predict': predict,
                         'temperature': 0, 'top_p': self.agent.top_p},
@@ -287,6 +336,30 @@ class Orchestrator:
             payload['options']['seed'] = (self.agent.seed + self.state['main_calls']) % (2 ** 31)
         if tools:
             payload['tools'] = tools
+        if (not tools and any((c.get('result') or {}).get('disposition') == 'answer_with_qualification'
+                              for c in self.state['children'])):
+            payload['messages'].append({'role': 'user', 'content':
+                'CONTROLLER LOOKUP COMPLETION: one standard-reference lookup is finished. '
+                'Answer the original request briefly with the best suggested work and its known '
+                'bibliographic details. If a chapter or other place was recalled, you may give it '
+                'as a possible unconfirmed lead. Say explicitly that you did not verify the precise '
+                'reference. A book record confirms the work exists, not that the theorem is in a '
+                'particular chapter. Do not search again or promise another lookup.'})
+        if self.state.get('continuation_final_retried'):
+            # End the stalled assistant turn explicitly. Some chat templates
+            # otherwise continue/repeat its final planning sentence. This is a
+            # transient controller request; native history stays unchanged.
+            payload['messages'].append({'role': 'user', 'content':
+                'CONTROLLER RECOVERY REQUEST: the preceding reply promised more work but did not '
+                'perform it. Answer the original user request now from the saved evidence, '
+                'with a usable result and explicit limitations. Do not repeat the planning sentence '
+                'or promise work after this turn. For references graded located, only the work and '
+                'its relevance were confirmed. Do not claim any chapter number or chapter title, '
+                'section, theorem number or page was confirmed without read/cited evidence. '
+                'A bibliographic record or a guessed locator does not supply that evidence.' + (
+                ' You may instead perform the promised next step with an available tool.' if tools else
+                ' No further tools are available: report confirmed references with their evidence '
+                'levels and clearly identify details that remain unconfirmed.')})
         # Preserve every hypothesis. Refuse oversized input instead of dropping
         # old turns, slicing a statement or splitting a native tool transaction.
         counter = getattr(self.agent.client, 'count_input_tokens', None)
@@ -420,6 +493,10 @@ class Orchestrator:
         child = next((item for item in self.state['children'] if item['id'] == pending['child_id']), None)
         if child is not None:
             return child
+        if (args['mode'] == 'check' and simple_standard_reference_request(self.state['query'])
+                and any(c['action']['mode'] == 'check' for c in self.state['children'])):
+            raise ValueError('One standard-reference lookup has already been started for this request. '
+                             'Answer from its results with uncertainty; optional exact locators do not require another worker.')
         if len(self.state['children']) >= self.max_children:
             raise ValueError('The assistant child budget is exhausted')
         # Preserve the source request independently of the model's objective.
@@ -598,8 +675,42 @@ class Orchestrator:
                    'tool_call_id': pending['call']['id'], 'content': json.dumps(result, ensure_ascii=False)}
         self.state['messages'].append(message)
         pending['status'] = 'complete'
+        value = result.get('result') or {}
+        if (isinstance(value, dict) and value.get('disposition') == 'answer_with_qualification'
+                and simple_standard_reference_request(self.state['query'])
+                and all(c['action']['mode'] == 'check' for c in self.state['children'])):
+            # Optional precision is not an unfinished obligation. Finish this
+            # simple lookup even if the model would prefer another citation hunt.
+            self.state['force_final'] = True
         self._save()
         self.emit('result', message['content'])
+
+    def _qualified_reference_answer(self):
+        if not simple_standard_reference_request(self.state['query']) or len(self.state['children']) != 1:
+            return None
+        child = self.state['children'][0]
+        value = child.get('result') or {}
+        answer = value.get('answer')
+        if (child['action']['mode'] != 'check' or child['status'] != 'complete'
+                or value.get('disposition') != 'answer_with_qualification'
+                or not isinstance(answer, str) or not answer.strip()):
+            return None
+        # The worker already renders record-backed metadata and qualifies its
+        # recalled locator. A second model pass can invent publication details.
+        provenance = {'kind': 'worker_result', 'job_id': child['job_id']}
+        rendered = (self.state.get('answer_source') == provenance
+                    and self.state['messages'][-1] == {'role': 'assistant', 'content': answer})
+        if not rendered:
+            self.state['messages'].append({'role': 'assistant', 'content': answer})
+        self.state['answer_source'] = provenance
+        self.agent.history = copy.deepcopy(self.state['messages'])
+        for item in self.agent.history:
+            item.pop('thinking', None)
+        self.agent.last_stats = {}
+        self.emit('start', '')
+        self.emit('text', answer)
+        self.emit('end', '')
+        return self._finish('complete', answer)
 
     def run(self, query, *, files=(), history=(), state=None):
         if state is None:
@@ -614,9 +725,12 @@ class Orchestrator:
             last = self.state.get('last_call') or {}
             self._complete_pending(allow_tools=last.get('tools_enabled') is not False
                                    and last.get('final_recovery') is not True)
-            # Each tool round consumes >=1 action; one final synthesis and one
-            # interrupted call may follow. The finite cap also bounds bad peers.
-            while self.state['main_calls'] < self.max_actions + 2:
+            # Each tool round consumes >=1 action. Final synthesis and bounded
+            # empty/continuation recovery may follow; bad peers remain bounded.
+            while self.state['main_calls'] < self.max_actions + 3:
+                qualified = self._qualified_reference_answer()
+                if qualified is not None:
+                    return qualified
                 tools = self._tools() if self.state['actions'] < self.max_actions else []
                 payload = self._payload(tools)
                 tools_enabled = bool(payload.get('tools'))
@@ -633,7 +747,23 @@ class Orchestrator:
                     continue
                 self.state['messages'].append(assistant)
                 if not assistant['content'].strip():
+                    if any(child['status'] == 'complete' for child in self.state['children']) and not self.state['empty_final_retried']:
+                        self.state['empty_final_retried'] = True
+                        self.state['force_final'] = True
+                        self.state['last_call']['status'] = 'incomplete'
+                        self._warning('The final answer was empty; retrying synthesis once from the saved worker results.')
+                        self._save()
+                        continue
                     return self._finish('incomplete', warning='No final answer was received.')
+                if _ends_with_work_plan(assistant['content']):
+                    self.state['last_call']['status'] = 'incomplete'
+                    if not self.state['continuation_final_retried']:
+                        self.state['continuation_final_retried'] = True
+                        self._warning('The reply announced further work without performing it; continuing once from the saved results.')
+                        self._save()
+                        continue
+                    return self._finish('incomplete', assistant['content'],
+                        'The reply still promises further work without an answer. Work is saved and can be resumed.')
                 self.agent.history = copy.deepcopy(self.state['messages'])
                 for item in self.agent.history:
                     item.pop('thinking', None)
