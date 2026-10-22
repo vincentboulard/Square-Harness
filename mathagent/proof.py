@@ -26,9 +26,16 @@ LEGACY_TRANSPORT_SHA256 = {
     'agent.py': '490a6dff6eecdfc182939a935099bb890dd1426e7ddcc1520390a04cf19c5a00',
     'backends.py': '5fa0edbebbfb991b94033f677501b2697a85ec6101c89830614e8212262f3821',
 }
-COMPATIBLE_TRANSPORT_SHA256 = {
+# Exact pre-recovery sources remain compatible: this upgrade only reports
+# invalid tool batches to the Assistant, while proof jobs expose no tools.
+PRE_TOOL_RECOVERY_CONTROLLER_SHA256 = '95765d48c23437da8a8f327211a2e72bba5d20ed0df2c4c765cbb04681a4d10b'
+PRE_TOOL_RECOVERY_TRANSPORT_SHA256 = {
     'agent.py': 'ee94911232b161db26798aaad3168d0f780a90befa01f5bb432920926f86ae2b',
     'backends.py': '04e520784b297e2e97790bd383a9a9444fd67c93359f248676baf2a05c9e02f4',
+}
+COMPATIBLE_TRANSPORT_SHA256 = {
+    'agent.py': 'ee94911232b161db26798aaad3168d0f780a90befa01f5bb432920926f86ae2b',
+    'backends.py': '1dbb58fd778be7c5c6f9dffbf655e5b0dbe0f0b6b24f700c82a81d93769ca099',
 }
 TERMINAL = {'candidate_complete', 'budget_exhausted', 'budget_violation', 'attempts_exhausted',
             'uncertain', 'review_unavailable', 'needs_context', 'needs_recovery'}
@@ -178,12 +185,18 @@ class ProofRunner:
             self.agent.client.thinking_budget_policy = copy.deepcopy(saved['thinking_budget_policy'])
         current_provenance = self._provenance()
         legacy_policy = saved.get('policy_version') == 7
+        transport_upgrade = (saved.get('policy_version') == POLICY_VERSION
+                             and saved.get('controller_sha256') == PRE_TOOL_RECOVERY_CONTROLLER_SHA256
+                             and saved.get('transport_sha256') == PRE_TOOL_RECOVERY_TRANSPORT_SHA256
+                             and current_provenance['transport_sha256'] == COMPATIBLE_TRANSPORT_SHA256)
         if legacy_policy and (saved.get('controller_sha256') != LEGACY_CONTROLLER_SHA256
                               or saved.get('transport_sha256') != LEGACY_TRANSPORT_SHA256
                               or current_provenance['transport_sha256'] != COMPATIBLE_TRANSPORT_SHA256):
             raise ValueError('Cannot resume an unrecognized policy-7 controller or transport. Saved artifacts remain readable.')
         for key, current in current_provenance.items():
             if legacy_policy and key in ('policy_version', 'controller_sha256', 'allocation_policy_sha256', 'transport_sha256'):
+                continue
+            if transport_upgrade and key in ('controller_sha256', 'transport_sha256'):
                 continue
             if saved.get(key) != current:
                 raise ValueError(f'Cannot resume with changed {key}; use the original proof policy. Saved artifacts remain readable.')
@@ -195,9 +208,24 @@ class ProofRunner:
                          'transport_sha256': copy.deepcopy(current_provenance['transport_sha256']),
                          'allocation_policy_sha256': current_provenance['allocation_policy_sha256']}
             if self.state.get('execution_migration') not in (None, migration):
-                raise ValueError('Cannot resume with a changed execution migration; saved artifacts remain readable.')
+                previous = {**migration, 'controller_sha256': PRE_TOOL_RECOVERY_CONTROLLER_SHA256,
+                            'transport_sha256': copy.deepcopy(PRE_TOOL_RECOVERY_TRANSPORT_SHA256)}
+                if self.state['execution_migration'] != previous:
+                    raise ValueError('Cannot resume with a changed execution migration; saved artifacts remain readable.')
+                transport_upgrade = True
             if 'execution_migration' not in self.state:
                 self.state['execution_migration'] = migration
+                with self.store.lock():
+                    self.store.save()
+        if transport_upgrade:
+            migration = {'original_controller_sha256': PRE_TOOL_RECOVERY_CONTROLLER_SHA256,
+                         'original_transport_sha256': copy.deepcopy(PRE_TOOL_RECOVERY_TRANSPORT_SHA256),
+                         'controller_sha256': current_provenance['controller_sha256'],
+                         'transport_sha256': copy.deepcopy(current_provenance['transport_sha256'])}
+            if self.state.get('transport_migration') not in (None, migration):
+                raise ValueError('Cannot resume with a changed transport migration; saved artifacts remain readable.')
+            if 'transport_migration' not in self.state:
+                self.state['transport_migration'] = migration
                 with self.store.lock():
                     self.store.save()
         return self._run()

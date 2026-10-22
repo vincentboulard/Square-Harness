@@ -39,6 +39,18 @@ class TokenBudgetError(AgentError):
                          f'({self.stats["eval_count"]} > {requested_cap})')
 
 
+class ToolCallError(AgentError):
+    """A finished response has invalid calls; none may be executed.
+
+    Keep the exact rejected batch and measured usage for controller recovery.
+    This differs from a broken stream, whose final usage is unknown.
+    """
+    def __init__(self, message, calls, stats):
+        self.calls = copy.deepcopy(calls)
+        self.stats = dict(stats)
+        super().__init__(message)
+
+
 def create_client(backend, host, timeout=600):
     if backend == 'ollama':
         client = Ollama(host, timeout=timeout)
@@ -254,6 +266,9 @@ class OpenAICompatible:
                         if finish is None or usage is None:
                             raise AgentError('Model stream ended without finish reason and token usage')
                         complete_calls, ids = [], set()
+                        raw_calls = [calls[index] for index in sorted(calls)]
+                        stats = {'done_reason': finish, 'eval_count': usage['completion_tokens'],
+                                 'prompt_eval_count': usage['prompt_tokens']}
                         # A capped tool request can end inside JSON arguments.
                         # Preserve the length result/usage for controller recovery,
                         # but never expose unfinished calls to a tool executor.
@@ -262,7 +277,12 @@ class OpenAICompatible:
                             if not call['id'] or not call['function']['name'] or call['id'] in ids:
                                 raise AgentError('Malformed or duplicate streamed tool call')
                             ids.add(call['id'])
-                            call['function']['arguments'] = _arguments(call['function']['arguments'])
+                            try:
+                                arguments = _arguments(call['function']['arguments'])
+                            except AgentError as exc:
+                                raise ToolCallError(str(exc), raw_calls, stats) from exc
+                            call = copy.deepcopy(call)
+                            call['function']['arguments'] = arguments
                             complete_calls.append(call)
                         if finish == 'tool_calls' and not complete_calls:
                             raise AgentError('Model finished with tool_calls but supplied no calls')

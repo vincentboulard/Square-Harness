@@ -5,6 +5,7 @@ import threading
 import time
 
 from .agent import AgentError
+from .backends import ToolCallError
 from .proof import count_input
 
 
@@ -173,6 +174,19 @@ class BudgetClient:
                             self.usage['tokens'] -= cap - used
                     self.pool.checkpoint()
                 yield event
+        except ToolCallError as exc:
+            # The server completed and reported usage even though its tool
+            # arguments are invalid. Refund only that measured unused portion.
+            used = exc.stats.get('eval_count')
+            if charged or type(used) is not int or not 0 <= used <= cap:
+                raise AssistantBudget('Invalid usage on a rejected tool call.') from exc
+            with self.pool.lock:
+                self.pool.state['reserved_tokens'] -= cap
+                reserved = False
+                self.pool.state['tokens'] -= cap - used
+                self.usage['tokens'] -= cap - used
+            self.pool.checkpoint()
+            raise
         finally:
             try:
                 if hasattr(events, 'close'):

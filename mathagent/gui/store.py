@@ -663,6 +663,17 @@ def assistant_view(chat):
                          for child in reversed(state.get('children') or [])
                          if isinstance(child.get('result'), dict)
                          and isinstance(child['result'].get('progress'), dict)), None)
+    # Standard-reference answers are rendered directly from one completed
+    # worker. Its inherited research-round counters describe an old phase,
+    # not work still owed by this finished, bounded bibliographic lookup.
+    source = state.get('answer_source') or {}
+    if status == 'complete' and source.get('kind') == 'worker_result':
+        child = next((child for child in state.get('children', [])
+                      if child.get('job_id') == source.get('job_id')), None)
+        if (child and child.get('status') == 'complete'
+                and child.get('action', {}).get('mode') == 'check'
+                and (child.get('result') or {}).get('disposition') == 'answer_with_qualification'):
+            progress = None
     last_call = state.get('last_call') or {}
     context = _live_context(last_call) if status == 'running' and last_call.get('status') == 'running' else {}
     return {'assistant_status': status,

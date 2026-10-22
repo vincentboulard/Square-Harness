@@ -71,6 +71,44 @@ def text(value):
     return response(json.dumps(value))
 
 
+class StandardSelectionClient(FakeClient):
+    """Supply deterministic source-ID selection when suitability is not under test.
+
+    Identity-linked records are selected; independently discovered records need
+    an explicit selector. This keeps identity tests from blessing every topic hit.
+    """
+    def __init__(self, replies, selector=None):
+        super().__init__(replies)
+        self.selector = selector
+
+    def stream(self, payload):
+        prompt = '\n'.join(m.get('content', '') for m in payload['messages'])
+        marker = 'ACTUAL BIBLIOGRAPHIC RECORDS (select only R identifiers):\n'
+        if marker not in prompt:
+            yield from super().stream(payload)
+            return
+        self.requests.append(copy.deepcopy(payload))
+        pool = json.loads(prompt.split(marker, 1)[1].split('\n', 1)[0])
+        selected = (self.selector(pool) if self.selector else
+                    [item['id'] for item in pool if item['candidate_index'] is not None][:1])
+        answer = {'selections': [{'id': source_id, 'reason': 'Indexed description supplies the topic lead.',
+                                 'coverage': 'unknown', 'limitations': 'Exact assumptions were not read.'}
+                                for source_id in selected], 'unresolved': ''}
+        yield from text(answer)
+
+
+def empty_metadata(url):
+    if 'crossref' in url:
+        body, mime = {'message': {'items': []}}, 'application/json'
+    elif 'openlibrary' in url:
+        body, mime = {'docs': []}, 'application/json'
+    elif 'arxiv' in url:
+        return b'<feed xmlns="http://www.w3.org/2005/Atom"/>', 'application/atom+xml', url
+    else:
+        body, mime = {'result': []}, 'application/json'
+    return json.dumps(body).encode(), mime, url
+
+
 class CheckTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -84,13 +122,14 @@ class CheckTests(unittest.TestCase):
         compact.start()
         self.addCleanup(compact.stop)
 
-    def run_check(self, replies, effort='medium', guesses=(), online=True, fetcher=None, lookup=None):
+    def run_check(self, replies, effort='medium', guesses=(), online=True, fetcher=None, lookup=None,
+                  selector=None, question=None):
         lit = LiteratureTools(self.root, online=online)
-        self.client = FakeClient(replies)
+        self.client = StandardSelectionClient(replies, selector=selector) if lookup == 'standard' else FakeClient(replies)
         runner = CheckRunner(Agent(self.client, Workspace(self.root, literature=lit), ctx=16384, predict=4096))
         with patch.object(lit, '_fetch', side_effect=fetcher or fetch):
             options = {'lookup': lookup} if lookup is not None else {}
-            result = runner.start('Find a reference on the regularity of elliptic problems with Neumann boundary conditions.',
+            result = runner.start(question or 'Find a reference on the regularity of elliptic problems with Neumann boundary conditions.',
                                   effort=effort, guesses=guesses, **options)
         return runner, result
 
@@ -107,7 +146,7 @@ class CheckTests(unittest.TestCase):
         value.update(fields)
         return text(value)
 
-    def test_standard_lookup_finishes_with_one_book_without_a_locator_hunt(self):
+    def test_standard_lookup_preserves_alternatives_and_selects_a_record_without_a_locator_hunt(self):
         alternatives = [RECALL['candidates'][0],
                         {'authors': ['Evans'], 'title': 'Partial differential equations',
                          'year': '1998', 'locator': 'Section 6.3', 'why': 'Alternative source.'},
@@ -117,18 +156,20 @@ class CheckTests(unittest.TestCase):
 
         def metadata_only(url, headers=None, max_bytes=None):
             fetched.append(url)
-            self.assertIn('zbmath', url)
-            return json.dumps(ZBMATH).encode(), 'application/json', url
+            if 'zbmath' in url and 'Brezis' in unquote(url):
+                return json.dumps(ZBMATH).encode(), 'application/json', url
+            return empty_metadata(url)
 
-        # Only a recall reply is supplied: another verifier/model round would fail.
+        # Recall alternatives remain available; the fixture supplies one relevance selection, not a locator hunt.
         runner, result = self.run_check([text({**RECALL, 'candidates': alternatives})],
                                         lookup='standard', fetcher=metadata_only)
         self.assertEqual(result['status'], 'answered')
-        self.assertEqual(len(self.client.requests), 1)
-        self.assertEqual(len(fetched), 1)
-        self.assertEqual(len(runner.state['candidates']), 1)
-        self.assertEqual([e['tool'] for e in runner.state['evidence']], ['search_papers'])
-        self.assertTrue(all(e['arguments']['provider'] == 'zbmath' for e in runner.state['evidence']))
+        self.assertEqual(len(self.client.requests), 2)
+        self.assertLessEqual(len(fetched), runner.state['settings']['max_requests'])
+        self.assertEqual(len(runner.state['candidates']), 3)
+        self.assertEqual(runner.state['current'], 3)
+        self.assertTrue(all(e['tool'] == 'search_papers' for e in runner.state['evidence']))
+        self.assertEqual(runner.state['evidence'][0]['arguments']['provider'], 'zbmath')
         verdict = runner.state['candidates'][0]['verdict']
         self.assertEqual(verdict['level'], 'located')
         self.assertEqual(verdict['record']['identifier'], 'zbl:1220.46002')
@@ -141,6 +182,62 @@ class CheckTests(unittest.TestCase):
         self.assertIn('Brezis', runner.state['answer'])
         self.assertIn('unconfirmed', runner.state['answer'].lower())
         self.assertNotIn('What it states', runner.state['answer'])
+
+    def test_standard_lookup_collects_two_complementary_recalled_books_before_selection(self):
+        candidates = [
+            {'authors': ['Adams'], 'title': 'Sobolev Spaces', 'year': '1975', 'locator': '',
+             'why': 'Embedding and compactness component.'},
+            {'authors': ['Ouhabaz'], 'title': 'Analysis of Heat Equations on Domains', 'year': '2005',
+             'locator': '', 'why': 'Heat equation and semigroup component.'}]
+        records = []
+        for index, candidate in enumerate(candidates):
+            record = copy.deepcopy(ZBMATH['result'][0])
+            record.update(identifier='1000.3500' + str(index), title={'title': candidate['title']},
+                          contributors={'authors': [{'name': candidate['authors'][0] + ', Author'}]},
+                          year=candidate['year'], zbmath_url='https://zbmath.org/' + str(index + 1))
+            records.append(record)
+        def metadata(url, headers=None, max_bytes=None):
+            selected = [record for candidate, record in zip(candidates, records)
+                        if candidate['authors'][0] in unquote(url)]
+            self.assertIn('zbmath', url)
+            return json.dumps({'result': selected}).encode(), 'application/json', url
+        runner, result = self.run_check(
+            [text({**RECALL, 'candidates': candidates})], lookup='standard', fetcher=metadata,
+            selector=lambda pool: [item['id'] for item in pool],
+            question='Give me books for Sobolev embeddings on bounded domains and heat-equation semigroup applications.')
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(len(self.client.requests), 2)
+        self.assertEqual(len(runner.state['standard_pool']), 2)
+        self.assertEqual(len(runner.chosen()), 2)
+        self.assertEqual({item['candidate_index'] for item in runner.state['standard_pool']}, {0, 1})
+        self.assertIn('Sobolev Spaces', runner.state['answer'])
+        self.assertIn('Analysis of Heat Equations on Domains', runner.state['answer'])
+
+    def test_standard_discovery_continues_after_two_successful_empty_provider_responses(self):
+        article = copy.deepcopy(ZBMATH['result'][0])
+        article.update(identifier='0728.60083',
+                       title={'title': 'Some potential theory for reflecting Brownian motion in Hölder and Lipschitz domains'},
+                       contributors={'authors': [{'name': 'Bass, Richard F.'}, {'name': 'Hsu, Pei'}]},
+                       year='1991', document_type={'description': 'journal article'})
+        def metadata(url, headers=None, max_bytes=None):
+            if 'zbmath' in url:
+                return json.dumps({'result': [article]}).encode(), 'application/json', url
+            return empty_metadata(url)
+        runner, result = self.run_check(
+            [text({'statement': 'Reflected Brownian motion in Lipschitz domains.',
+                   'keywords': ['reflected Brownian motion', 'Lipschitz domains'], 'candidates': []})],
+            lookup='standard', fetcher=metadata, selector=lambda pool: [pool[0]['id']],
+            question='Give me an article on reflected Brownian motion in Lipschitz domains.')
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual([e['arguments']['provider'] for e in runner.state['evidence']],
+                         ['crossref', 'crossref', 'arxiv', 'zbmath'])
+        crossref_queries = [e['arguments']['query'] for e in runner.state['evidence']
+                            if e['arguments']['provider'] == 'crossref']
+        self.assertEqual(len(set(crossref_queries)), 2)
+        self.assertTrue(all('Lipschitz' in query for query in crossref_queries))
+        self.assertLessEqual(runner.literature.stats['requests'], runner.state['settings']['max_requests'])
+        self.assertEqual(runner.chosen()[0]['source'], 'bibliographic_discovery')
+        self.assertIn('Lipschitz domains', runner.state['answer'])
 
     def test_human_precision_intent_ignores_explicitly_declined_locators(self):
         from mathagent.refcheck import precise_reference_request
@@ -156,30 +253,32 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(precise_reference_request('Check whether this reference proves the assertion.'))
         self.assertTrue(precise_reference_request('Give the page on which it appears.'))
 
-    def test_standard_lookup_with_no_record_keeps_only_an_honest_memory_suggestion(self):
+    def test_standard_online_lookup_without_record_withholds_recalled_metadata(self):
         fetched = []
-
         def no_record(url, headers=None, max_bytes=None):
             fetched.append(url)
-            self.assertIn('zbmath', url)
-            return b'{"result": []}', 'application/json', url
+            return empty_metadata(url)
 
         runner, result = self.run_check([text(RECALL)], lookup='standard', fetcher=no_record)
-        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(result['status'], 'partial')
         self.assertEqual(len(self.client.requests), 1)
-        self.assertEqual(len(fetched), 1)
+        self.assertGreater(len(fetched), 1)
+        self.assertLessEqual(len(fetched), runner.state['settings']['max_requests'])
+        self.assertGreater(len({e['arguments']['provider'] for e in runner.state['evidence']}), 1)
         self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'not_found')
         answer = runner.state['answer']
-        self.assertIn('Brezis', answer)
-        self.assertRegex(answer.lower(), r'memory|model recall')
-        self.assertIn('unconfirmed', answer.lower())
-        self.assertNotIn('Work record:', answer)
+        self.assertIn('No suitable scholarly reference', answer)
+        self.assertNotIn('Brezis', answer)
+        self.assertNotIn('Suggested standard reference', answer)
+        self.assertNotIn('Functional analysis', answer)
+        self.assertNotIn('2011', answer)
         self.assertNotIn('@book', answer)
         compact = json.loads(runner.result_for_agent())
-        self.assertEqual(compact['references'][0]['level'], 'not_found')
+        self.assertEqual(compact['references'], [])
+        self.assertEqual(compact['not_confirmed'][0]['level'], 'not_found')
         self.assertEqual(compact['disposition'], 'answer_with_qualification')
         self.assertFalse(compact['precise_place_confirmed'])
-        self.assertEqual([e['tool'] for e in runner.state['evidence']], ['search_papers'])
+        self.assertTrue(all(e['tool'] == 'search_papers' for e in runner.state['evidence']))
 
     def test_standard_lookup_offline_finishes_without_network_or_fake_confirmation(self):
         def forbidden_fetch(*args, **kwargs):
@@ -192,7 +291,9 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(len(runner.state['candidates']), 1)
         self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'not_found')
         self.assertIn('Brezis', runner.state['answer'])
-        self.assertRegex(runner.state['answer'].lower(), r'memory|model recall')
+        self.assertIn('Unverified', runner.state['answer'])
+        self.assertIn('model recall', runner.state['answer'])
+        self.assertNotIn('Bibliographic identity was checked', runner.state['answer'])
         compact = json.loads(runner.result_for_agent())
         self.assertEqual(compact['references'][0]['level'], 'not_found')
         self.assertFalse(compact['precise_place_confirmed'])
@@ -207,7 +308,7 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(compact['precise_place_confirmed'])
         self.assertIn('Chapter 9', runner.state['answer'])
         self.assertIn('unconfirmed', runner.state['answer'].lower())
-        self.assertEqual(len(self.client.requests), 1)
+        self.assertEqual(len(self.client.requests), 2)
         self.assertEqual([e['tool'] for e in runner.state['evidence']], ['search_papers'])
 
     def test_invalid_lookup_is_rejected_before_model_work(self):
@@ -239,12 +340,16 @@ class CheckTests(unittest.TestCase):
             contributors={'authors': [{'name': 'Hirsch, Morris W.'}]}, year='1961',
             document_type={'description': 'article'})
         def metadata(url, headers=None, max_bytes=None):
-            return json.dumps(unrelated).encode(), 'application/json', url
+            if 'zbmath' in url:
+                return json.dumps(unrelated).encode(), 'application/json', url
+            return empty_metadata(url)
         runner, _ = self.run_check([text({**RECALL, 'candidates': [guess]})],
                                   lookup='standard', fetcher=metadata)
         self.assertEqual(runner.state['candidates'][0]['verdict']['level'], 'not_found')
-        self.assertIn('*Differential Topology* (1976)', runner.state['answer'])
-        self.assertIn('bibliographic lookup did not confirm it', runner.state['answer'])
+        self.assertNotIn('Hirsch', runner.state['answer'])
+        self.assertIn('No suitable scholarly reference', runner.state['answer'])
+        self.assertNotIn('Suggested standard reference', runner.state['answer'])
+        self.assertNotIn('1976', runner.state['answer'])
         self.assertNotIn('immersions', runner.state['answer'])
         self.assertNotIn('1961', runner.state['answer'])
 

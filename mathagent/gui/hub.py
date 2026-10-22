@@ -1139,7 +1139,7 @@ class Hub:
                     if allocation is not None and allocation < 256:
                         raise AssistantBudget('No budget remains for a literature check.')
                     check = REFCHECK_EFFORTS.get(action['effort'], REFCHECK_EFFORTS['high'])
-                    result = runner.start(action['request'], effort=action['effort'],
+                    result = runner.start(action['request'], effort=action['effort'], reference_context=child['context'],
                         lookup='precise' if precise_reference_request(parent.state['query']) else 'standard',
                         max_tokens=allocation,
                         max_input_tokens=input_limit,
@@ -1149,7 +1149,9 @@ class Hub:
                 outcome = {'answered': 'Reference confirmed; see the answer.',
                            'partial': 'No exact place confirmed; see the levels.'}.get(status, status.replace('_', ' ').capitalize() + '.')
                 if references.get('lookup') == 'standard':
-                    outcome = 'Standard reference lookup finished; precise place unconfirmed.'
+                    outcome = ('Standard reference lookup finished; precise place unconfirmed.'
+                               if references.get('references') else
+                               'No bibliographic record confirmed; no verified recommendation.')
                 result = {'status': status, 'answer': runner.state.get('answer') or runner._compose(),
                           'references': references, 'job_id': result['id'],
                           'artifact': str(Path(result['report_path']).relative_to(root)),

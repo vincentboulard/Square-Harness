@@ -16,10 +16,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from .agent import AgentError
+from .backends import ToolCallError
 from .call_policy import CallContextError, allocate_call
 from .router import EFFORTS, JOB_MODES, TASK_SCHEMA
 from .tools import schema
-from .refcheck import simple_standard_reference_request
+from .refcheck import standalone_reference_request
 
 
 POLICY = """You are the main mathematical assistant for a research mathematician.
@@ -55,17 +56,26 @@ with its introduction, results and relevant headings, then read only needed pass
 Separate the authors' novelty claims from independently verified literature comparisons.
 Use check to find a useful standard reference for a known result, or to verify a
 citation or an explicitly requested precise locator. Ordinary reference requests
-get ONE bounded lookup: a standard book or paper, optionally a remembered chapter,
+get ONE bounded check that can search scholarly records for books or articles,
+using recalled candidates and topic discovery when a guess fails. Choose the source type
+that fits the question; do not force a research question into a textbook. Give verified metadata,
 with an honest statement of what was not verified. Do not insert a requirement
 for an exact theorem/section/page into a delegation unless the human asked for it.
-A located book or clearly labelled memory suggestion is a useful final result.
+A located book or article is useful bibliographic evidence; a matching record does
+not verify that its hypotheses and conclusions answer the question. Online, do not recommend an unconfirmed
+title or year merely because the model recalled it. Offline recollections must be labelled unverified.
 If the worker returns disposition answer_with_qualification, answer from it;
 do not start another check, Wikipedia lookup or arXiv citation hunt merely to
-resolve the optional locator. Continue independently requested proof or other jobs.
+resolve the optional locator. Continue independently requested proof or other jobs. After a check returns, any
+additional bibliographic recommendation needs its own checked evidence; never append
+a recalled title, year or coverage claim as a supplement. A failed scholarly search
+does not make Wikipedia or model recall an adequate substitute. Preserve uncertainty
+about relevance and hypotheses even when the work exists.
 Precise checking uses sources and grades them read, cited, located, contradicted
 or not found. Use literature only for a reading list or survey of a
-topic. Check workers see only your objective. Literature workers also receive the
-exact reference conversation to set their scope. State the result itself with its
+topic. Check and literature workers receive your objective and the exact reference
+conversation to preserve the requested subject and hypotheses. Do not add boundary
+regularity, solution concepts or theorem hypotheses that the user did not supply. State the result itself with its
 hypotheses, add any guessed sources, and use public mathematical words in queries,
 never private manuscript text. A theorem number you recall is a guess:
 verify it with check before giving it as fact, or say it is unverified. When you
@@ -226,7 +236,8 @@ class Orchestrator:
             'children': [], 'pending_calls': [], 'actions': 0, 'main_calls': 0,
             'answer': '', 'warnings': [], 'last_call': None, 'blockers': [], 'force_final': False,
             'empty_final_retried': False,
-            'continuation_final_retried': False,
+            'continuation_final_retried': False, 'tool_call_retried': False,
+            'tool_call_recovery_pending': False, 'rejected_tool_calls': [],
             'tool_cache': {}, 'observed_results': [], 'stagnant_actions': 0,
             'limits': {'actions': self.max_actions, 'children': self.max_children,
                        'concurrency': self.concurrency},
@@ -281,6 +292,9 @@ class Orchestrator:
         self.state.setdefault('force_final', False)
         self.state.setdefault('empty_final_retried', False)
         self.state.setdefault('continuation_final_retried', False)
+        self.state.setdefault('tool_call_retried', False)
+        self.state.setdefault('tool_call_recovery_pending', False)
+        self.state.setdefault('rejected_tool_calls', [])
         self.state.setdefault('tool_cache', {})
         self.state.setdefault('observed_results', [])
         self.state.setdefault('stagnant_actions', 0)
@@ -452,11 +466,20 @@ class Orchestrator:
                               for c in self.state['children'])):
             payload['messages'].append({'role': 'user', 'content':
                 'CONTROLLER LOOKUP COMPLETION: one standard-reference lookup is finished. '
-                'Answer the original request briefly with the best suggested work and its known '
+                "Answer the original request briefly using only the worker's supported works and known "
                 'bibliographic details. If a chapter or other place was recalled, you may give it '
                 'as a possible unconfirmed lead. Say explicitly that you did not verify the precise '
-                'reference. A book record confirms the work exists, not that the theorem is in a '
+                'reference. A bibliographic record confirms the work exists, not that the theorem is in a '
                 'particular chapter. Do not search again or promise another lookup.'})
+        if self.state.get('tool_call_recovery_pending'):
+            # Greedy decoding can reproduce the same malformed repetition.
+            # Keep the exact premises and give one explicit correction request.
+            payload['options']['temperature'] = 0.6
+            payload['messages'].append({'role': 'user', 'content':
+                'CONTROLLER TOOL-CALL RECOVERY: the previous tool call contained malformed JSON '
+                'and was rejected before execution. No tools ran from that response. Choose the '
+                'next action again from the unchanged request and saved results. Use one short, '
+                'valid JSON object for each tool call; do not repeat phrases or guess missing arguments.'})
         if self.state.get('continuation_final_retried'):
             # End the stalled assistant turn explicitly. Some chat templates
             # otherwise continue/repeat its final planning sentence. This is a
@@ -534,6 +557,12 @@ class Orchestrator:
                     self.agent.last_stats = {key: event[key] for key in
                         ('eval_count', 'eval_duration', 'prompt_eval_count', 'done_reason') if key in event}
                     done = True
+        except ToolCallError as exc:
+            self.agent.last_stats = copy.deepcopy(exc.stats)
+            self.state['last_call']['status'] = 'invalid_tool_call'
+            self.state['rejected_tool_calls'].append({'main_call': self.state['main_calls'],
+                'calls': copy.deepcopy(exc.calls), 'stats': copy.deepcopy(exc.stats), 'error': str(exc)})
+            raise
         finally:
             self.state['last_call']['partial'] = copy.deepcopy(assistant)
             if calls:
@@ -631,7 +660,7 @@ class Orchestrator:
             pending['child_id'] = duplicate['id']
             pending['cached'] = True
             return duplicate
-        if (args['mode'] == 'check' and simple_standard_reference_request(self.state['query'])
+        if (self._reference_only_request()
                 and any(c['action']['mode'] == 'check' for c in self.state['children'])):
             raise ValueError('One standard-reference lookup has already been started for this request. '
                              'Answer from its results with uncertainty; optional exact locators do not require another worker.')
@@ -658,6 +687,14 @@ class Orchestrator:
         name, args = function['name'], function['arguments']
         if emit_tool:
             self.emit('tool', name + ' ' + json.dumps(args, ensure_ascii=False))
+        if (self._reference_only_request()
+                and any(c['action']['mode'] == 'check' and c['status'] == 'complete'
+                        for c in self.state['children'])
+                and (name in WEB_TOOLS or name == 'delegate')
+                and not any(c['id'] == pending.get('child_id') for c in self.state['children'])):
+            return {'status': 'invalid_action',
+                    'error': 'The scholarly reference lookup has finished. Answer from its saved '
+                             'evidence; do not replace a failed lookup with unchecked citations or a web fallback.'}
         if name == 'delegate':
             try:
                 self._validate_delegate(args)
@@ -877,7 +914,7 @@ class Orchestrator:
             # manuscript scan defeats that bounded reading plan.
             self.state['force_final'] = True
         if (isinstance(value, dict) and value.get('disposition') == 'answer_with_qualification'
-                and simple_standard_reference_request(self.state['query'])
+                and self._reference_only_request()
                 and all(c['action']['mode'] == 'check' for c in self.state['children'])):
             # Optional precision is not an unfinished obligation. Finish this
             # simple lookup even if the model would prefer another citation hunt.
@@ -885,18 +922,37 @@ class Orchestrator:
         self._save()
         self.emit('result', message['content'])
 
+    def _reference_only_request(self):
+        from .source_tasks import _instruction_text
+        query = self.state['query']
+        return (not self.state['files']
+                and not re.search(r'https?://|www\.|(?<![\w.])\S+\.(?:pdf|tex|md|txt)\b', query, re.I)
+                and (self.state.get('automatic_reference_mode') is True
+                     or standalone_reference_request(_instruction_text(query))))
+
     def _qualified_reference_answer(self):
-        if not simple_standard_reference_request(self.state['query']) or len(self.state['children']) != 1:
+        if not self._reference_only_request() or len(self.state['children']) != 1:
             return None
         child = self.state['children'][0]
         value = child.get('result') or {}
         answer = value.get('answer')
-        if (child['action']['mode'] != 'check' or child['status'] != 'complete'
-                or value.get('disposition') != 'answer_with_qualification'
-                or not isinstance(answer, str) or not answer.strip()):
+        if child['action']['mode'] != 'check' or child['status'] != 'complete':
             return None
-        # The worker already renders record-backed metadata and qualifies its
-        # recalled locator. A second model pass can invent publication details.
+        if not isinstance(answer, str) or not answer.strip():
+            # A failed lookup is evidence of its failure, not permission for the
+            # parent to supply a fresh unchecked citation or a Wikipedia fallback.
+            if value.get('status') not in ('failed', 'error', 'blocked', 'partial', 'incomplete',
+                                           'budget_exhausted', 'budget_violation'):
+                return None
+            answer = ('The literature lookup did not produce a verified reference. '
+                      'I cannot recommend a title or claim that it covers the requested '
+                      'hypotheses from the available evidence.')
+            error = value.get('error')
+            detail = error.get('message') if isinstance(error, dict) else error
+            if isinstance(detail, str) and detail.strip():
+                answer += '\n\nLookup limitation: ' + detail.strip()
+        # Render the worker's supported answer even after a partial/provider
+        # failure. A second model pass can invent references or coverage claims.
         provenance = {'kind': 'worker_result', 'job_id': child['job_id']}
         rendered = (self.state.get('answer_source') == provenance
                     and self.state['messages'][-1] == {'role': 'assistant', 'content': answer})
@@ -923,6 +979,15 @@ class Orchestrator:
         self._save()
         try:
             last = self.state.get('last_call') or {}
+            # Recover checkpoints written by versions that paused on malformed
+            # JSON before saving transport details. Do not reset their budgets.
+            if (not self.state['tool_call_retried'] and not self.state['pending_calls']
+                    and last.get('status') == 'running'
+                    and any(w in ('Malformed JSON tool arguments', 'Tool arguments must be a JSON object')
+                            for w in self.state['warnings'])):
+                self.state['tool_call_retried'] = True
+                self.state['tool_call_recovery_pending'] = True
+                self._save()
             self._complete_pending(allow_tools=last.get('tools_enabled') is not False
                                    and last.get('final_recovery') is not True)
             # Old reading loops could use every call without retrying their empty
@@ -947,7 +1012,19 @@ class Orchestrator:
                 tools = self._tools() if self._action_room() else []
                 payload = self._payload(tools)
                 tools_enabled = bool(payload.get('tools'))
-                assistant, warning = self._stream(payload)
+                try:
+                    assistant, warning = self._stream(payload)
+                except ToolCallError:
+                    if self.state['tool_call_retried']:
+                        return self._finish('failed', warning=
+                            'The model returned invalid tool arguments again after one correction attempt. '
+                            'No calls from either rejected response were executed; saved work remains available.')
+                    self.state['tool_call_retried'] = True
+                    self.state['tool_call_recovery_pending'] = True
+                    self._warning('The model returned invalid tool arguments; retrying once before executing any action.')
+                    self._save()
+                    continue
+                self.state['tool_call_recovery_pending'] = False
                 if warning:
                     self.state['last_call']['status'] = 'incomplete'
                     return self._finish('incomplete', assistant['content'], warning)

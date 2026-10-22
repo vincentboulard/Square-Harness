@@ -63,7 +63,8 @@ class FakeOpenAI:
                     if message.get('tool_calls'):
                         delta['tool_calls'] = [{'index': index, 'id': f'tool_{index}', 'type': 'function',
                                                'function': {'name': call['function']['name'],
-                                                            'arguments': json.dumps(call['function']['arguments'])}}
+                                                            'arguments': (call['function']['arguments'] if isinstance(call['function']['arguments'], str)
+                                                                          else json.dumps(call['function']['arguments']))}}
                                               for index, call in enumerate(message['tool_calls'])]
                     output = [{'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]}]
                     if event.get('done'):
@@ -505,10 +506,10 @@ class AssistantGuiTests(GuiCase):
         self.assertEqual((card['mode'], card['status'], card['orchestrated']), ('check', 'done', True))
         self.assertTrue((self.root / '.mathagent' / 'checks' / card['job_id'] / 'report.md').exists())
         self.assertEqual(self.ok('GET', '/api/research')['jobs'], [])  # not a reading list
-        # The check sees only the objective: no conversation and no workspace files.
+        # The check keeps the unchanged human request alongside the worker objective.
         recall = self.fake.requests[1]
         self.assertEqual(recall['format']['required'], ['statement', 'keywords', 'candidates'])
-        self.assertNotIn('Where is H^2 regularity', json.dumps(recall['messages']))
+        self.assertIn('Find the exact reference for H^2 regularity for the Neumann problem.', json.dumps(recall['messages']))
         saved = store.load_chat(self.root, chat)['assistant_state']
         [result] = [json.loads(m['content']) for m in saved['messages'] if m['role'] == 'tool']
         self.assertEqual(result['mode'], 'check')
@@ -543,30 +544,69 @@ class AssistantGuiTests(GuiCase):
     def test_standard_book_lookup_finishes_with_qualified_answer_after_one_worker(self):
         from tests.test_gui_features import RECALL
         chat = self.conversation(online=False)
-        # Even an over-specific delegated restatement cannot strengthen the human request.
-        self.fake.replies = [delegation('check', 'Find the exact theorem number for this result.'),
-                             text(json.dumps(RECALL))]
-        self.ask(chat, 'Find a standard reference for Neumann regularity without an exact theorem number.')
+        # Source-only questions are seeded directly, with the exact human scope.
+        self.fake.replies = [text(json.dumps(RECALL))]
+        self.ask(chat, 'Which standard reference would you suggest for Neumann regularity without an exact theorem number?')
         self.wait_task(timeout=30)
         saved = store.load_chat(self.root, chat)['assistant_state']
         self.assertEqual(saved['status'], 'complete')
         self.assertEqual(saved['actions'], 1)
         [child] = saved['children']
         self.assertEqual(saved['answer'], child['result']['answer'])
-        self.assertEqual(saved['main_calls'], 1)
+        self.assertEqual(saved['main_calls'], 0)
         self.assertEqual(saved['answer_source'], {'kind': 'worker_result', 'job_id': child['job_id']})
         self.assertEqual(child['result']['disposition'], 'answer_with_qualification')
         self.assertIn('Brezis', saved['answer'])
-        self.assertIn('unconfirmed', saved['answer'].lower())
+        self.assertIn('unverified', saved['answer'].lower())
         self.assertNotIn('Springer', saved['answer'])
         self.assertNotIn('edition', saved['answer'].lower())
         state = json.loads((self.root / '.mathagent' / 'checks' / child['job_id'] / 'state.json').read_text())
         self.assertEqual(state['check']['lookup'], 'standard')
-        self.assertEqual(state['settings']['max_requests'], 4)
+        self.assertEqual(state['settings']['max_requests'], 12)
         self.assertEqual(len(state['candidates']), 1)
-        self.assertEqual([e['tool'] for e in state['evidence']], ['search_papers'])
+        self.assertEqual(state['evidence'], [])
+        self.assertEqual(state['reference_context'], child['context'])
+        self.assertEqual(child['action']['request'], saved['query'])
         self.assertNotIn('tools', self.fake.requests[-1])
+        self.assertEqual(len(self.fake.requests), 1)
+
+    def test_article_recommendation_uses_record_selection_without_parent_inventing_a_book(self):
+        from mathagent.literature import LiteratureTools
+        query = 'Give me an article on reflected Brownian motion in Lipschitz domains.'
+        recall = {'statement': 'A reference for reflected Brownian motion in Lipschitz domains.',
+                  'keywords': ['reflected Brownian motion', 'Lipschitz domains'],
+                  'candidates': [{'authors': ['Doe'], 'title': 'Reflecting diffusions in Lipschitz domains',
+                                  'year': '2001', 'locator': '', 'why': 'Possible article on the requested subject.'}]}
+        record = {'identifier': '1200.60000', 'title': {'title': 'Reflecting diffusions in Lipschitz domains'},
+                  'year': '2001', 'contributors': {'authors': [{'name': 'Doe, Jane'}]},
+                  'document_type': {'description': 'journal article'},
+                  'source': {'source': 'Test Journal'}, 'zbmath_url': 'https://zbmath.org/test-record'}
+        selection = {'selections': [{'id': 'R1', 'reason': 'The title matches the requested process and domain class.',
+                                     'coverage': 'unknown', 'limitations': 'Exact hypotheses were not checked.'}],
+                     'unresolved': ''}
+        chat = self.conversation(online=True)
+        self.fake.replies = [text(json.dumps(recall)), text(json.dumps(selection))]
+        with patch.object(LiteratureTools, '_fetch', return_value=(
+                json.dumps({'result': [record]}).encode(), 'application/json', 'https://api.zbmath.org/')):
+            self.ask(chat, query)
+            self.wait_task(timeout=30)
+        saved = store.load_chat(self.root, chat)['assistant_state']
+        self.assertEqual(saved['status'], 'complete')
+        self.assertEqual(saved['main_calls'], 0)
+        self.assertEqual(len(saved['children']), 1)
+        child = saved['children'][0]
+        self.assertEqual(child['action']['request'], query)
+        self.assertEqual(child['action']['mode'], 'check')
+        self.assertEqual(saved['answer'], child['result']['answer'])
+        self.assertIn('Reflecting diffusions in Lipschitz domains', saved['answer'])
+        self.assertIn('exact assumptions and coverage remain unchecked', saved['answer'])
+        self.assertNotIn('Showalter', saved['answer'])
+        state = json.loads((self.root / '.mathagent' / 'checks' / child['job_id'] / 'state.json').read_text())
+        self.assertTrue(state['standard_selection_done'])
+        self.assertEqual(len(state['standard_pool']), 1)
+        self.assertEqual(state['reference_context'], child['context'])
         self.assertEqual(len(self.fake.requests), 2)
+        self.assertTrue(all('tools' not in request for request in self.fake.requests))
 
     def test_critic_worker_can_check_references_like_a_critique_chat(self):
         chat = self.conversation(online=True)

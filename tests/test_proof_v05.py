@@ -147,6 +147,52 @@ class ProofV05Tests(unittest.TestCase):
         self.assertTrue(all(r['options']['num_ctx'] == 8192 for r in runner.agent.client.requests))
         self.assertEqual(runner.state['settings']['ctx'], 40960)
 
+    def test_tool_recovery_transport_upgrade_preserves_saved_proof_and_usage(self):
+        from mathagent.proof import PRE_TOOL_RECOVERY_CONTROLLER_SHA256, PRE_TOOL_RECOVERY_TRANSPORT_SHA256
+        runner, paused = self.run_proof([KeyboardInterrupt(), [event('Complete proof.')], [event(approval())]])
+        saved = runner.state['settings']
+        saved['controller_sha256'] = PRE_TOOL_RECOVERY_CONTROLLER_SHA256
+        saved['transport_sha256'] = copy.deepcopy(PRE_TOOL_RECOVERY_TRANSPORT_SHA256)
+        original = copy.deepcopy(saved)
+        charged = runner.state['tokens_charged']
+        runner.store.save()
+        result = runner.resume(paused['id'])
+        self.assertEqual(result['status'], 'candidate_complete')
+        self.assertEqual(runner.state['settings'], original)
+        self.assertEqual(result['tokens_charged'], charged + 20)
+        self.assertEqual(runner.state['transport_migration']['original_transport_sha256'],
+                         PRE_TOOL_RECOVERY_TRANSPORT_SHA256)
+
+    def test_previously_migrated_policy_seven_proof_can_continue_after_tool_recovery(self):
+        from mathagent.proof import PRE_TOOL_RECOVERY_CONTROLLER_SHA256, PRE_TOOL_RECOVERY_TRANSPORT_SHA256
+        runner, paused = self.run_proof([KeyboardInterrupt(), [event('Complete proof.')], [event(approval())]])
+        saved = runner.state['settings']
+        saved.update(policy_version=7, controller_sha256=LEGACY_CONTROLLER_SHA256,
+                     transport_sha256=copy.deepcopy(LEGACY_TRANSPORT_SHA256))
+        saved.pop('allocation_policy_sha256')
+        runner.state['execution_migration'] = {
+            'from_policy': 7, 'to_policy': 8, 'original_controller_sha256': LEGACY_CONTROLLER_SHA256,
+            'original_transport_sha256': copy.deepcopy(LEGACY_TRANSPORT_SHA256),
+            'controller_sha256': PRE_TOOL_RECOVERY_CONTROLLER_SHA256,
+            'transport_sha256': copy.deepcopy(PRE_TOOL_RECOVERY_TRANSPORT_SHA256),
+            'allocation_policy_sha256': runner._provenance()['allocation_policy_sha256']}
+        original = copy.deepcopy(runner.state['execution_migration'])
+        runner.store.save()
+        self.assertEqual(runner.resume(paused['id'])['status'], 'candidate_complete')
+        self.assertEqual(runner.state['execution_migration'], original)
+        self.assertEqual(runner.state['transport_migration']['original_controller_sha256'],
+                         PRE_TOOL_RECOVERY_CONTROLLER_SHA256)
+
+    def test_unknown_pre_recovery_transport_still_blocks_saved_proof(self):
+        from mathagent.proof import PRE_TOOL_RECOVERY_CONTROLLER_SHA256
+        runner, paused = self.run_proof([KeyboardInterrupt()])
+        runner.state['settings']['controller_sha256'] = PRE_TOOL_RECOVERY_CONTROLLER_SHA256
+        runner.state['settings']['transport_sha256']['backends.py'] = 'unknown'
+        runner.store.save()
+        with self.assertRaisesRegex(ValueError, 'changed controller_sha256'):
+            runner.resume(paused['id'])
+        self.assertEqual(len(runner.agent.client.requests), 1)
+
     def test_compatible_saved_policy_migration_preserves_caps_and_charged_calls(self):
         runner, paused = self.run_proof([KeyboardInterrupt(), [event('Complete proof.')], [event(approval())]])
         saved = runner.state['settings']

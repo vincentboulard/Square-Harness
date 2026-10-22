@@ -30,7 +30,7 @@ MAX_BYTES = 10_000_000
 MAX_TEXT = 4_000_000
 MAX_RESULT = 8000
 TOOL_NAMES = {'search_papers', 'search_web', 'find_quotes', 'open_paper', 'read_paper', 'search_paper'}
-PROVIDERS = ('arxiv', 'semantic_scholar', 'zbmath')
+PROVIDERS = ('arxiv', 'semantic_scholar', 'zbmath', 'crossref', 'openlibrary')
 ARXIV_ID = re.compile(r'(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]*/\d{7})(?:v\d+)?', re.I)
 DOC_ID = re.compile(r'doc-[0-9a-f]{24}')
 
@@ -320,6 +320,7 @@ class LiteratureTools:
         return [
             _schema('search_papers', 'Search scholarly metadata; abstracts are not proof evidence. zbmath also finds '
                     'books, and its reviews often list their chapters; query it with fields, e.g. "au:Brezis ti:Functional analysis". '
+                    'Crossref finds journal articles and books (plain author/title/topic query); Open Library is a book catalog. '
                     'Max 8 results.' + offline,
                     {'query': string, 'provider': {'type': 'string', 'enum': list(PROVIDERS)}, 'limit': integer}, ['query']),
             _schema('search_web', 'Search web metadata with Brave; requires BRAVE_SEARCH_API_KEY. Max 8 results.' + offline,
@@ -364,18 +365,54 @@ class LiteratureTools:
             return json.dumps({'error': 'Literature output budget exhausted; use existing evidence.'})
         value = json.dumps(result, ensure_ascii=False)
         if len(value) > cap:
-            # Keep valid JSON and source identity, progressively shorten returned data.
-            result = dict(result)
+            # Source identity is immutable. Shorten descriptive fields first,
+            # then omit whole low-ranked records rather than clipping titles,
+            # author names, URLs, identifiers, queries or provenance envelopes.
+            result = json.loads(value)
             result['truncated'] = True
-            while len(json.dumps(result, ensure_ascii=False)) > cap:
-                candidates = [(len(v), k) for k, v in result.items()
-                              if isinstance(v, (str, list)) and k not in ('document_id', 'source_url', 'citation') and len(v) > 0]
-                if not candidates:
-                    result = {'error': 'Literature output budget exhausted; request smaller excerpts.'}
+            descriptions = {'review', 'abstract', 'description', 'summary', 'snippet',
+                            'reference_texts', 'references', 'passage'}
+
+            def descriptive_fields(value):
+                found = []
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if key in descriptions and isinstance(item, (str, list)) and item:
+                            found.append((len(json.dumps(item, ensure_ascii=False)), value, key))
+                        elif isinstance(item, (dict, list)):
+                            found.extend(descriptive_fields(item))
+                elif isinstance(value, list):
+                    for item in value:
+                        found.extend(descriptive_fields(item))
+                return found
+
+            def size():
+                return len(json.dumps(result, ensure_ascii=False))
+
+            while size() > cap:
+                fields = descriptive_fields(result)
+                if not fields:
                     break
-                _, key = max(candidates)
-                val = result[key]
-                result[key] = val[:len(val) // 2]
+                _, owner, key = max(fields, key=lambda item: item[0])
+                item = owner[key]
+                owner[key] = item[:len(item) // 2]
+                if owner is not result:
+                    owner[key + '_truncated'] = True
+            while size() > cap:
+                lists = [(len(json.dumps(items, ensure_ascii=False)), key) for key, items in result.items()
+                         if key in ('results', 'matches', 'quotes', 'sections', 'opened')
+                         and isinstance(items, list) and items]
+                if not lists:
+                    break
+                _, key = max(lists)
+                result[key].pop()
+                omitted = key + '_omitted'
+                result[omitted] = result.get(omitted, 0) + 1
+            if size() > cap:
+                # Even the complete envelope does not fit. Return an explicit
+                # control error, never a misleading fragment of source metadata.
+                result = {'error': 'Literature output budget exhausted; request smaller excerpts.',
+                          'truncated': True}
             value = json.dumps(result, ensure_ascii=False)
         if len(value) > cap:
             value = '{}' if cap >= 2 else ''
@@ -450,10 +487,47 @@ class LiteratureTools:
     def search_papers(self, query, provider='arxiv', limit=5):
         query = self._query(query, limit)
         if provider not in PROVIDERS:
-            raise LiteratureError('Unknown provider; choose arxiv, semantic_scholar or zbmath')
+            raise LiteratureError('Unknown provider; choose ' + ', '.join(PROVIDERS))
         return self._cache_search(provider, query, limit, lambda: self._search(provider, query, limit))
 
     def _search(self, provider, query, limit, recent=False):
+        if provider == 'crossref':
+            # Reuse the controller's normalized DOI records and its bounded
+            # transport. The public search envelope is cached independently.
+            return self.crossref(query=query, limit=limit)
+        if provider == 'openlibrary':
+            params = {'q': query, 'limit': limit,
+                      'fields': 'key,title,author_name,first_publish_year,publisher'}
+            body, _, _ = self._fetch('https://openlibrary.org/search.json?' + urlencode(params),
+                                     max_bytes=1_000_000)
+            records = []
+            for entry in (json.loads(body).get('docs') or [])[:limit]:
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get('key')
+                if not isinstance(key, str) or not re.fullmatch(r'/works/OL[0-9]+W', key):
+                    continue
+                title = _plain(entry.get('title'), 300)
+                if not title:
+                    continue
+                names = entry.get('author_name')
+                authors = [_plain(name, 80) for name in names if isinstance(name, str) and name.strip()][:15] \
+                    if isinstance(names, list) else []
+                publishers = entry.get('publisher')
+                publishers = list(dict.fromkeys(_plain(name, 120) for name in publishers
+                                                if isinstance(name, str) and name.strip())) \
+                    if isinstance(publishers, list) else []
+                year = entry.get('first_publish_year')
+                records.append({'identifier': 'openlibrary:' + key.rsplit('/', 1)[-1],
+                                'title': title, 'authors': authors,
+                                'year': year if type(year) is int else None,
+                                'year_kind': 'catalog_first_publication', 'type': 'book',
+                                'url': 'https://openlibrary.org' + key,
+                                # A work record can aggregate many editions. Do
+                                # not pair one edition's publisher with another's year.
+                                'publisher': publishers[0] if len(publishers) == 1 else None,
+                                'source': 'Open Library work catalog; edition unspecified'})
+            return records
         if provider == 'arxiv':
             params = {'search_query': query if re.search(r'\b(?:all|ti|au|abs|cat|id):', query) else 'all:' + query,
                       'start': 0, 'max_results': limit, 'sortBy': 'submittedDate' if recent else 'relevance', 'sortOrder': 'descending'}
