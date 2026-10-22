@@ -23,6 +23,7 @@ from ..call_policy import CallContextError
 from ..conversation_sources import conversation_sources
 from ..source_tasks import automatic_source_action, source_overview
 from ..backends import LlamaCpp, OpenAICompatible, create_client
+from ..api_profiles import MLX, resolve_api_profile
 from ..ledger import ProofStore
 from ..literature import LiteratureTools
 from ..proof import ProofRunner
@@ -156,6 +157,10 @@ class InterruptibleOllama(Interruptible, Ollama):
 
 
 class InterruptibleOpenAI(Interruptible, OpenAICompatible):
+    pass
+
+
+class InterruptibleMLX(Interruptible, MLX):
     pass
 
 
@@ -572,8 +577,11 @@ class Hub:
                                   max_requests=args.research_requests, max_chars=args.research_chars)
         workspace = Workspace(self.root, lambda preview: self._approve(task, preview),
                               args.allow_python, literature=library, read_types=store.read_types(self.root))
-        client = INTERRUPTIBLE[args.backend](args.host, task.cancel, timeout=args.request_timeout,
-                                            pool=self.inference, owner=task.id)
+        client_class = INTERRUPTIBLE[args.backend]
+        if args.backend == 'openai' and resolve_api_profile(getattr(args, 'api_profile', None)) == 'mlx':
+            client_class = InterruptibleMLX
+        client = client_class(args.host, task.cancel, timeout=args.request_timeout,
+                              pool=self.inference, owner=task.id)
         agent = Agent(client, workspace, args.model, ctx or args.ctx, args.predict,
                       (not args.no_think) if think is None else bool(think), mode, args.max_rounds,
                       seed=args.seed, temperature=args.temperature, top_p=args.top_p)
@@ -594,7 +602,11 @@ class Hub:
         if time.monotonic() - stamp < 10 and value is not None:
             return value
         try:
-            value = {'reachable': True, 'models': create_client(self.args.backend, self.args.host, timeout=3).models()}
+            if self.args.backend == 'openai' and resolve_api_profile(getattr(self.args, 'api_profile', None)) == 'mlx':
+                client = MLX(self.args.host, timeout=3)
+            else:
+                client = create_client(self.args.backend, self.args.host, timeout=3)
+            value = {'reachable': True, 'models': client.models()}
         except AgentError as exc:
             value = {'reachable': False, 'models': [], 'error': str(exc)}
         self._models = (time.monotonic(), value)

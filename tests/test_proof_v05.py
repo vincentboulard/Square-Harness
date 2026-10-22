@@ -452,6 +452,19 @@ class ProofV05Tests(unittest.TestCase):
         self.assertEqual(request['options']['num_ctx'], 40960)
         self.assertEqual(runner.agent.client.thinking_budget_policy, {'ordinary': .75, 'structured': .75})
 
+    def test_resume_requires_saved_api_profile_before_dispatch(self):
+        runner = self.runner([KeyboardInterrupt(), [event('proof')], [event(approval())]])
+        runner.agent.client.profile = 'mlx'
+        result = runner.start('Prove x=x.', max_predict=512, verify_tokens=256, max_tokens=5000)
+        self.assertEqual(runner.state['settings']['api_profile'], 'mlx')
+        self.assertEqual(len(runner.state['settings']['profile_transport_sha256']), 64)
+        runner.agent.client.profile = 'default'
+        with self.assertRaisesRegex(ValueError, 'changed api_profile'):
+            runner.resume(result['id'])
+        self.assertEqual(len(runner.agent.client.requests), 1)
+        runner.agent.client.profile = 'mlx'
+        self.assertEqual(runner.resume(result['id'])['status'], 'candidate_complete')
+
     def test_completed_run_is_viewable_offline_with_other_cli_defaults(self):
         runner, result = self.run_proof([[event('proof')], [event(approval())]])
         runner.agent.client.host = 'http://other.invalid'

@@ -107,7 +107,7 @@ class ProofRunner:
         return self.store.state
 
     def _provenance(self):
-        return {
+        value = {
             'model': self.agent.model, 'ctx': self.agent.ctx, 'think': True,
             'seed': self.agent.seed, 'temperature': self.agent.temperature, 'top_p': self.agent.top_p,
             'backend': getattr(self.agent.client, 'backend', 'ollama'),
@@ -121,6 +121,10 @@ class ProofRunner:
                                  for name in ('backends.py', 'agent.py')},
             'harness_version': '0.5.1',
         }
+        if getattr(self.agent.client, 'profile', 'default') == 'mlx':
+            value['api_profile'] = 'mlx'
+            value['profile_transport_sha256'] = hashlib.sha256(Path(__file__).with_name('api_profiles.py').read_bytes()).hexdigest()
+        return value
 
     def start(self, goal, *, max_rounds=3, max_tokens=None, max_seconds=1800,
               source_files=(), max_predict=32768, verify_tokens=16384,
@@ -176,6 +180,8 @@ class ProofRunner:
         if self.state['status'] in TERMINAL:
             return self._run()  # Viewing a finished run never needs its model server.
         saved = self.state['settings']
+        if saved.get('api_profile', 'default') != self._provenance().get('api_profile', 'default'):
+            raise ValueError('Cannot resume with changed api_profile; select the original --api-profile. Saved artifacts remain readable.')
         for key in ('host', 'backend'):
             if saved.get(key) != self._provenance()[key]:
                 raise ValueError(f'Cannot resume with changed {key}; use the original model endpoint. Saved artifacts remain readable.')

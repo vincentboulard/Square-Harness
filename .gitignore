@@ -19,3 +19,7 @@ mathagent-transcript.json
 
 # Interface build tooling; the built assets in mathagent/gui/static are committed.
 frontend/node_modules/
+
+# Local MLX integration runtime state and synthetic test workspace.
+/.local/
+/workspace/

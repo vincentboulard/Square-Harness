@@ -12,6 +12,7 @@ from urllib.parse import urlparse, quote
 
 from .agent import Agent, AgentError, Ollama
 from .backends import OpenAICompatible, create_client
+from .api_profiles import MLX, resolve_api_profile
 from .prompts import MODES
 from .proof import ProofRunner
 from .ledger import ProofStore
@@ -140,6 +141,8 @@ def parser():
     p.add_argument('--version', action='version', version='Square Harness ' + __version__)
     p.add_argument('--backend', choices=('ollama', 'openai', 'llamacpp'), default='ollama',
                    help='Model protocol: ollama, openai (vLLM), or llamacpp (with exact context checks)')
+    p.add_argument('--api-profile', choices=('default', 'mlx'), default=None,
+                   help='OpenAI API dialect: default (vLLM) or mlx; overrides SQUARE_OPENAI_PROFILE')
     p.add_argument('--model', default=None, help='Served model ID (default: qwen3.8:27b for Ollama; square-qwen for other servers)')
     p.add_argument('--workspace', type=Path, default=Path.cwd())
     p.add_argument('--host', default=None, help='Server URL (default: localhost:11434 for Ollama; localhost:8000 for other servers)')
@@ -233,6 +236,12 @@ def show_ledger(ui, store):
 def main():
     p = parser()
     args = p.parse_args()
+    try:
+        args.api_profile = resolve_api_profile(args.api_profile) if args.backend == 'openai' else (args.api_profile or 'default')
+    except AgentError as exc:
+        p.error(str(exc))
+    if args.api_profile != 'default' and args.backend != 'openai':
+        p.error('--api-profile mlx requires --backend openai')
     args.host = args.host or ('http://localhost:11434' if args.backend == 'ollama' else 'http://localhost:8000')
     args.model = args.model or ('qwen3.8:27b' if args.backend == 'ollama' else 'square-qwen')
     if (not math.isfinite(args.temperature) or not 0 <= args.temperature <= 2
@@ -297,6 +306,7 @@ def main():
             max_requests=args.research_requests, max_chars=args.research_chars)
         workspace = Workspace(args.workspace, ui.approve, args.allow_python, literature=literature)
         client = (Ollama(args.host, timeout=args.request_timeout) if args.backend == 'ollama'
+                  else MLX(args.host, timeout=args.request_timeout) if args.backend == 'openai' and args.api_profile == 'mlx'
                   else OpenAICompatible(args.host, timeout=args.request_timeout) if args.backend == 'openai'
                   else create_client('llamacpp', args.host, timeout=args.request_timeout))
         agent = Agent(client, workspace, args.model, args.ctx, args.predict,
